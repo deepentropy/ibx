@@ -119,7 +119,8 @@ impl EClient {
 
             // openOrder then orderStatus for every report of a known order
             // (ibx#473).
-            let client_id = match self.core.order_view(fill.order_id, &self.shared, status) {
+            let view = self.core.order_view(fill.order_id, &self.shared, status);
+            let client_id = match &view {
                 Some(view) => {
                     wrapper.open_order(fill.order_id, &view.contract, &view.order, &view.state);
                     view.client_id
@@ -130,6 +131,10 @@ impl EClient {
                 fill.order_id, status, filled_f, remaining_f,
                 avg_f, perm_id, parent_id, price_f, client_id, "", 0.0,
             );
+            self.core.remember_report(fill.order_id, crate::client_core::OrderReport {
+                view, status: status.into(), filled: filled_f, remaining: remaining_f, avg_fill_price: avg_f,
+                perm_id, parent_id, last_fill_price: price_f, client_id,
+            });
             self.core.record_last_fill_price(fill.order_id, price_f);
 
             // Update open order tracking
@@ -152,37 +157,41 @@ impl EClient {
             }
         }
 
-        // Commission reports, sent once their execution is known (ibx#471).
+        // Commission reports, sent once their execution is known (ibx#471),
+        // after the order's openOrder and orderStatus once more (ibx#486).
         for report in self.shared.orders.drain_commission_reports() {
             if self.core.apply_commission(&report) {
+                if let Some((order_id, last)) = self.core.report_of_commission(&report) {
+                    Self::repeat_order_report(wrapper, order_id, &last);
+                }
                 wrapper.commission_and_fees_report(&report);
             }
         }
 
-        // Order errors (refused before sending, or rejected by the server)
-        // → error, ahead of the status: the reference reports a server
-        // reject as error 201 before the Inactive status (ibx#250).
+        // Order errors (refused before sending, warnings of a report) →
+        // error, ahead of the status.
         for (order_id, code, msg) in self.shared.orders.drain_order_errors() {
+            self.core.note_order_error(order_id, code);
             wrapper.error(order_id, code, &msg, "");
         }
 
         // Order updates → open_order + order_status for every report of a
         // known order; a cancel gives order_status only (ibx#473).
+        let mut reported = std::collections::HashMap::new();
         for update in self.shared.orders.drain_order_updates() {
-            let status = order_status_str(update.status);
-            let filled_f = update.filled_qty_fixed as f64 / QTY_SCALE_F;
-            let remaining_f = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
-            let view = self.core.order_view(update.order_id, &self.shared, status);
-            if let Some(v) = view.as_ref().filter(|_| status != "Cancelled") {
-                wrapper.open_order(update.order_id, &v.contract, &v.order, &v.state);
+            self.report_order_update(wrapper, &update);
+            reported.insert(update.order_id, update);
+        }
+
+        // A server reject (201) and a cancel (202) after the status of
+        // their report, as the reference writes them; a reject then gives
+        // the order and its status once more (ibx#486; every four-leg
+        // recording of 26/09 to 02/10/2026).
+        for (order_id, code, msg) in self.shared.orders.drain_order_notices() {
+            wrapper.error(order_id, code, &msg, "");
+            if let Some(update) = reported.get(&order_id).filter(|_| code == 201) {
+                self.report_order_update(wrapper, update);
             }
-            let (last_fill_price, client_id) = view.map(|v| (v.last_fill_price, v.client_id)).unwrap_or((0.0, 0));
-            wrapper.order_status(
-                update.order_id, status, filled_f,
-                remaining_f, update.avg_fill_price as f64 / PRICE_SCALE_F,
-                update.perm_id, update.parent_id, last_fill_price, client_id, "", 0.0,
-            );
-            self.core.update_order_status(update.order_id, status, filled_f, remaining_f);
         }
 
         // A server reject of a cancel or modify gives no callback, as the
@@ -203,6 +212,10 @@ impl EClient {
             let (mut contract, mut order) = tracked.unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
             // A combo shows its combo (ibx#470).
             ClientCore::apply_combo_view(wi.order_id, &mut contract, &mut order, &self.shared);
+            // The preview's order carries the account and the client id,
+            // as the reference's (ibx#486, b1_462_whatif of 02/10/2026).
+            if order.account.is_empty() { order.account = self.account_id.clone(); }
+            order.client_id = self.core.client_id.load(std::sync::atomic::Ordering::Relaxed) as i32;
             wrapper.open_order(wi.order_id, &contract, &order, &state);
             if !wi.state.reject_reason.is_empty() {
                 wrapper.error(wi.order_id, 201, &format!("Order rejected - reason:{}", wi.state.reject_reason), "");
@@ -212,6 +225,36 @@ impl EClient {
         for _ in released {
             self.answer_open_orders(wrapper);
         }
+    }
+
+    /// openOrder (not for a cancel) and orderStatus of an order update
+    /// (ibx#473).
+    fn report_order_update(&self, wrapper: &mut impl Wrapper, update: &OrderUpdate) {
+        let status = order_status_str(update.status);
+        let filled_f = update.filled_qty_fixed as f64 / QTY_SCALE_F;
+        let remaining_f = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
+        let view = self.core.order_view(update.order_id, &self.shared, status);
+        let (last_fill_price, client_id) = view.as_ref().map(|v| (v.last_fill_price, v.client_id)).unwrap_or((0.0, 0));
+        let view = view.filter(|_| status != "Cancelled");
+        let report = crate::client_core::OrderReport {
+            view, status: status.into(), filled: filled_f, remaining: remaining_f,
+            avg_fill_price: update.avg_fill_price as f64 / PRICE_SCALE_F,
+            perm_id: update.perm_id, parent_id: update.parent_id, last_fill_price, client_id,
+        };
+        Self::repeat_order_report(wrapper, update.order_id, &report);
+        self.core.remember_report(update.order_id, report);
+        self.core.update_order_status(update.order_id, status, filled_f, remaining_f);
+    }
+
+    /// openOrder (when the report has one) and orderStatus of a report.
+    fn repeat_order_report(wrapper: &mut impl Wrapper, order_id: i64, r: &crate::client_core::OrderReport) {
+        if let Some(v) = &r.view {
+            wrapper.open_order(order_id, &v.contract, &v.order, &v.state);
+        }
+        wrapper.order_status(
+            order_id, &r.status, r.filled, r.remaining, r.avg_fill_price,
+            r.perm_id, r.parent_id, r.last_fill_price, r.client_id, "", 0.0,
+        );
     }
 
     // ── Quote Dispatch ──

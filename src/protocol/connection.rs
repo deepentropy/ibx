@@ -203,6 +203,15 @@ impl Connection {
         Self::on(Stream::Mem(stream))
     }
 
+    /// The read wait of an in-memory connection (tests); zero makes a read
+    /// return at once. No effect on a socket.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_mem_read_timeout(&self, timeout: std::time::Duration) {
+        if let Stream::Mem(s) = &self.stream {
+            let _ = s.set_read_timeout(Some(timeout));
+        }
+    }
+
     /// Set HMAC keys and IVs after authentication.
     pub fn set_keys(
         &mut self,

@@ -298,6 +298,6 @@ mod tests {
 
     #[test]
     fn ewrapper_can_be_constructed() {
-        let _w = EWrapper::new();
+        let _w = EWrapper;
     }
 }

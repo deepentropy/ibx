@@ -21,5 +21,9 @@ mod python;
 #[doc(hidden)]
 pub mod test_support;
 
+/// Golden codec tests from recorded reference frames (ibx#486).
+#[cfg(test)]
+mod golden;
+
 // Re-exports for convenience.
 pub use api::{EClient, EClientConfig, Wrapper};

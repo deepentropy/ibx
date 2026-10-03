@@ -2769,23 +2769,26 @@ fn process_msgs_reports_a_fractional_fill_in_shares() {
     assert!(w.events.iter().any(|e| e == "exec_details:-1:BOT:0.5"), "{:?}", w.events);
 }
 
-// ibx#250: the reference delivers a server reject's error 201 before the
-// Inactive status (ib-agent#192 C1).
+// ibx#250, ibx#486: a server reject gives the Inactive status, then error
+// 201 with the reason, then the status once more, as the reference (every
+// 39=8 of the four-leg recordings of 26/09 to 02/10/2026).
 #[test]
-fn process_msgs_delivers_a_reject_error_before_the_status() {
+fn process_msgs_delivers_a_reject_error_after_the_status_and_the_status_again() {
     let (client, _rx, shared) = test_client();
-    shared.orders.push_order_error(47, 201, "Order rejected - reason:too big".into());
     shared.orders.push_order_update(OrderUpdate {
         order_id: 47, instrument: 0, status: OrderStatus::Rejected,
         filled_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, remaining_qty_fixed: (0) as i64 * crate::types::QTY_SCALE, avg_fill_price: 0,
         perm_id: 0, parent_id: 0, timestamp_ns: 0,
     });
+    shared.orders.push_order_notice(47, 201, "Order rejected - reason:too big".into());
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    let error = w.events.iter().position(|e| e == "error:47:201:Order rejected - reason:too big");
-    let status = w.events.iter().position(|e| e.starts_with("order_status:47:Inactive"));
-    assert!(error.is_some() && status.is_some(), "{:?}", w.events);
-    assert!(error < status, "error first: {:?}", w.events);
+    let order: Vec<&str> = w.events.iter().map(|e| e.as_str())
+        .filter(|e| e.starts_with("error:47:") || e.starts_with("order_status:47:")).collect();
+    assert_eq!(order.len(), 3, "{:?}", w.events);
+    assert!(order[0].starts_with("order_status:47:Inactive"), "{order:?}");
+    assert_eq!(order[1], "error:47:201:Order rejected - reason:too big");
+    assert!(order[2].starts_with("order_status:47:Inactive"), "{order:?}");
 }
 
 // ibx#315: filled and avgFillPrice are the order totals the fill report
@@ -4375,7 +4378,8 @@ fn captured_report() -> crate::api::types::CommissionAndFeesReport {
 }
 
 // The fill carries no commission: the report comes from the commission
-// frame, after exec_details, with the server's values.
+// frame, after exec_details, with the server's values; the order's
+// orderStatus is given again first, as the reference (ibx#486).
 #[test]
 fn commission_report_comes_from_the_commission_frame() {
     let (client, _rx, shared) = test_client();
@@ -4387,7 +4391,7 @@ fn commission_report_comes_from_the_commission_frame() {
     shared.orders.push_commission_report(captured_report());
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert_eq!(w.events, ["commission:0000e0d5.6ab5f36f.01.01:1.0003:USD"]);
+    assert_eq!(w.events, ["order_status:7:Filled:100:0:336", "commission:0000e0d5.6ab5f36f.01.01:1.0003:USD"]);
 
     let mut w = RecordingWrapper::default();
     client.req_executions(1, &crate::api::types::ExecutionFilter::default(), &mut w);

@@ -89,7 +89,13 @@ impl BarDataType {
     /// writes it: the API name with its first letter in capitals and the
     /// rest in lower case (`Trades`, `Midpoint`, `Bid_ask`).
     pub fn label(&self) -> String {
-        let api = match self {
+        capitalized(self.api_name())
+    }
+
+    /// The official API name of the type (`TRADES`, `MIDPOINT`), as the
+    /// head timestamp query id carries it (ibx#486).
+    pub fn api_name(&self) -> &'static str {
+        match self {
             Self::Trades => "TRADES",
             Self::Midpoint => "MIDPOINT",
             Self::Bid => "BID",
@@ -108,8 +114,7 @@ impl BarDataType {
             Self::FeeRate => "FEE_RATE",
             Self::Schedule => "SCHEDULE",
             Self::AggTrades => "AGGTRADES",
-        };
-        capitalized(api)
+        }
     }
 
     /// Server queries one bar request needs: BID_ASK is answered from a Bid
@@ -701,13 +706,14 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
     let expired = if req.include_expired { "yes" } else { "no" };
 
     let data_str = req.data_type.as_str();
-    // A live query carries the chart name, as the reference writes it:
-    // symbol, API exchange and type label (ibx#429).
-    let query_id = if req.keep_up_to_date {
-        format!("{};;{};;1;;true;;0;;I", req.query_id, chart_name(&req.symbol, &req.exchange, &req.data_type.label()))
-    } else {
-        req.query_id.clone()
-    };
+    // The query id carries the chart name, as the reference writes it:
+    // symbol, API exchange and type label (ibx#429; a one-shot query too,
+    // ibx#486: `cf76;;AAPL@SMART Trades;;1;;true;;0;;I`).
+    let query_id = format!("{};;{};;1;;true;;0;;I", req.query_id, chart_name(&req.symbol, &req.exchange, &req.data_type.label()));
+    // Whole days for daily and longer bars (`hmdscore.xml.Query.a(settings.b,
+    // boolean, boolean)@119-167`, `settings.b.l()` = shorter than a day;
+    // captured: 1 day bars true, 1 hour false, ibx#486).
+    let whole_days = !req.bar_size.is_intraday();
 
     let (end_time_tag, refresh_tag) = if req.keep_up_to_date {
         (String::new(), "<refresh>5 secs</refresh>")
@@ -728,13 +734,12 @@ pub fn build_query_xml(req: &HistoricalRequest) -> String {
          <type>BarData</type>\
          <data>{data}</data>\
          {end_time}\
-         <cutoffDate>20090224</cutoffDate>\
          {refresh}\
          <timeLength>{dur}</timeLength>\
          <step>{step}</step>\
          <source>API</source>\
          <needTotalValue>false</needTotalValue>\
-         <wholeDays>false</wholeDays>\
+         <wholeDays>{whole_days}</wholeDays>\
          <delay>auto</delay>\
          {native}\
          </Query>\
@@ -1127,8 +1132,10 @@ pub fn build_head_timestamp_xml(req: &HeadTimestampRequest) -> String {
     let exchange = query_exchange(&req.exchange, &req.sec_type);
     let sec_type = query_sec_type(&req.sec_type);
     // As the reference, the id does not carry useRTH.
+    // The data label is the API name (ibx#486, captured
+    // `TickHeadClient1;;265598@BEST TRADES;;0;;true;;0;;U`).
     let id = format!("{};;{}@{} {};;0;;true;;0;;U",
-        req.window_id, req.con_id, exchange, req.data_type.as_str());
+        req.window_id, req.con_id, exchange, req.data_type.api_name());
 
     // The head timestamp query always asks for regular hours (ibx#305).
     format!(
@@ -2009,7 +2016,13 @@ mod tests {
             include_expired: false,
         };
         let xml = build_query_xml(&req);
-        assert!(xml.contains("<id>q1</id>"));
+        // ibx#486: the chart name in a one-shot id too; no cutoff date;
+        // whole days only for daily bars.
+        assert!(xml.contains("<id>q1;;AAPL@SMART Trades;;1;;true;;0;;I</id>"), "{xml}");
+        assert!(!xml.contains("cutoffDate"), "{xml}");
+        assert!(xml.contains("<wholeDays>false</wholeDays>"), "{xml}");
+        let daily = build_query_xml(&HistoricalRequest { bar_size: BarSize::Day1, ..req.clone() });
+        assert!(daily.contains("<wholeDays>true</wholeDays>"), "{daily}");
         assert!(xml.contains("<contractID>265598</contractID>"));
         assert!(xml.contains("<exchange>BEST</exchange>")); // SMART→BEST
         assert!(xml.contains("<secType>STK</secType>"));
@@ -2257,7 +2270,7 @@ mod tests {
         assert!(xml.contains("<data>Last</data>"));
         assert!(xml.contains("<step>-1</step>"));
         assert!(xml.contains("<useRTH>true</useRTH>"));
-        assert!(xml.contains("TickHeadClient1;;756733@BEST Last;;0;;true;;0;;U"));
+        assert!(xml.contains("TickHeadClient1;;756733@BEST TRADES;;0;;true;;0;;U"), "{xml}");
         assert!(xml.contains("<secType>STK</secType>"));
     }
 
@@ -2276,7 +2289,7 @@ mod tests {
         assert!(xml.contains("<useRTH>true</useRTH>"), "{}", xml);
         assert!(xml.contains("<exchange>CME</exchange><secType>FUT</secType><type>TickHeadTimeStamp</type>"), "{}", xml);
         // ibx#428: the request's own window id, without useRTH.
-        assert!(xml.contains("<id>TickHeadClient7;;815824267@CME Last;;0;;true;;0;;U</id>"), "{}", xml);
+        assert!(xml.contains("<id>TickHeadClient7;;815824267@CME TRADES;;0;;true;;0;;U</id>"), "{}", xml);
     }
 
     #[test]

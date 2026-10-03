@@ -2391,6 +2391,23 @@ impl HotLoop {
         &mut self.hb
     }
 
+    /// One turn of the loop, for the replay tests (ibx#486): read the farm,
+    /// historical and auth links, send the pending orders, take the control
+    /// commands and write what waits. No liveness checks, no reconnects, no
+    /// farms opened on demand: a test drives the links itself.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn step_for_test(&mut self) {
+        self.farm.poll_market_data(&mut self.farm_conn, &mut self.context, &self.shared, &self.event_tx, &mut self.hb);
+        self.hmds.poll(&mut self.hmds_conn, &self.shared, &self.event_tx, &mut self.hb);
+        order_builder::drain_and_send_orders(
+            &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
+            self.ccp.disconnected, &self.shared,
+        );
+        self.poll_auth();
+        self.poll_control_commands();
+        self.check_writes();
+    }
+
     /// Inject a raw farm message for testing. Processes it through the full decode pipeline.
     #[cfg(any(test, feature = "test-support"))]
     pub fn inject_farm_message(&mut self, msg: &[u8]) {

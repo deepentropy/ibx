@@ -1579,6 +1579,8 @@ fn cancel_refusal(context: &Context, order_id: crate::types::OrderId) -> Option<
             )),
         },
     };
+    // "cannot" as the reference's API message (every capture, 23/09 to
+    // 02/10/2026; the catalog text says "can not", ibx#486).
     Some((
         10148,
         format!(
@@ -1673,33 +1675,20 @@ fn fix_side(side: Side) -> &'static str {
     }
 }
 
-/// Synthesize the PendingCancel phase when a cancel request goes out
-/// (ibx#211): the server acks a normal cancel with the terminal code only —
-/// it never sends the pending-cancel code — so without this local
-/// transition consumers jump straight from Submitted to Cancelled. The
-/// server's ack (or a fill that raced the cancel) then advances the status;
-/// a cancel reject restores the working status via the forced setter.
+/// The PendingCancel phase when a cancel request goes out (ibx#211): the
+/// server acks a normal cancel with the terminal code only, so the order is
+/// set PendingCancel here and the server's next report shows it. No
+/// callback at the cancel itself: the reference gives none until a report
+/// comes (every cancel of the four-leg recordings of 26/09 to 02/10/2026,
+/// ibx#486). A cancel reject restores the working status via the forced
+/// setter.
 fn synthesize_pending_cancel(
     context: &mut Context,
-    shared: &Arc<SharedState>,
+    _shared: &Arc<SharedState>,
     order_id: crate::types::OrderId,
 ) {
-    if !context.update_order_status(order_id, OrderStatus::PendingCancel) {
-        return; // unknown order, already terminal, or already pending-cancel
-    }
-    if let Some(order) = context.order(order_id).copied() {
-        shared.orders.push_order_update(OrderUpdate {
-            avg_fill_price: 0,
-            order_id,
-            instrument: order.instrument,
-            status: OrderStatus::PendingCancel,
-            filled_qty_fixed: order.filled_fixed,
-            remaining_qty_fixed: order.qty_fixed - order.filled_fixed,
-            perm_id: 0,
-            parent_id: 0,
-            timestamp_ns: context.now_ns(),
-        });
-    }
+    // Unknown order, already terminal, or already pending-cancel: no change.
+    let _ = context.update_order_status(order_id, OrderStatus::PendingCancel);
 }
 
 /// OCA type of a bracket child with no type given: the default type, as the
@@ -1886,7 +1875,7 @@ fn rank_in_frame(tag: u32, touched: bool) -> u16 {
 }
 
 /// The place of a field in the reference's new-order writer (ibx#375).
-pub(super) fn reference_rank(tag: u32) -> u16 {
+pub(crate) fn reference_rank(tag: u32) -> u16 {
     match tag {
         fix::TAG_MSG_TYPE => 0,
         fix::TAG_SENDING_TIME => 1,
@@ -3107,10 +3096,11 @@ mod tests {
         }
     }
 
-    // ibx#211: an outbound cancel synthesizes the PendingCancel phase the
-    // server never sends for a normal cancel.
+    // ibx#211: an outbound cancel sets the PendingCancel phase the server
+    // never sends for a normal cancel; ibx#486: with no callback until the
+    // server's next report, as the reference.
     #[test]
-    fn synthesize_pending_cancel_updates_and_notifies() {
+    fn synthesize_pending_cancel_sets_the_status_without_a_callback() {
         let mut context = Context::new();
         let shared = Arc::new(SharedState::new());
         context.insert_order(order(7, 3, OrderStatus::PartiallyFilled));
@@ -3118,11 +3108,7 @@ mod tests {
         synthesize_pending_cancel(&mut context, &shared, 7);
 
         assert_eq!(context.order(7).unwrap().status, OrderStatus::PendingCancel);
-        let updates = shared.orders.drain_order_updates();
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].status, OrderStatus::PendingCancel);
-        assert_eq!(updates[0].filled_qty_fixed / crate::types::QTY_SCALE, 3);
-        assert_eq!(updates[0].remaining_qty_fixed / crate::types::QTY_SCALE, 7);
+        assert!(shared.orders.drain_order_updates().is_empty());
     }
 
     /// Encode one order request through `drain_and_send_orders` to a

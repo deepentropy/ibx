@@ -86,7 +86,9 @@ pub(crate) fn fix_utc_to_unix_secs(s: &str) -> Option<i64> {
 }
 
 /// Text of warning 399 for an order message (ibx#465): "Order Message:
-/// {action} {quantity} {symbol} {exchange} {text}". The exchange is the
+/// {action} {quantity} {symbol} {exchange}
+/// {text}", three lines (the API
+/// message of the four-leg recordings, ibx#486). The exchange is the
 /// listing as the contract details give it, `{primaryExchange}.{marketName}`
 /// (NASDAQ.NMS for AAPL, as in the capture; the form is only checked for
 /// AAPL), else the primary exchange, else the order's exchange.
@@ -121,7 +123,7 @@ fn order_message_399(
             .map(|e| crate::control::contracts::exchange_from_fix(e).to_string())
             .unwrap_or_default(),
     };
-    format!("Order Message: {} {} {} {} {}", action, quantity, symbol, exchange, text)
+    format!("Order Message:\n{} {} {} {}\n{}", action, quantity, symbol, exchange, text)
 }
 
 /// Split an execution id into the id without its revision and the
@@ -210,6 +212,9 @@ fn perm_id_from_fix_order_id(s: &str) -> i64 {
 }
 
 pub(crate) struct CcpState {
+    /// The group of each account summary subscription, which its cancel
+    /// restates (ibx#486).
+    pub(crate) summary_groups: std::collections::HashMap<String, String>,
     pub(crate) seen_exec_ids: HashSet<String>,
     /// Insertion order for `seen_exec_ids`, oldest at the front. Used to evict
     /// one entry at a time once the dedup window is full, instead of clearing
@@ -629,6 +634,7 @@ fn strike_divided_by_100(strike: &str) -> String {
 impl CcpState {
     pub(crate) fn new() -> Self {
         Self {
+            summary_groups: std::collections::HashMap::new(),
             seen_exec_ids: HashSet::with_capacity(256),
             exec_id_order: VecDeque::with_capacity(256),
             commission_revisions: std::collections::HashMap::with_capacity(256),
@@ -1464,18 +1470,26 @@ impl CcpState {
             context.apply_order_status(clord_id, status)
         };
         let status_changed = change == crate::engine::context::StatusChange::Changed;
-        let report_status = matches!(change,
-            crate::engine::context::StatusChange::Changed | crate::engine::context::StatusChange::Same)
+        // A working report of an order whose cancel went out: the reference
+        // reports it with the order's PendingCancel status (ibx#486,
+        // modify_cancelled of 26/09/2026: 39=A and 39=0 after the 35=F).
+        let pending_cancel = change == crate::engine::context::StatusChange::Stale
+            && !status.is_terminal()
+            && context.order(clord_id).is_some_and(|o| o.status == crate::types::OrderStatus::PendingCancel);
+        let report_status = (pending_cancel || matches!(change,
+            crate::engine::context::StatusChange::Changed | crate::engine::context::StatusChange::Same))
             && !matches!(ord_status, "E" | "I");
 
         // The reference reports a server reject as error 201 with the
-        // server's reason (ib-agent#192 C1, ibx#250). Only on the first
-        // transition of an order this session tracks: the "No such order"
-        // frames that follow a cancel of an order already gone are not
-        // shown by the reference (C2).
+        // server's reason (ib-agent#192 C1, ibx#250), after the Inactive
+        // status (ibx#486). Only on the first transition of an order this
+        // session tracks: the "No such order" frames that follow a cancel
+        // of an order already gone are not shown by the reference (C2).
+        // The notice is queued after this report's status, below.
+        let mut notice_out: Option<(i64, String)> = None;
         if status == crate::types::OrderStatus::Rejected && status_changed {
             let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("");
-            shared.orders.push_order_error(clord_id, 201, format!("Order rejected - reason:{}", reason));
+            notice_out = Some((201, format!("Order rejected - reason:{}", reason)));
         }
         // The limit offset, limit price and stop price the server reports
         // for a TRAIL LIMIT (6370, 44, 6117): the offset is restated on its
@@ -1497,19 +1511,20 @@ impl CcpState {
             }
         }
         // A cancel of an order of this session: error 202 with the server's
-        // reason, before the Cancelled status, as the reference (ibx#465;
-        // captured 25/09/2026, empty reason for a user cancel). Not for a
-        // status report in the rejected state: the reference sets that one
-        // cancelled without the notice (ibx#252).
+        // reason, after the Cancelled status, as the reference (ibx#465,
+        // ibx#486: every four-leg recording of 26/09 to 02/10/2026; empty
+        // reason for a user cancel). Not for a status report in the
+        // rejected state: the reference sets that one cancelled without the
+        // notice (ibx#252).
         if status == crate::types::OrderStatus::Cancelled && status_changed && ord_status != "8" {
             let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("");
-            shared.orders.push_order_error(clord_id, 202, format!("Order Canceled - reason:{}", reason));
+            notice_out = Some((202, format!("Order Canceled - reason:{}", reason)));
         }
         // An order message of the server (6360 type, 6361 text): the
         // reference reports the TIME one as warning 399, once, and the order
         // keeps its status (ibx#465; captured 25/09/2026 on an OPG order:
-        // "Order Message: BUY 1 AAPL NASDAQ.NMS Warning: your order will not
-        // be placed at the exchange until ..."). The other types (PRICECAP
+        // "Order Message:\nBUY 1 AAPL NASDAQ.NMS\nWarning: your order will
+        // not be placed at the exchange until ..."). The other types (PRICECAP
         // in the capture) did not reach the API.
         if parsed.get(&6360).map(|s| s.as_str()) == Some("TIME") && context.order(clord_id).is_some() {
             if let Some(text) = parsed.get(&6361).filter(|t| !t.is_empty()) {
@@ -1621,12 +1636,21 @@ impl CcpState {
                 // Filled so far as the server counts it (tag 14): an order
                 // recovered at session start has no prints in this session.
                 let filled = parsed.get(&14).and_then(|s| parse_qty(s)).unwrap_or(order.filled_fixed);
+                // A cancel or a reject reports 151=0; the reference's
+                // remaining stays what was not filled (every four-leg
+                // recording of 26/09 to 02/10/2026: Cancelled and Inactive
+                // with 1 remaining of 1, ibx#486).
+                let remaining = match order.status {
+                    crate::types::OrderStatus::Cancelled | crate::types::OrderStatus::Rejected =>
+                        (order.qty_fixed - filled).max(0),
+                    _ => leaves_qty,
+                };
                 let update = crate::types::OrderUpdate {
                     order_id: clord_id,
                     instrument: order.instrument,
                     status: order.status,
                     filled_qty_fixed: filled,
-                    remaining_qty_fixed: leaves_qty,
+                    remaining_qty_fixed: remaining,
                     avg_fill_price: (avg_px * PRICE_SCALE as f64).round() as i64,
                     perm_id,
                     parent_id,
@@ -1651,7 +1675,12 @@ impl CcpState {
             let ord_type_tag = parsed.get(&40).map(|s| s.as_str()).unwrap_or("");
             let limit_price: f64 = parsed.get(&44).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let stop_px: f64 = parsed.get(&99).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let outside_rth = parsed.get(&6433).map(|s| s == "1").unwrap_or(false);
+            // Kept once a report gave it: the reference's order shows it
+            // from then on, also when later reports leave it out (ibx#486,
+            // premarket_order_types of 28/09/2026: an IOC placed without
+            // it, a report with 6433=1, then openOrder outsideRth true).
+            let outside_rth = parsed.get(&6433).is_some_and(|s| s == "1")
+                || shared.orders.get_order_info(clord_id).is_some_and(|i| i.order.outside_rth);
             let clearing_intent = parsed.get(&6419).cloned().unwrap_or_default();
             let auto_cancel_date = parsed.get(&6596).cloned().unwrap_or_default();
             let exec_exchange = parsed.get(&30).cloned().unwrap_or_default();
@@ -1880,6 +1909,9 @@ impl CcpState {
         if let Some(update) = update_out {
             shared.orders.push_order_update(update);
             emit(event_tx, Event::OrderUpdate(update));
+        }
+        if let Some((code, text)) = notice_out {
+            shared.orders.push_order_notice(clord_id, code, text);
         }
 
         if matches!(status,
@@ -2366,7 +2398,9 @@ impl CcpState {
 
     /// Account summary subscription (ibx#479), as the reference writes it:
     /// `6040=55|6036=1|6529={sr_id}|6374={tags}|6160={group}` to subscribe,
-    /// `6036=0` with the same id to cancel (`subscribe` is `None`).
+    /// `6036=0` with the same id and the group to cancel (`subscribe` is
+    /// `None`; ibx#486, account_summary of 26/09/2026:
+    /// `35=U|6040=55|6036=0|6529=SR.Socket.39|6160=All`).
     pub(crate) fn send_account_summary(
         &mut self,
         sr_id: &str,
@@ -2385,6 +2419,11 @@ impl CcpState {
         ];
         if let Some((tags, group)) = subscribe {
             fields.push((6374, tags));
+            fields.push((6160, group));
+            self.summary_groups.insert(sr_id.to_string(), group.to_string());
+        }
+        let group = if subscribe.is_none() { self.summary_groups.remove(sr_id) } else { None };
+        if let Some(group) = &group {
             fields.push((6160, group));
         }
         let _ = conn.send_fix(&fields);
@@ -4493,7 +4532,7 @@ mod tests {
         let frame = exec_report_frame(&[(11, "42.0"), (20, "0"), (39, "8"), (150, "8"), (58, "no")]);
         ccp.handle_exec_report(&frame, &mut context, &shared, &None, "DU1");
         assert_eq!(context.finished_status(42), Some(OrderStatus::Rejected));
-        assert_eq!(shared.orders.drain_order_errors()[0].1, 201);
+        assert_eq!(shared.orders.drain_order_notices()[0].1, 201);
     }
 
     // ibx#472: the reference handles 39=E and 39=I as invalid statuses: no
@@ -6065,7 +6104,9 @@ mod tests {
         ccp.handle_exec_report(&frame("91", "A"), &mut context, &shared, &None, "");
         assert!(shared.orders.drain_order_errors().is_empty(), "no error on the acknowledgement");
         ccp.handle_exec_report(&frame("91", "8"), &mut context, &shared, &None, "");
-        assert_eq!(shared.orders.drain_order_errors(), vec![
+        // A notice given after the report's status (ibx#486).
+        assert!(shared.orders.drain_order_errors().is_empty());
+        assert_eq!(shared.orders.drain_order_notices(), vec![
             (91, 201, "Order rejected - reason:Display size should be a multiple of lot size".to_string()),
         ]);
 
@@ -6073,6 +6114,7 @@ mod tests {
         ccp.handle_exec_report(&frame("91", "8"), &mut context, &shared, &None, "");
         ccp.handle_exec_report(&frame("92", "8"), &mut context, &shared, &None, "");
         assert!(shared.orders.drain_order_errors().is_empty());
+        assert!(shared.orders.drain_order_notices().is_empty());
     }
 
     // req_global_cancel sends a cancel-all for each id below the shared
@@ -6235,12 +6277,12 @@ mod tests {
         ccp.handle_exec_report(&routed, &mut context, &shared, &None, "");
         let done = exec_report_frame(&[(39, "4"), (150, "4")]);
         ccp.handle_exec_report(&done, &mut context, &shared, &None, "");
-        assert_eq!(shared.orders.drain_order_errors(), [(42, 202, "Order Canceled - reason:".to_string())]);
+        assert_eq!(shared.orders.drain_order_notices(), [(42, 202, "Order Canceled - reason:".to_string())]);
 
         let (mut ccp, mut context, shared) = ord_status_test_state();
         let done = exec_report_frame(&[(39, "4"), (150, "4"), (58, "Order expired")]);
         ccp.handle_exec_report(&done, &mut context, &shared, &None, "");
-        assert_eq!(shared.orders.drain_order_errors(), [(42, 202, "Order Canceled - reason:Order expired".to_string())]);
+        assert_eq!(shared.orders.drain_order_notices(), [(42, 202, "Order Canceled - reason:Order expired".to_string())]);
     }
 
     // ibx#465: the captured order message of an OPG order before the open.
@@ -6257,7 +6299,7 @@ mod tests {
         ccp.handle_exec_report(&ack, &mut context, &shared, &None, "");
         ccp.handle_exec_report(&ack, &mut context, &shared, &None, "");
         assert_eq!(shared.orders.drain_order_errors(),
-            [(42, 399, format!("Order Message: BUY 1 AAPL NASDAQ.NMS {}", text))], "once");
+            [(42, 399, format!("Order Message:\nBUY 1 AAPL NASDAQ.NMS\n{}", text))], "once");
         assert_eq!(context.order(42).unwrap().status, crate::types::OrderStatus::PreSubmitted, "the order keeps working");
 
         // Another message type did not reach the API in the capture.
