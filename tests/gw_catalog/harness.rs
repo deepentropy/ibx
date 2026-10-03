@@ -35,6 +35,9 @@ pub struct Engine {
     pub shared: Arc<SharedState>,
     control: Sender<ControlCommand>,
     ccp: Peer,
+    /// The market data farm, open for the whole test: a closed one is a
+    /// lost link (2103) among the errors.
+    _farm: Peer,
     handle: Option<JoinHandle<()>>,
     /// Every order message (35=D, 35=G, 35=F) the server got so far.
     orders: Vec<Fields>,
@@ -46,7 +49,7 @@ impl Engine {
     pub fn start() -> Self {
         let shared = Arc::new(SharedState::new());
         shared.reference.set_api_client_id(39);
-        let (farm_conn, _farm) = Peer::pair();
+        let (farm_conn, farm) = Peer::pair();
         let (mut ccp_conn, mut ccp) = Peer::pair();
         let mac_key: Vec<u8> = (1..=20).collect();
         ccp_conn.set_keys(mac_key.clone(), (0..16).collect(), mac_key, (16..32).collect());
@@ -55,7 +58,7 @@ impl Engine {
             shared.clone(), None, "DUXXXXXXX".into(), farm_conn, ccp_conn, None, None);
         let handle = std::thread::spawn(move || engine.run());
         let client = EClient::from_parts(shared.clone(), control.clone(), std::thread::spawn(|| {}), "DUXXXXXXX".into());
-        Self { client, shared, control, ccp, handle: Some(handle), orders: Vec::new() }
+        Self { client, shared, control, ccp, _farm: farm, handle: Some(handle), orders: Vec::new() }
     }
 
     /// Register a contract with the engine (as the API client does on its
