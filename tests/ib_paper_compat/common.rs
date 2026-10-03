@@ -41,11 +41,36 @@ fn count_phase_failure() {
     PHASE_FAILURES.with(|c| c.set(c.get() + 1));
 }
 
+/// The order errors (local refusals, warnings) and the notices of the
+/// server reports (201 reject, 202 cancel), which the reference gives after
+/// the report's status (ibx#486; every 39=8 and 39=4 of the four-leg
+/// recordings of 26/09 to 02/10/2026). Drains both queues.
+pub(super) fn drain_order_messages(shared: &SharedState) -> Vec<(i64, i64, String)> {
+    let mut out = shared.orders.drain_order_errors();
+    out.extend(shared.orders.drain_order_notices());
+    out
+}
+
+/// The order messages after a Rejected status: its 201 follows the status
+/// (ibx#486), so wait for it, 2 s at most, then drain.
+pub(super) fn drain_after_reject(shared: &SharedState) -> Vec<(i64, i64, String)> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut out = Vec::new();
+    loop {
+        out.extend(drain_order_messages(shared));
+        if out.iter().any(|(_, code, _)| *code == 201) || Instant::now() >= deadline {
+            return out;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Record a rejection as a failure, with the server's reason: the reject
-/// reaches the order error queue as error 201 "Order rejected - reason:...",
-/// as the reference shows it to an API client. Drains that queue.
+/// reaches the client as error 201 "Order rejected - reason:...", after the
+/// Inactive status, as the reference shows it to an API client. Waits for
+/// it, then drains the order messages.
 pub(super) fn record_rejection(what: &str, shared: &SharedState) {
-    let errors: Vec<(i64, String)> = shared.orders.drain_order_errors()
+    let errors: Vec<(i64, String)> = drain_after_reject(shared)
         .into_iter().map(|(_, code, text)| (code, text)).collect();
     record_rejection_with(what, &errors);
 }
@@ -754,7 +779,7 @@ fn run_submit_cancel_phase_inner(
     let mut refused_as_reference = false;
 
     while Instant::now() < deadline {
-        for (oid, code, text) in shared_view.orders.drain_order_errors() {
+        for (oid, code, text) in drain_order_messages(&shared_view) {
             if oid == order_id { order_errors.push((code, text)); }
         }
         if !order_acked && accepted_refusal.is_some_and(|c| order_errors.iter().any(|(code, _)| *code == c)) {
@@ -808,9 +833,11 @@ fn run_submit_cancel_phase_inner(
     }
 
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
-    // The loop stops on the Rejected update, before it drains the error the
-    // reject came with: take what is left.
-    for (oid, code, text) in shared_view.orders.drain_order_errors() {
+    // The loop stops on the Rejected or Cancelled update, before the 201 or
+    // 202 that follows it (ibx#486): take what is left, waiting for the 201
+    // of a reject.
+    let rest = if order_rejected { drain_after_reject(&shared_view) } else { drain_order_messages(&shared_view) };
+    for (oid, code, text) in rest {
         if oid == order_id { order_errors.push((code, text)); }
     }
 

@@ -251,9 +251,9 @@ pub fn tree_dividends(divs: &[Dividend], clock_ms: i64, local: &str) -> Vec<Tree
         .collect()
 }
 
-/// System time zone name used for the end of an ex-date.
+/// Machine time zone name used for the end of an ex-date.
 pub fn local_zone_name() -> String {
-    jiff::tz::TimeZone::system().iana_name().unwrap_or("UTC").to_string()
+    crate::gateway::machine_time_zone()
 }
 
 /// The model clock: set when the model starts, then moved once a minute.

@@ -1,4 +1,4 @@
-{"type":"header","format":"codec/1","scenario":"orders_bracket","area":"orders","source":"20260926/bracket.jsonl","source_scenario":"bracket","capture_date":"26/09/2026","market_session":"closed","gateway_version":"10401","notes":"bracket: the API orders, the gateway's order messages and the server reports"}
+{"type":"header","format":"codec/1","scenario":"orders_bracket","area":"orders","source":"20260926/bracket.jsonl","source_scenario":"bracket","capture_date":"26/09/2026","market_session":"closed","gateway_version":"10401","machine_zone":"Europe/Paris","notes":"bracket: the API orders, the gateway's order messages and the server reports"}
 {"seq":2567,"leg":"api_out","conn":"api:11109","msg_name":"START_API","raw_b64":"AAABDwjGAQ==","request":{"clientId":198}}
 {"seq":2569,"leg":"api_in","conn":"api:11109","msg_name":"NEXT_VALID_ID","raw_b64":"AAAA0QgD","callbacks":[["nextValidId",3]]}
 {"seq":2570,"leg":"api_in","conn":"api:11109","msg_name":"ERR_MSG","raw_b64":"AAAAzAj///////////8BEPKGg/qNNBi4ECIoTWFya2V0IGRhdGEgZmFybSBjb25uZWN0aW9uIGlzIE9LOnVzZmFybQ==","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfarm",""]]}

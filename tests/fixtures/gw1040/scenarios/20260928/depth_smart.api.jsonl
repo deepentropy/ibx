@@ -1,4 +1,4 @@
-{"type":"header","format":"four-leg-api/1","source":"20260928/depth_smart.jsonl","scenario":"i192_e4_depth_deletes","decoder":"official client library 10.46.01"}
+{"type":"header","format":"four-leg-api/1","source":"20260928/depth_smart.jsonl","scenario":"i192_e4_depth_deletes","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
 {"seq":319052,"leg":"api_out","msg_name":"REQ_MKT_DEPTH","request":{"reqId":9460,"contract":{"conId":0,"symbol":"AAPL","secType":"STK","exchange":"SMART","currency":"USD"},"numRows":50,"isSmartDepth":true}}
 {"seq":319454,"leg":"api_in","msg_name":"MARKET_DEPTH_L2","callbacks":[["updateMktDepthL2",9460,0,"NYSENAT",0,1,323.44,"40",true]]}
 {"seq":319455,"leg":"api_in","msg_name":"MARKET_DEPTH_L2","callbacks":[["updateMktDepthL2",9460,0,"NYSENAT",0,0,350.0,"40",true]]}

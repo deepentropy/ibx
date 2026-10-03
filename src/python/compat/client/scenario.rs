@@ -87,6 +87,9 @@ impl EClient {
             let kinds: Vec<&'static str> = known.iter().copied().filter(|k| kinds.iter().any(|w| w == k)).collect();
             opts = opts.compare(&kinds);
         }
+        // The replay runs in the recording's machine zone (`run`); this
+        // thread gets its own zone back after it.
+        let zone_before = crate::gateway::machine_zone_for_test();
         let mut links = Links::new();
         // Attached as a connected client of this engine.
         *self.shared.lock().unwrap() = Some(links.shared.clone());
@@ -96,6 +99,7 @@ impl EClient {
         self.connected.store(true, Ordering::Release);
         let mut d = PyDriver { client: self, driver, error: None };
         let outcome = run(&scenario, &opts, &mut links, &mut d);
+        crate::gateway::set_machine_zone_for_test(zone_before.as_deref());
         if let Some(e) = d.error.take() {
             return Err(e);
         }

@@ -579,8 +579,10 @@ pub fn replay(sc: &Scenario, opts: &Options) -> Outcome {
     run(sc, opts, &mut links, &mut driver)
 }
 
-/// Replay a scenario through `driver` on `links`.
+/// Replay a scenario through `driver` on `links`, in the machine zone of
+/// the recording (`session::zone_of`) on this thread.
 pub fn run(sc: &Scenario, opts: &Options, links: &mut Links, driver: &mut dyn Driver) -> Outcome {
+    crate::gateway::set_machine_zone_for_test(Some(super::session::zone_of(&sc.header)));
     let mut recs = prepare(sc, opts);
     let con_id_given = with_con_ids(&mut recs);
     let mut run = Run {

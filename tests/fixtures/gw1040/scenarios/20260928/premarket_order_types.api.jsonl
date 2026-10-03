@@ -1,4 +1,4 @@
-{"type":"header","format":"four-leg-api/1","source":"20260928/premarket_order_types.jsonl","scenario":"premarket_order_types","decoder":"official client library 10.46.01"}
+{"type":"header","format":"four-leg-api/1","source":"20260928/premarket_order_types.jsonl","scenario":"premarket_order_types","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
 {"seq":21066,"leg":"api_out","msg_name":"START_API","request":{"clientId":261}}
 {"seq":21067,"leg":"api_in","msg_name":"MANAGED_ACCTS","callbacks":[["managedAccounts","DUXXXXXXX"]]}
 {"seq":21068,"leg":"api_in","msg_name":"NEXT_VALID_ID","callbacks":[["nextValidId",1]]}

@@ -1,4 +1,4 @@
-{"type":"header","format":"four-leg-api/1","source":"20260928/depth_smart_status.jsonl","scenario":"i192_e4_depth_deletes","decoder":"official client library 10.46.01"}
+{"type":"header","format":"four-leg-api/1","source":"20260928/depth_smart_status.jsonl","scenario":"i192_e4_depth_deletes","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
 {"seq":319050,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usbond",""]]}
 {"seq":319051,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfuture",""]]}
 {"seq":319052,"leg":"api_out","msg_name":"REQ_MKT_DEPTH","request":{"reqId":9460,"contract":{"conId":0,"symbol":"AAPL","secType":"STK","exchange":"SMART","currency":"USD"},"numRows":50,"isSmartDepth":true}}

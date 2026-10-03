@@ -77,11 +77,18 @@ pub fn load_path(path: &Path) -> Scenario {
         Some("four-leg/1") => true,
         other => panic!("{}: format {other:?}", path.display()),
     };
+    let mut header = header;
     let api: HashMap<u64, Value> = if four_leg {
         let side = path.with_file_name(format!("{}.api.jsonl", path.file_stem().unwrap().to_string_lossy()));
         let text = std::fs::read_to_string(&side).unwrap_or_else(|e| {
             panic!("{}: {e} (made by scripts/codec_fixtures.py --scenarios)", side.display())
         });
+        // The sidecar's header gives the recording machine's zone.
+        if let Some(side_header) = text.lines().next().and_then(|l| serde_json::from_str::<Value>(l).ok())
+            && header["machine_zone"].is_null()
+        {
+            header["machine_zone"] = side_header["machine_zone"].clone();
+        }
         text.lines().skip(1).map(|l| {
             let v: Value = serde_json::from_str(l).unwrap();
             (v["seq"].as_u64().unwrap(), v)

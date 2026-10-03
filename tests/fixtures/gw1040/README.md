@@ -55,7 +55,7 @@ it always comes after the `fix_in` that caused it.
 
 Next to each scenario, its API messages decoded by the official client library, for the scenario replay
 (`test_support::scenario`, tests/scenario_replay.rs): line 1 a header (`format` `four-leg-api/1`, `source`,
-`decoder`), then one line per API record: `seq`, `leg`, `msg_name`, and `request` (`api_out`) or `callbacks`
+`decoder`, `machine_zone`: the zone of the machine that ran the gateway, the replay runs in it), then one line per API record: `seq`, `leg`, `msg_name`, and `request` (`api_out`) or `callbacks`
 (`api_in`) in the form of the codec fixtures below. Made by `scripts/codec_fixtures.py --scenarios`; a scenario
 recorded again needs only this script run again.
 
@@ -66,7 +66,9 @@ The `6010` (orderRef) values in the order frames are labels chosen by the record
 Slices of the scenarios above (and of other recorded sessions) for the golden codec tests (`src/golden/`), one file
 per scenario, `codec/1` format, made by `scripts/codec_fixtures.py`:
 
-- line 1, the header: `scenario`, `area`, `source` (the scenario file), `capture_date`, `market_session`, `notes`;
+- line 1, the header: `scenario`, `area`, `source` (the scenario file), `capture_date`, `market_session`,
+  `machine_zone` (the zone of the machine that ran the gateway: a time without a zone is read in it; the replays run
+  in it, whatever the zone of the machine running the tests), `notes`;
 - then the kept records in their order (`seq`, `leg`, `conn`, `msg_type` or `msg_name`, `raw_b64`), with the API side
   decoded by the official client library: `request` on an `api_out` record (for placeOrder the order and the contract
   as the library reads them back, only the fields that differ from a new object), `callbacks` on an `api_in` record

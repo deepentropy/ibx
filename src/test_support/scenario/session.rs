@@ -24,6 +24,17 @@ use super::record::{attr_mask, n, order_price, perm, OPEN_ORDER_FIELDS};
 
 pub const ACCOUNT: &str = "DUXXXXXXX";
 
+/// The zone of the machine the recordings were made on, when a fixture
+/// header does not name it (`machine_zone`): every capture so far.
+pub const RECORDING_ZONE: &str = "Europe/Paris";
+
+/// The machine zone a recording names (`machine_zone` in its header), else
+/// [`RECORDING_ZONE`]: a replay runs in it, whatever the zone of the
+/// machine that runs the test (a time without a zone is read in it).
+pub fn zone_of(header: &serde_json::Value) -> &str {
+    header["machine_zone"].as_str().unwrap_or(RECORDING_ZONE)
+}
+
 /// Steps of the engine after each input: enough for a request to reach the
 /// wire and for its reply to reach the queues.
 const SETTLE_STEPS: usize = 4;
@@ -45,6 +56,9 @@ pub struct Links {
 
 impl Links {
     pub fn new() -> Self {
+        // The engine runs on this thread in the recording machine's zone; a
+        // replay of another zone sets its own (`in_zone`).
+        crate::gateway::set_machine_zone_for_test(Some(RECORDING_ZONE));
         let shared = Arc::new(SharedState::new());
         // Reads return at once: the test steps the engine itself.
         let pair = || {
@@ -85,13 +99,23 @@ impl Links {
         self.hmds_out.extend(self.hmds.messages().iter().map(|m| parse_fields(m)));
     }
 
+    /// Run in the machine zone of a recording ([`zone_of`]): this thread
+    /// and the threads it lends the engine or the client to.
+    pub fn in_zone(self, header: &serde_json::Value) -> Self {
+        crate::gateway::set_machine_zone_for_test(Some(zone_of(header)));
+        self
+    }
+
     /// Run `f` on this thread while the engine runs on another (a client
     /// call may wait for the engine's answer); then the engine settles.
+    /// The engine's thread reads the machine zone of this one.
     pub fn during<R>(&mut self, f: impl FnOnce() -> R) -> R {
         let stop = AtomicBool::new(false);
         let engine = &mut self.engine;
+        let zone = crate::gateway::machine_zone_for_test();
         let out = std::thread::scope(|s| {
             s.spawn(|| {
+                crate::gateway::set_machine_zone_for_test(zone.as_deref());
                 while !stop.load(Ordering::Acquire) {
                     engine.step_for_test();
                     std::thread::yield_now();
@@ -140,14 +164,25 @@ impl Session {
         Self { links, client, callbacks: Vec::new() }
     }
 
+    /// Run in the machine zone a fixture names (see [`Links::in_zone`]).
+    pub fn in_zone(mut self, header: &serde_json::Value) -> Self {
+        self.links = self.links.in_zone(header);
+        self
+    }
+
     /// Call the API client; the engine runs on this thread meanwhile (a
     /// call may wait for the engine's answer). Then the engine settles and
     /// the callbacks are taken.
     pub fn call<R: Send>(&mut self, f: impl FnOnce(&EClient) -> R + Send) -> R {
         let Self { links, client, .. } = self;
         let client = &*client;
+        // The client's thread reads the machine zone of this one.
+        let zone = crate::gateway::machine_zone_for_test();
         let out = std::thread::scope(|s| {
-            let h = s.spawn(move || f(client));
+            let h = s.spawn(move || {
+                crate::gateway::set_machine_zone_for_test(zone.as_deref());
+                f(client)
+            });
             while !h.is_finished() {
                 links.engine.step_for_test();
                 std::thread::yield_now();

@@ -1,4 +1,4 @@
-{"type":"header","format":"four-leg-api/1","source":"20260928/depth_single_iex.jsonl","scenario":"i192_e4_depth_single","decoder":"official client library 10.46.01"}
+{"type":"header","format":"four-leg-api/1","source":"20260928/depth_single_iex.jsonl","scenario":"i192_e4_depth_single","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
 {"seq":1344,"leg":"api_out","msg_name":"REQ_MKT_DEPTH","request":{"reqId":9462,"contract":{"conId":0,"symbol":"AAPL","secType":"STK","exchange":"IEX","currency":"USD"},"numRows":5}}
 {"seq":1387,"leg":"api_in","msg_name":"MARKET_DEPTH","callbacks":[["updateMktDepth",9462,0,0,1,339.89,"40"]]}
 {"seq":1388,"leg":"api_in","msg_name":"MARKET_DEPTH","callbacks":[["updateMktDepth",9462,1,0,1,339.87,"40"]]}

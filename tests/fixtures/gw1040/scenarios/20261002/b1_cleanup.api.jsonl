@@ -1,4 +1,4 @@
-{"type":"header","format":"four-leg-api/1","source":"20261002/b1_cleanup.jsonl","scenario":"b1_cleanup","decoder":"official client library 10.46.01"}
+{"type":"header","format":"four-leg-api/1","source":"20261002/b1_cleanup.jsonl","scenario":"b1_cleanup","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
 {"seq":14790,"leg":"api_out","msg_name":"START_API","request":{"clientId":198}}
 {"seq":14791,"leg":"api_in","msg_name":"MANAGED_ACCTS","callbacks":[["managedAccounts","DUXXXXXXX"]]}
 {"seq":14792,"leg":"api_in","msg_name":"NEXT_VALID_ID","callbacks":[["nextValidId",87]]}

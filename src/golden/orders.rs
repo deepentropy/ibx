@@ -75,7 +75,7 @@ pub(crate) fn replay_orders(fx: &Fixture) -> OrderReplay {
     let mut recs = at_their_effect(&fx.recs);
     let con_id_given = with_con_ids(&mut recs);
     let fx = &Fixture { header: fx.header.clone(), recs };
-    let mut s = Session::new();
+    let mut s = Session::new().in_zone(&fx.header);
     if let Some(start) = fx.recs.iter().find(|r| r.msg == "START_API") {
         // The client id of the recorded session, on the wire (6119) and in
         // the callbacks, as a client connected with it.

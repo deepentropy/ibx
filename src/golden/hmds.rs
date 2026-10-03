@@ -36,7 +36,7 @@ struct HmdsReplayed {
 /// ids in place of the reference's, compressed again) and the contract
 /// lookups' replies (to ibx's lookup of the same symbol, in order).
 fn replay_hmds(fx: &Fixture) -> HmdsReplayed {
-    let mut s = Session::new();
+    let mut s = Session::new().in_zone(&fx.header);
     let mut theirs = Vec::new();
     let mut queries_theirs: Vec<(Fields, bool)> = Vec::new();
     let mut no_end: Vec<bool> = Vec::new();

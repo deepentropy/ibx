@@ -1,4 +1,4 @@
-{"type":"header","format":"four-leg-api/1","source":"20260926/i105_combo_stock_smart.jsonl","scenario":"i105_combo_stock_smart","decoder":"official client library 10.46.01"}
+{"type":"header","format":"four-leg-api/1","source":"20260926/i105_combo_stock_smart.jsonl","scenario":"i105_combo_stock_smart","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
 {"seq":5967,"leg":"api_out","msg_name":"START_API","request":{"clientId":198}}
 {"seq":5968,"leg":"api_in","msg_name":"MANAGED_ACCTS","callbacks":[["managedAccounts","DUXXXXXXX"]]}
 {"seq":5969,"leg":"api_in","msg_name":"NEXT_VALID_ID","callbacks":[["nextValidId",23]]}

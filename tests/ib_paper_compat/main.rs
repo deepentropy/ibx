@@ -654,7 +654,7 @@ fn pd_orders_live() {
     check_eq!(flag(off), Some(0), "flag off is not sent");
     check_eq!(price(child1), Some(601.0), "the child's replace landed");
     check_eq!(price(parent), Some(151.0), "the parent's replace landed");
-    let errors = shared.orders.drain_order_errors();
+    let errors = drain_order_messages(&shared);
     println!("  errors: {:?}", errors);
 
     send(OrderRequest::Cancel { order_id: parent });
