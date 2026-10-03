@@ -17,7 +17,7 @@ id,code,api_code,stage,text,condition
 10267 aN.a@12784,10267,10267,rules,The 'SweepToFill' order attribute may not be specified for this order.,sweepToFill set and the type list has no SWEEP
 10342 aN.a@12851,10342,10342,rules,The 'ImbalanceOnly' order attribute may not be specified for this order.,imbalanceOnly set and the type list has no IMB
 10274 aN.a@12921,10274,10274,rules,The 'PostToATS' order attribute may not be specified for this order or is invalid.,postToAts set and the type list has no POSTATS
-168 bH.q@2411,168,320,read,Error reading request:Discretionary amount does not conform to the minimum price variation for this contract,discretionaryAmt < 0
+168 bH.q@2411,168,320,read,Error reading request:Discretionary amount does not conform to the minimum price variation for this contract ,discretionaryAmt < 0
 313 bH.q@2027,313,320,read,Error reading request:The combo details for leg '%s' are invalid.,exception while reading combo leg i
 409 bH.q@5988,409,320,read,Error reading request:Invalid scale order. You should specify component order size.,message versions 22 to 25 only: old scaleNumComponents > 0
 429 bH.q@8106,429,320,read,Error reading request:Delta neutral orders are only supported for combos (BAG security type),deltaNeutralContract given without combo legs
@@ -40,7 +40,7 @@ id,code,api_code,stage,text,condition
 10052 bH.S@825,10052,321,check,Error validating request.-'bH' : cause - Invalid time in force,CRYPTO TIF rule
 10040 bH.S@926,10040,321,check,Error validating request.-'bH' : cause - Order cannot be transmitted because not all financial instrument details were available.,the broker's ATS exchange with an unknown secType and no conId
 477 bH.S@1031,477,321,check,Error validating request.-'bH' : cause - Pseudo FX destination is not allowed,CASH pseudo-FX destination not allowed for the account
-498 bH.S@1152,498,321,check,Error validating request.-'bH' : cause - SSHORTX orders are not supported,"side SSHORTX or a short combo leg, feature off"
+498 bH.S@1152,498,321,check,Error validating request.-'bH' : cause - SSHORTX orders are not supported ,"side SSHORTX or a short combo leg, feature off"
 160 bH.S@1572,160,321,check,Error validating request.-'bH' : cause - The size value cannot be zero:,"size 0 (not QUOTE, no FA sizing, not hedge child, no cash quantity)"
 355 bH.S@1606,355,321,check,Error validating request.-'bH' : cause - Order size does not conform to market rule.,"quantity out of range (> 999,999,999 or < 0)"
 321 bH.S@1750,321,321,check,Error validating request.-'bH' : cause - Please enter a stop price,"STP, STP LMT, STP PRT, TRAIL LIMIT with the stop price unset (TRAIL LIMIT: trailStopPrice)"
@@ -67,9 +67,9 @@ id,code,api_code,stage,text,condition
 375 bH.S@4561,375,321,check,Error validating request.-'bH' : cause - Stock range attributes cannot be negative.,negative stock range
 374 bH.S@4681,374,321,check,"Error validating request.-'bH' : cause - If both are set, lower stock range attribute must be less than high stock range attribute.",low stock range not below the high one
 413 bH.S@4745,413,321,check,Error validating request.-'v' : cause - What-If order should have transmit flag set to TRUE.,whatIf true and transmit false
-457 bH.S@5061,457,321,check,Error validating request.-'bH' : cause - Individual account is required,FA / account rule
+457 bH.S@5061,457,321,check,Error validating request.-'bH' : cause - Individual account is required ,FA / account rule
 10136 bH.S@5127,10136,321,check,Error validating request.-'bH' : cause - Cannot submit trades until the application is finished and approved,account application not approved (non-FA session)
-10132 bH.S@5340,10132,321,check,Error validating request.-'bH' : cause - Cannot place an order using a readonly account,read-only account
+10132 bH.S@5340,10132,321,check,Error validating request.-'bH' : cause - Cannot place an order using a readonly account ,read-only account
 10226 bH.S@5474,10226,321,check,Error validating request.-'bH' : cause - Invalid FA method specified,invalid FA method
 435 bH.S@5567,435,321,check,Error validating request.-'bH' : cause - You must specify an account.,multi-account non-FA session and no account
 10265 bH.S@7758,10265,321,check,Error validating request.-'bH' : cause - Group '%s' cannot be used without method specified. Use Advisor Setup tool to correct its definition,FA group without a method
@@ -157,7 +157,7 @@ id,code,api_code,stage,text,condition
 461 aN.a,461,461,rules,Order size is not correct; it must be a multiple of the lot size.,size not a multiple of the lot
 10098 aN.p(pe)@115,10098,10098,rules,Negative offset amount is not allowed for SNAP orders.,SNAP order with a negative offset
 2137 OrderChecker$16@186,2137,2137,rules,n/a,"closing order larger than the position: warning code, order refused"
-10132 aN.a@2163,10132,10132,rules,Cannot place an order using a readonly account,read-only account
+10132 aN.a@2163,10132,10132,rules,Cannot place an order using a readonly account ,read-only account
 104 bH.d(pe)@121,104,104,modify,Cannot modify a filled order.,"modify of an order that is filled, cancelled or with a cancel pending"
 105 bH.d(pe)@165,105,105,modify,Order being modified does not match original order,modified order does not match the original
 329 aj.e(pe)@52,329,329,modify,Order modify failed. Cannot change to the new order type,modify to another order type

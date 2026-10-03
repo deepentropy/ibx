@@ -52,11 +52,13 @@ pub struct ErrorCode {
 }
 
 impl ErrorCode {
-    /// Every text the gateway sends for this code.
+    /// Every text the gateway sends for this code: the captured one when
+    /// the capture differs from the message table.
     pub fn texts(&self) -> Vec<&str> {
-        let mut out: Vec<&str> = self.captured.iter().map(String::as_str).collect();
-        out.extend(self.messages.iter().map(String::as_str));
-        out
+        match &self.captured {
+            Some(text) => vec![text.as_str()],
+            None => self.messages.iter().map(String::as_str).collect(),
+        }
     }
 }
 

@@ -11,3 +11,5 @@ mod harness;
 mod writers;
 #[path = "gw_catalog/errors.rs"]
 mod errors;
+#[path = "gw_catalog/refusals.rs"]
+mod refusals;
