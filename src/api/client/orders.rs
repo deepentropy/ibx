@@ -45,20 +45,39 @@ impl EClient {
             self.shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }
+        // A combo (BAG) order, read and checked as the reference reads it
+        // (ibx#470).
+        let combo = match ClientCore::combo_order(contract, order, &self.shared.reference, &self.account_id) {
+            Ok(combo) => combo,
+            Err((code, message)) => {
+                self.shared.orders.push_order_error(oid, code, message);
+                return Ok(());
+            }
+        };
         // The condition times as the reference sends them (ibx#416); the
         // order is tracked as the caller placed it.
         let sent = ClientCore::with_condition_times(order);
 
+        // A smart combo goes out on its currency's smart combo conId.
+        let con_id = combo.as_ref().map(|c| c.smart_con_id).filter(|&c| c > 0).unwrap_or(contract.con_id);
         let instrument = self.core.find_or_register_instrument(
             &self.control_tx,
-            contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
+            con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
         )?;
-        self.core.note_currency(&self.control_tx, contract.con_id, &contract.currency);
+        self.core.note_currency(&self.control_tx, con_id, &contract.currency);
 
         // If orderId is already tracked, this is a modification: replace it
         // with the full wanted state (ibx#247). A what-if never modifies:
         // it previews a new order (ibx#462).
         let working = if order.what_if { None } else { self.core.tracked_order(oid) };
+        if working.is_some() {
+            let refusal = self.core.tracked_contract(oid)
+                .and_then(|placed| ClientCore::combo_modify_refusal(contract, &placed));
+            if let Some((code, message)) = refusal {
+                self.shared.orders.push_order_error(oid, code, message);
+                return Ok(());
+            }
+        }
         let cmd = if let Some(working) = working {
             match ClientCore::build_modify_request(&sent, oid, &working)? {
                 ModifyPlan::Send(cmd) => cmd,
@@ -69,6 +88,8 @@ impl EClient {
                     return Ok(());
                 }
             }
+        } else if let Some(combo) = combo {
+            ClientCore::build_combo_order_request(&sent, oid, instrument, combo)?
         } else {
             ClientCore::build_order_request(&sent, oid, instrument)?
         };

@@ -102,6 +102,11 @@ pub struct Context {
     /// Set while a short-side order is encoded: its short-sale fields
     /// (ibx#417).
     pub(crate) short_sale_send: Option<crate::types::ShortSale>,
+    /// The session's combos and combo orders (ibx#470).
+    pub(crate) combos: crate::engine::combo::ComboBook,
+    /// Set while a combo order is encoded: what it writes besides the
+    /// order's own fields (ibx#470).
+    pub(crate) combo_send: Option<crate::engine::combo::ComboSend>,
     /// The API client id the new orders carry (ibx#466).
     pub(crate) api_client_id: i64,
     /// Sequence of the what-if ClOrdIDs of this session.
@@ -187,6 +192,8 @@ impl Context {
             what_ifs: HashMap::new(),
             what_if_send: None,
             short_sale_send: None,
+            combos: Default::default(),
+            combo_send: None,
             api_client_id: 0,
             next_what_if: 0,
             scale_us_lots: false,

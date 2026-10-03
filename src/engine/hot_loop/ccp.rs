@@ -131,6 +131,23 @@ pub(crate) fn split_exec_revision(exec_id: &str) -> (&str, u64) {
     }
 }
 
+/// The report of a combo's leg (ibx#470): 6013 gives the leg index (-1
+/// for the combo itself) and the leg count, 442 = 2 on a leg's report.
+fn is_leg_report(parsed: &std::collections::HashMap<u32, String>) -> bool {
+    match parsed.get(&6013).and_then(|v| v.split(':').next()).and_then(|i| i.parse::<i32>().ok()) {
+        Some(index) => index >= 0,
+        None => parsed.get(&442).map(|s| s.as_str()) == Some("2"),
+    }
+}
+
+/// Every value of `tag` in a message, in wire order.
+fn all_values(msg: &[u8], tag: u32) -> impl Iterator<Item = &str> {
+    let prefix = format!("{tag}=");
+    msg.split(|&b| b == fix::SOH)
+        .filter_map(|p| std::str::from_utf8(p).ok())
+        .filter_map(move |p| p.strip_prefix(prefix.as_str()))
+}
+
 /// What a fill report says about its execution beyond the fill numbers.
 fn fill_exec_of(parsed: &std::collections::HashMap<u32, String>, exec_id: &str) -> crate::bridge::FillExec {
     let tag = |t: u32| parsed.get(&t).filter(|s| !s.is_empty());
@@ -138,10 +155,15 @@ fn fill_exec_of(parsed: &std::collections::HashMap<u32, String>, exec_id: &str) 
         exec_id: exec_id.to_string(),
         time_secs: tag(6699).or_else(|| tag(60)).or_else(|| tag(52))
             .and_then(|s| fix_utc_to_unix_secs(s)),
-        exchange: tag(100).or_else(|| tag(207)).cloned().unwrap_or_default(),
+        // A smart route is shown as SMART, as on the report of a combo
+        // (captured 30/09/2026: 100=BEST, execDetails exchange SMART).
+        exchange: tag(100).or_else(|| tag(207))
+            .map(|e| if e == "BEST" { "SMART".to_string() } else { e.clone() })
+            .unwrap_or_default(),
         client_id: tag(6119).and_then(|s| s.parse().ok()).unwrap_or(0),
         model_code: tag(6700).cloned().unwrap_or_default(),
         order_ref: tag(6010).cloned().unwrap_or_default(),
+        combo: None,
     }
 }
 
@@ -198,6 +220,9 @@ pub(crate) struct CcpState {
     pub(crate) exec_realized: std::collections::HashMap<String, (i64, f64)>,
     /// Order messages already reported as 399, by order and text (ibx#465).
     pub(crate) order_messages_sent: HashSet<(OrderId, String)>,
+    /// The per-leg prices (6879) of the report being read, in leg order
+    /// (ibx#470): the parsed map keeps one value per tag.
+    pub(crate) report_leg_prices: Vec<f64>,
     pub(crate) exec_realized_order: VecDeque<String>,
     pub(crate) disconnected: bool,
     /// (req_id, is_single_shot). Single-shot = known-conId lookup whose
@@ -595,6 +620,7 @@ impl CcpState {
             commission_order: VecDeque::with_capacity(256),
             exec_realized: std::collections::HashMap::with_capacity(256),
             order_messages_sent: HashSet::new(),
+            report_leg_prices: Vec::new(),
             exec_realized_order: VecDeque::with_capacity(256),
             disconnected: false,
             pending_secdef: Vec::new(),
@@ -859,7 +885,11 @@ impl CcpState {
         }
         match msg_type {
             fix::MSG_LOGON => self.handle_logon_update(&parsed, shared, event_tx),
-            fix::MSG_EXEC_REPORT => self.handle_exec_report(&parsed, context, shared, event_tx, account_id),
+            fix::MSG_EXEC_REPORT => {
+                self.report_leg_prices = all_values(msg, 6879).filter_map(|v| v.parse().ok()).collect();
+                self.handle_exec_report(&parsed, context, shared, event_tx, account_id);
+                self.report_leg_prices.clear();
+            }
             fix::MSG_CANCEL_REJECT => self.handle_cancel_reject(&parsed, ccp_conn, context, shared, event_tx, hb, account_id),
             fix::MSG_NEWS => self.handle_news_bulletin(&parsed, shared),
             fix::MSG_HEARTBEAT => {}
@@ -919,6 +949,13 @@ impl CcpState {
                             self.optparams.chain_reply(msg, ccp_conn, connected, hb, shared);
                         }
                         "60" => self.handle_commission_report(&parsed, shared),
+                        // The combo multiplier and the leg confirmation of
+                        // a combo set-up (ibx#470).
+                        "36" | "7" => {
+                            if let Some(progress) = context.combos.user_reply(&parsed, &chrono_free_timestamp()) {
+                                super::order_builder::combo_progress(context, ccp_conn, hb, progress);
+                            }
+                        }
                         // An algo definition answer (ibx#263).
                         "54" => if let Some(xml) = parsed.get(&6118) {
                             log::info!("Algo definitions received for {:?}", parsed.get(&6364));
@@ -1229,6 +1266,39 @@ impl CcpState {
             }
         }
 
+        // A combo order (ibx#470): the report of a leg is an execution of
+        // the leg, not a report of the order (captured 30/09/2026: after
+        // the combo's fill, one fill per leg under the order's id, with
+        // 6013 = leg index : leg count). The combo's own reports keep its
+        // totals for the legs' callbacks.
+        let combo_view = context.combos.orders.contains_key(&clord_id)
+            .then(|| shared.orders.combo_view(clord_id)).flatten();
+        if let Some(combo) = context.combos.orders.get_mut(&clord_id) {
+            if is_leg_report(parsed) {
+                let combo = combo.clone();
+                self.handle_combo_leg_report(parsed, context, shared, clord_id, &combo);
+                return;
+            }
+            let qty = |tag: u32| parsed.get(&tag).and_then(|s| parse_qty(s));
+            let px = |tag: u32| parsed.get(&tag).and_then(|s| s.parse::<f64>().ok())
+                .map(|v| (v * PRICE_SCALE as f64).round() as i64);
+            if let Some(v) = qty(14) { combo.cum_qty = v; }
+            if let Some(v) = qty(151) { combo.leaves_qty = v; }
+            if let Some(v) = px(6) { combo.avg_price = v; }
+            if qty(32).is_some_and(|q| q > 0) && let Some(v) = px(31) {
+                combo.last_price = v;
+            }
+            // The leg prices the report carries, in leg order (6879 per
+            // leg, captured 26/09/2026), or none.
+            let legs = parsed.get(&6079).and_then(|n| n.parse::<usize>().ok()).unwrap_or(combo.combo.legs.len());
+            let reported = if self.report_leg_prices.len() == legs {
+                self.report_leg_prices.clone()
+            } else {
+                vec![f64::MAX; legs]
+            };
+            shared.orders.set_combo_leg_prices(clord_id, reported);
+        }
+
         let ord_status = parsed.get(&39).map(|s| s.as_str()).unwrap_or("");
         let exec_type = parsed.get(&150).map(|s| s.as_str()).unwrap_or("");
         let exec_id = parsed.get(&17).map(|s| s.as_str()).unwrap_or("");
@@ -1441,25 +1511,39 @@ impl CcpState {
                     Side::Buy => last_shares,
                     Side::Sell | Side::ShortSell => -last_shares,
                 };
-                context.update_position_fixed(order.instrument, delta);
-                // notify_fill inlined
-                let exec = fill_exec_of(parsed, exec_id);
-                shared.portfolio.set_position_fixed(fill.instrument, context.position_fixed(fill.instrument));
-                if let Some(con_id) = context.market.con_id(order.instrument) {
-                    self.record_exec_con_id(&exec.exec_id, con_id);
-                    // The daily P&L counts the cash of this session's fills
-                    // (sell positive, buy negative). Stock orders only, so
-                    // no multiplier.
-                    let shares = last_shares as f64 / QTY_SCALE as f64;
-                    let cash = match order.side {
-                        Side::Buy => -shares * last_px,
-                        Side::Sell | Side::ShortSell => shares * last_px,
+                let mut exec = fill_exec_of(parsed, exec_id);
+                // The fill of a combo moves no position: its legs' fills do
+                // (ibx#470). Its execution shows the combo contract without
+                // its legs (captured 30/09/2026).
+                if let Some(view) = &combo_view {
+                    let contract = api::Contract {
+                        combo_legs: Vec::new(), combo_legs_descrip: String::new(), ..view.contract.clone()
                     };
-                    shared.portfolio.add_money_since_seed(con_id, cash);
-                    // The position moves with the fill, as the reference's
-                    // position store does; the server's average cost follows
-                    // with its position feed.
-                    shared.portfolio.apply_fill_to_position(con_id, delta, fill.price);
+                    exec.combo = Some(Box::new(crate::bridge::ComboExec { contract, leg: None }));
+                    if let Some(con_id) = context.market.con_id(order.instrument) {
+                        self.record_exec_con_id(&exec.exec_id, con_id);
+                    }
+                }
+                if combo_view.is_none() {
+                    context.update_position_fixed(order.instrument, delta);
+                    // notify_fill inlined
+                    shared.portfolio.set_position_fixed(fill.instrument, context.position_fixed(fill.instrument));
+                    if let Some(con_id) = context.market.con_id(order.instrument) {
+                        self.record_exec_con_id(&exec.exec_id, con_id);
+                        // The daily P&L counts the cash of this session's fills
+                        // (sell positive, buy negative). Stock orders only, so
+                        // no multiplier.
+                        let shares = last_shares as f64 / QTY_SCALE as f64;
+                        let cash = match order.side {
+                            Side::Buy => -shares * last_px,
+                            Side::Sell | Side::ShortSell => shares * last_px,
+                        };
+                        shared.portfolio.add_money_since_seed(con_id, cash);
+                        // The position moves with the fill, as the reference's
+                        // position store does; the server's average cost follows
+                        // with its position feed.
+                        shared.portfolio.apply_fill_to_position(con_id, delta, fill.price);
+                    }
                 }
                 fill_out = Some((fill, exec));
                 had_fill = true;
@@ -1569,7 +1653,11 @@ impl CcpState {
                 0
             };
 
-            let contract = if resolved_con_id != 0 {
+            let contract = if let Some(view) = &combo_view {
+                // A combo order shows its combo, not the report's contract
+                // (55=IECombo) (ibx#470).
+                view.contract.clone()
+            } else if resolved_con_id != 0 {
                 if let Some(mut cached) = shared.reference.get_contract(resolved_con_id) {
                     if !symbol.is_empty() { cached.symbol = symbol.clone(); }
                     if !sec_type_str.is_empty() { cached.sec_type = sec_type_str.to_string(); }
@@ -1665,6 +1753,8 @@ impl CcpState {
                 order_ref: parsed.get(&6010).cloned().unwrap_or_default(),
                 // A TRAIL LIMIT's offset as the server reports it (ib-agent#194).
                 lmt_price_offset: trail_limit.map_or(f64::MAX, |r| r.offset as f64 / PRICE_SCALE as f64),
+                // A combo's per-leg prices as reported (ibx#470).
+                order_combo_legs: shared.orders.combo_view(clord_id).map(|v| v.leg_prices).unwrap_or_default(),
                 ..Default::default()
             };
 
@@ -1747,7 +1837,91 @@ impl CcpState {
                 });
             }
             context.finish_order(clord_id, status);
+            context.combos.finished(clord_id);
         }
+    }
+
+    /// The report of one leg of a combo order's fill (ibx#470; captured
+    /// 30/09/2026): an execution of the leg, under the combo order, that
+    /// moves the leg's position. Its execDetails shows the leg's contract
+    /// on the execution's exchange, the leg's side (54=5 is a sale), size,
+    /// price and totals; the orderStatus that goes with it keeps the
+    /// combo's totals and last price. The order's own state does not move.
+    fn handle_combo_leg_report(
+        &mut self,
+        parsed: &std::collections::HashMap<u32, String>,
+        context: &mut Context,
+        shared: &SharedState,
+        order_id: OrderId,
+        combo: &crate::engine::combo::ComboOrder,
+    ) {
+        let exec_id = parsed.get(&17).map(|s| s.as_str()).unwrap_or("");
+        let last_shares: Qty = parsed.get(&32).and_then(|s| parse_qty(s)).unwrap_or(0);
+        if last_shares <= 0 { return; }
+        if !exec_id.is_empty() && !self.record_exec_id(exec_id) {
+            log::warn!("Duplicate ExecID={}: leg fill not booked again", exec_id);
+            return;
+        }
+        if !exec_id.is_empty() {
+            let time = parsed.get(&60).or_else(|| parsed.get(&52)).cloned().unwrap_or_default();
+            self.last_exec = Some((exec_id.to_string(), time));
+        }
+        let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let buy = parsed.get(&54).map(|s| s.as_str()) == Some("1");
+        let price = parsed.get(&31).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let shares = last_shares as f64 / QTY_SCALE as f64;
+        let delta = if buy { last_shares } else { -last_shares };
+        if con_id != 0 {
+            if let Some(instrument) = context.market.try_register(con_id) {
+                shared.market.set_instrument_count(context.market.count());
+                context.update_position_fixed(instrument, delta);
+                shared.portfolio.set_position_fixed(instrument, context.position_fixed(instrument));
+            }
+            self.record_exec_con_id(exec_id, con_id);
+            shared.portfolio.add_money_since_seed(con_id, if buy { -shares * price } else { shares * price });
+            shared.portfolio.apply_fill_to_position(con_id, delta, (price * PRICE_SCALE as f64) as i64);
+        }
+        let leg = combo.combo.legs.iter().find(|l| l.con_id == con_id);
+        let mut exec = fill_exec_of(parsed, exec_id);
+        let sec_type = match parsed.get(&167).map(|s| s.as_str()) {
+            Some("CS") | Some("COMMON") | None => "STK".to_string(),
+            Some(other) => other.to_string(),
+        };
+        let contract = api::Contract {
+            con_id,
+            symbol: parsed.get(&55).cloned().or_else(|| leg.map(|l| l.symbol.clone())).unwrap_or_default(),
+            sec_type,
+            exchange: exec.exchange.clone(),
+            currency: parsed.get(&15).cloned().unwrap_or_default(),
+            local_symbol: parsed.get(&6035).cloned().unwrap_or_default(),
+            ..Default::default()
+        };
+        let qty = |tag: u32| parsed.get(&tag).and_then(|s| parse_qty(s)).unwrap_or(0) as f64 / QTY_SCALE as f64;
+        exec.combo = Some(Box::new(crate::bridge::ComboExec {
+            contract,
+            leg: Some(crate::bridge::LegExec {
+                side: if buy { "BOT" } else { "SLD" }.to_string(),
+                shares,
+                price,
+                cum_qty: qty(14),
+                avg_price: parsed.get(&6).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            }),
+        }));
+        let order = context.order(order_id).copied();
+        let fill = Fill {
+            instrument: order.map_or(0, |o| o.instrument),
+            order_id,
+            side: order.map_or(Side::Buy, |o| o.side),
+            price: combo.last_price,
+            qty_fixed: last_shares,
+            remaining_fixed: combo.leaves_qty,
+            cum_qty_fixed: combo.cum_qty,
+            avg_price: combo.avg_price,
+            commission: 0,
+            timestamp_ns: context.now_ns(),
+        };
+        log::info!("Combo order {} leg fill: con_id={} {} {} @ {}", order_id, con_id, if buy { "BOT" } else { "SLD" }, shares, price);
+        shared.orders.push_fill_with_exec(fill, exec);
     }
 
     /// Book a fill of an order the engine does not track (ibx#314): an
@@ -2309,6 +2483,11 @@ impl CcpState {
         let response_req_id = contracts::secdef_response_req_id(msg);
         // Asked for an order's outside RTH (ibx#465): not a user reply.
         if let Some(rid) = response_req_id.as_deref() {
+            // Asked to build a combo (ibx#470): not a user reply.
+            if let Some(progress) = context.combos.secdef_reply(rid, msg, &chrono_free_timestamp()) {
+                super::order_builder::combo_progress(context, ccp_conn, hb, progress);
+                return;
+            }
             if super::order_builder::rth_definition_reply(context, rid, msg) { return; }
             // Asked for a round lot (ibx#287): not a user reply.
             if super::farm::round_lot_reply(context, rid, msg) { return; }
@@ -2780,7 +2959,7 @@ impl CcpState {
         }
     }
 
-    pub(crate) fn handle_disconnect(&mut self, _context: &mut Context, _event_tx: &Option<Sender<Event>>) {
+    pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {
         self.disconnected = true;
         // The derivative answers go with the link, as in the reference
         // (ibx#440).
@@ -2793,6 +2972,12 @@ impl CcpState {
         self.matching_permits += 1;
         self.awaiting_status_replay = false;
         self.status_replay_end_at = None;
+        // A combo set-up in flight starts again after the new logon
+        // (ibx#470): its orders are handled again.
+        if context.combos.connection_lost() {
+            super::order_builder::combo_progress(context, &mut None, &mut super::HeartbeatState::new(),
+                crate::engine::combo::Progress { send: Vec::new(), release: true });
+        }
         // The orders keep their status, as in the reference: the clients get
         // the lost-link message only, and the replay after the new logon
         // corrects each order (ibx#251).

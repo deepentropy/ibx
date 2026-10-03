@@ -77,7 +77,8 @@ impl Clone for Contract {
             description: self.description.clone(),
             issuer_id: self.issuer_id.clone(),
             combo_legs_descrip: self.combo_legs_descrip.clone(),
-            combo_legs: Vec::new(),
+            // The legs of a combo are kept (ibx#470).
+            combo_legs: Python::attach(|py| self.combo_legs.iter().map(|l| l.clone_ref(py)).collect()),
             delta_neutral_contract: None,
         }
     }
@@ -201,7 +202,11 @@ impl Contract {
     #[setter(comboLegsDescrip)]
     fn set_combo_legs_descrip_alias(&mut self, v: String) { self.combo_legs_descrip = v; }
     #[getter(comboLegs)]
-    fn get_combo_legs_alias(&self) -> Vec<Py<PyAny>> { Vec::new() }
+    fn get_combo_legs_alias(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
+        self.combo_legs.iter().map(|l| l.clone_ref(py)).collect()
+    }
+    #[setter(comboLegs)]
+    fn set_combo_legs_alias(&mut self, v: Option<Vec<Py<PyAny>>>) { self.combo_legs = v.unwrap_or_default(); }
     #[getter(deltaNeutralContract)]
     fn get_delta_neutral_alias(&self) -> Option<Py<PyAny>> { None }
 }
@@ -626,7 +631,8 @@ impl Clone for Order {
             oca_type: self.oca_type,
             open_close: self.open_close.clone(),
             opt_out_smart_routing: self.opt_out_smart_routing,
-            order_combo_legs: Vec::new(),
+            // The per-leg prices of a combo are kept (ibx#470).
+            order_combo_legs: Python::attach(|py| self.order_combo_legs.iter().map(|l| l.clone_ref(py)).collect()),
             order_misc_options: Vec::new(),
             order_ref: self.order_ref.clone(),
             origin: self.origin,
@@ -1242,7 +1248,11 @@ impl Order {
     #[setter(optOutSmartRouting)]
     fn set_opt_out_smart_routing_alias(&mut self, v: bool) { self.opt_out_smart_routing = v; }
     #[getter(orderComboLegs)]
-    fn get_order_combo_legs_alias(&self) -> Vec<Py<PyAny>> { Vec::new() }
+    fn get_order_combo_legs_alias(&self, py: Python<'_>) -> Vec<Py<PyAny>> {
+        self.order_combo_legs.iter().map(|l| l.clone_ref(py)).collect()
+    }
+    #[setter(orderComboLegs)]
+    fn set_order_combo_legs_alias(&mut self, v: Option<Vec<Py<PyAny>>>) { self.order_combo_legs = v.unwrap_or_default(); }
     #[getter(orderMiscOptions)]
     fn get_order_misc_options_alias(&self) -> Vec<Py<PyAny>> { Vec::new() }
     #[getter(orderRef)]
@@ -1399,6 +1409,8 @@ impl Order {
     fn set_sl_order_type_alias(&mut self, v: String) { self.sl_order_type = v; }
     #[getter(smartComboRoutingParams)]
     fn get_smart_combo_routing_params_alias(&self) -> Vec<TagValue> { self.smart_combo_routing_params.clone() }
+    #[setter(smartComboRoutingParams)]
+    fn set_smart_combo_routing_params_alias(&mut self, v: Option<Vec<TagValue>>) { self.smart_combo_routing_params = v.unwrap_or_default(); }
     #[getter(softDollarTier)]
     fn get_soft_dollar_tier(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let tier = SoftDollarTierPy {
@@ -1590,8 +1602,161 @@ impl Order {
             exempt_code: self.exempt_code,
             // None is the API's unset value (ibx#492).
             use_price_mgmt_algo: self.use_price_mgmt_algo.map_or(i32::MAX, i32::from),
+            // The routing of a combo (ibx#470); the per-leg prices need the
+            // interpreter: `convert_order_combo_legs`.
+            smart_combo_routing_params: self.smart_combo_routing_params.iter().map(|tv| crate::api::types::TagValue {
+                tag: tv.tag.clone(),
+                value: tv.value.clone(),
+            }).collect(),
             ..Default::default()
         }
+    }
+
+    /// The per-leg prices of a combo order (ibx#470): the `price` of each
+    /// orderComboLegs entry (this module's OrderComboLeg or the official
+    /// API's), f64::MAX when it has none.
+    pub fn convert_order_combo_legs(&self, py: Python<'_>) -> Vec<f64> {
+        self.order_combo_legs.iter().map(|obj| {
+            obj.bind(py).getattr("price").ok().and_then(|v| v.extract::<f64>().ok()).unwrap_or(f64::MAX)
+        }).collect()
+    }
+}
+
+impl Contract {
+    /// The legs of a combo contract (ibx#470), read from this module's
+    /// ComboLeg or the official API's: the camelCase attribute, else the
+    /// snake_case one.
+    pub fn convert_combo_legs(&self, py: Python<'_>) -> Vec<crate::api::types::ComboLeg> {
+        fn attr<'py, T: for<'a> pyo3::FromPyObject<'a, 'py>>(obj: &Bound<'py, PyAny>, camel: &str, snake: &str) -> Option<T> {
+            obj.getattr(camel).or_else(|_| obj.getattr(snake)).ok().and_then(|v| v.extract::<T>().ok())
+        }
+        self.combo_legs.iter().map(|leg| {
+            let leg = leg.bind(py);
+            crate::api::types::ComboLeg {
+                con_id: attr(leg, "conId", "con_id").unwrap_or(0),
+                ratio: attr(leg, "ratio", "ratio").unwrap_or(0),
+                action: attr(leg, "action", "action").unwrap_or_default(),
+                exchange: attr(leg, "exchange", "exchange").unwrap_or_default(),
+                open_close: attr(leg, "openClose", "open_close").unwrap_or(0),
+                short_sale_slot: attr(leg, "shortSaleSlot", "short_sale_slot").unwrap_or(0),
+                designated_location: attr(leg, "designatedLocation", "designated_location").unwrap_or_default(),
+                exempt_code: attr(leg, "exemptCode", "exempt_code").unwrap_or(-1),
+            }
+        }).collect()
+    }
+
+    /// A contract of the official API's shape, its combo legs as this
+    /// module's ComboLeg (ibx#470).
+    pub fn from_api(py: Python<'_>, c: &crate::api::types::Contract) -> PyResult<Self> {
+        let mut out = Contract {
+            con_id: c.con_id,
+            symbol: c.symbol.clone(),
+            sec_type: c.sec_type.clone(),
+            exchange: c.exchange.clone(),
+            primary_exchange: c.primary_exchange.clone(),
+            currency: c.currency.clone(),
+            local_symbol: c.local_symbol.clone(),
+            trading_class: c.trading_class.clone(),
+            combo_legs_descrip: c.combo_legs_descrip.clone(),
+            ..Default::default()
+        };
+        for leg in &c.combo_legs {
+            out.combo_legs.push(Py::new(py, ComboLeg::from_api(leg))?.into_any());
+        }
+        Ok(out)
+    }
+}
+
+// ── ComboLeg, OrderComboLeg ──
+
+/// ibapi-compatible ComboLeg: one leg of a combo (BAG) contract (ibx#470).
+#[pyclass(from_py_object)]
+#[derive(Clone, Debug)]
+pub struct ComboLeg {
+    #[pyo3(get, set)]
+    pub con_id: i64,
+    #[pyo3(get, set)]
+    pub ratio: i32,
+    #[pyo3(get, set)]
+    pub action: String,
+    #[pyo3(get, set)]
+    pub exchange: String,
+    /// 0 same as the order, 1 open, 2 close, 3 unknown.
+    #[pyo3(get, set)]
+    pub open_close: i32,
+    #[pyo3(get, set)]
+    pub short_sale_slot: i32,
+    #[pyo3(get, set)]
+    pub designated_location: String,
+    #[pyo3(get, set)]
+    pub exempt_code: i32,
+}
+
+impl ComboLeg {
+    fn from_api(leg: &crate::api::types::ComboLeg) -> Self {
+        Self {
+            con_id: leg.con_id, ratio: leg.ratio, action: leg.action.clone(), exchange: leg.exchange.clone(),
+            open_close: leg.open_close, short_sale_slot: leg.short_sale_slot,
+            designated_location: leg.designated_location.clone(), exempt_code: leg.exempt_code,
+        }
+    }
+}
+
+#[pymethods]
+impl ComboLeg {
+    #[new]
+    #[pyo3(signature = (con_id=0, ratio=0, action="".to_string(), exchange="".to_string(), open_close=0, short_sale_slot=0, designated_location="".to_string(), exempt_code=-1))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(con_id: i64, ratio: i32, action: String, exchange: String, open_close: i32,
+        short_sale_slot: i32, designated_location: String, exempt_code: i32) -> Self {
+        Self { con_id, ratio, action, exchange, open_close, short_sale_slot, designated_location, exempt_code }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ComboLeg(conId={}, ratio={}, action='{}', exchange='{}')", self.con_id, self.ratio, self.action, self.exchange)
+    }
+
+    #[getter(conId)]
+    fn get_con_id_alias(&self) -> i64 { self.con_id }
+    #[setter(conId)]
+    fn set_con_id_alias(&mut self, v: i64) { self.con_id = v; }
+    #[getter(openClose)]
+    fn get_open_close_alias(&self) -> i32 { self.open_close }
+    #[setter(openClose)]
+    fn set_open_close_alias(&mut self, v: i32) { self.open_close = v; }
+    #[getter(shortSaleSlot)]
+    fn get_short_sale_slot_alias(&self) -> i32 { self.short_sale_slot }
+    #[setter(shortSaleSlot)]
+    fn set_short_sale_slot_alias(&mut self, v: i32) { self.short_sale_slot = v; }
+    #[getter(designatedLocation)]
+    fn get_designated_location_alias(&self) -> String { self.designated_location.clone() }
+    #[setter(designatedLocation)]
+    fn set_designated_location_alias(&mut self, v: String) { self.designated_location = v; }
+    #[getter(exemptCode)]
+    fn get_exempt_code_alias(&self) -> i32 { self.exempt_code }
+    #[setter(exemptCode)]
+    fn set_exempt_code_alias(&mut self, v: i32) { self.exempt_code = v; }
+}
+
+/// ibapi-compatible OrderComboLeg: the price of one leg of a combo order
+/// (ibx#470). Unset is f64::MAX, as the official API's.
+#[pyclass(from_py_object)]
+#[derive(Clone, Debug)]
+pub struct OrderComboLeg {
+    #[pyo3(get, set)]
+    pub price: f64,
+}
+
+#[pymethods]
+impl OrderComboLeg {
+    #[new]
+    #[pyo3(signature = (price=f64::MAX))]
+    fn new(price: f64) -> Self {
+        Self { price }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("OrderComboLeg(price={})", self.price)
     }
 }
 
@@ -2362,6 +2527,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Contract>()?;
     m.add_class::<Order>()?;
     m.add_class::<TagValue>()?;
+    m.add_class::<ComboLeg>()?;
+    m.add_class::<OrderComboLeg>()?;
     m.add_class::<OrderState>()?;
     m.add_class::<OrderAllocation>()?;
     m.add_class::<PriceCondition>()?;

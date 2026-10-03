@@ -4470,6 +4470,7 @@ fn captured_fill_exec() -> crate::bridge::FillExec {
         client_id: 250,
         model_code: String::new(),
         order_ref: "pm0925-fill-BUY".into(),
+        combo: None,
     }
 }
 

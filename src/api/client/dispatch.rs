@@ -70,20 +70,6 @@ impl EClient {
             let remaining_f = fill.remaining_fixed as f64 / QTY_SCALE_F;
             let shares_f = fill.qty_fixed as f64 / QTY_SCALE_F;
             let avg_f = fill.average_price() as f64 / PRICE_SCALE_F;
-            // openOrder then orderStatus for every report of a known order
-            // (ibx#473).
-            let client_id = match self.core.order_view(fill.order_id, &self.shared, status) {
-                Some(view) => {
-                    wrapper.open_order(fill.order_id, &view.contract, &view.order, &view.state);
-                    view.client_id
-                }
-                None => 0,
-            };
-            wrapper.order_status(
-                fill.order_id, status, filled_f, remaining_f,
-                avg_f, perm_id, parent_id, price_f, client_id, "", 0.0,
-            );
-            self.core.record_last_fill_price(fill.order_id, price_f);
 
             let side_str = match fill.side {
                 Side::Buy => "BOT",
@@ -117,6 +103,11 @@ impl EClient {
                 })
             };
             self.core.apply_fill_exec(&mut exec, &fill_exec, fill.order_id);
+            // A combo's report shows the combo or the leg (ibx#470).
+            let mut c = c;
+            ClientCore::apply_combo_exec(&fill_exec, &mut c, &mut exec);
+            // The execution first, then openOrder and orderStatus, as the
+            // reference (captured 30/09/2026 on a stock and a combo fill).
             // A live execution has no request: reqId -1 (ibx#474).
             wrapper.exec_details(-1, &c, &exec);
 
@@ -125,6 +116,21 @@ impl EClient {
             if let Some(report) = self.core.push_execution(-1, c, exec, fill_exec.time_secs) {
                 wrapper.commission_and_fees_report(&report);
             }
+
+            // openOrder then orderStatus for every report of a known order
+            // (ibx#473).
+            let client_id = match self.core.order_view(fill.order_id, &self.shared, status) {
+                Some(view) => {
+                    wrapper.open_order(fill.order_id, &view.contract, &view.order, &view.state);
+                    view.client_id
+                }
+                None => 0,
+            };
+            wrapper.order_status(
+                fill.order_id, status, filled_f, remaining_f,
+                avg_f, perm_id, parent_id, price_f, client_id, "", 0.0,
+            );
+            self.core.record_last_fill_price(fill.order_id, price_f);
 
             // Update open order tracking
             self.core.update_order_fill(fill.order_id, status, filled_f, remaining_f);
@@ -188,7 +194,9 @@ impl EClient {
             } else {
                 self.core.peek_what_if(wi.order_id)
             };
-            let (contract, order) = tracked.unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
+            let (mut contract, mut order) = tracked.unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
+            // A combo shows its combo (ibx#470).
+            ClientCore::apply_combo_view(wi.order_id, &mut contract, &mut order, &self.shared);
             wrapper.open_order(wi.order_id, &contract, &order, &state);
             if !wi.state.reject_reason.is_empty() {
                 wrapper.error(wi.order_id, 201, &format!("Order rejected - reason:{}", wi.state.reject_reason), "");

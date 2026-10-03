@@ -692,6 +692,8 @@ pub struct Gateway {
     /// The logon's super user and omnibus flags (ibx#417).
     pub super_user: bool,
     pub omnibus: bool,
+    /// Logon tag 6611: the smart combo conId of each currency (ibx#470).
+    pub raw_smart_combo_con_ids: String,
     /// Account config (6040=210): feature list (6542) and MiFID config id
     /// (8234); None when the answer was not in the login burst (ibx#425).
     pub account_config: Option<(Vec<String>, String)>,
@@ -1677,6 +1679,7 @@ impl Gateway {
         let mut fa_session = false;
         let mut super_user = false;
         let mut omnibus = false;
+        let mut raw_smart_combo_con_ids = String::new();
         let mut scale_us_lots = false;
         let mut user_book = false;
         // Tick-by-tick limit fields, first value seen (ibx#455).
@@ -1837,6 +1840,10 @@ impl Gateway {
             super_user |= fields.get(&6130).is_some_and(|v| v == "1");
             user_book |= fields.get(&6247).is_some_and(|v| v.eq_ignore_ascii_case("demo"));
             omnibus |= fields.get(&9826).is_some_and(|v| v == "1");
+            // The smart combo conIds by currency (ibx#470).
+            if let Some(v) = fields.get(&6611) {
+                if raw_smart_combo_con_ids.is_empty() { raw_smart_combo_con_ids = v.clone(); }
+            }
             if let Some(v) = fields.get(&6542) {
                 scale_us_lots |= features_scale_us_lots(v);
                 tick_by_tick_off |= features_have(v, "NOTICKBYTICK");
@@ -2019,6 +2026,8 @@ impl Gateway {
                 super_user = true;
             } else if part == "9826=1" {
                 omnibus = true;
+            } else if part.starts_with("6611=") && raw_smart_combo_con_ids.is_empty() {
+                raw_smart_combo_con_ids = part[5..].to_string();
             } else if let Some(id) = white_branding_part(part).filter(|_| white_branding_id.is_empty()) {
                 white_branding_id = id.to_string();
                 log::info!("Found white branding ID from init response");
@@ -2216,6 +2225,7 @@ impl Gateway {
             fa_session,
             super_user,
             omnibus,
+            raw_smart_combo_con_ids,
             account_config,
             algo_definitions,
             scale_us_lots,
@@ -2296,6 +2306,7 @@ impl Gateway {
         shared.reference.set_white_branding_id(self.white_branding_id.clone());
         shared.reference.set_fa_session(self.fa_session);
         shared.reference.set_short_sale_flags(self.super_user, self.omnibus);
+        shared.reference.set_smart_combo_con_ids(&self.raw_smart_combo_con_ids);
         shared.reference.set_tick_by_tick_limits(self.tick_by_tick_limit, self.tick_by_tick_off);
         // The snapshot rate limit is the API ticker limit (ibx#446).
         shared.reference.set_snapshot_rate_limit(self.max_real_time_requests);

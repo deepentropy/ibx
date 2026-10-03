@@ -580,6 +580,44 @@ pub struct OrderAttrs {
     /// The order's algo, None for none. The reference writes it on top of
     /// the order's own type and price fields, whatever the type (ibx#263).
     pub algo: Option<OrderAlgo>,
+    /// The combo of a BAG order, None for any other order (ibx#470).
+    pub combo: Option<Box<ComboSpec>>,
+}
+
+/// A combo (BAG) order as the caller gave it (ibx#470): the engine builds
+/// the combo from it with the reference's set-up requests before the
+/// order goes out.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ComboSpec {
+    /// The BAG contract's exchange as given: SMART for a smart combo.
+    pub exchange: String,
+    pub currency: String,
+    /// The BAG symbol as given, checked against the legs (478).
+    pub symbol: String,
+    /// The conId of the smart combo of the currency (logon tag 6611), 0
+    /// for a directed combo.
+    pub smart_con_id: i64,
+    /// The legs in the caller's order.
+    pub legs: Vec<ComboLegSpec>,
+    /// The per-leg prices (orderComboLegs) in the caller's leg order;
+    /// empty when the order has none.
+    pub leg_prices: Vec<Price>,
+    /// The smartComboRoutingParams as order attributes, (tag, value) in
+    /// the caller's order.
+    pub routing_attrs: Vec<(u32, String)>,
+    /// NonGuaranteed=1 among the routing parameters.
+    pub non_guaranteed: bool,
+}
+
+/// One leg of a combo as the caller gave it (ibx#470).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ComboLegSpec {
+    pub con_id: i64,
+    pub ratio: i32,
+    /// The leg buys (BUY); a SELL, SSHORT or SSHORTX leg sells.
+    pub buy: bool,
+    /// The leg's exchange as given.
+    pub exchange: String,
 }
 
 /// An algo on an order (ibx#263): the Adaptive priority, or the
@@ -1334,6 +1372,25 @@ impl OrderRequest {
             | Self::SubmitEx { instrument, .. }
             | Self::SubmitBracket { instrument, .. } => Some(*instrument),
             Self::SubmitWhatIf { request } => request.instrument(),
+        }
+    }
+
+    /// The combo of a new combo (BAG) order (ibx#470).
+    pub fn combo(&self) -> Option<&ComboSpec> {
+        self.new_order_side()?.1?.combo.as_deref()
+    }
+
+    /// The instrument of a new order sent through the extended encoder,
+    /// the one every combo order takes (ibx#470).
+    pub fn ex_instrument_mut(&mut self) -> Option<&mut InstrumentId> {
+        match self {
+            Self::SubmitWhatIf { request } => request.ex_instrument_mut(),
+            Self::SubmitTrailingStopPctEx { instrument, .. }
+            | Self::SubmitLimitEx { instrument, .. }
+            | Self::SubmitEx { instrument, .. }
+            | Self::SubmitAdaptive { instrument, .. }
+            | Self::SubmitAlgo { instrument, .. } => Some(instrument),
+            _ => None,
         }
     }
 

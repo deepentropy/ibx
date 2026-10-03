@@ -133,17 +133,8 @@ impl EClient {
 
     /// open_order for an order after a server report (ibx#473).
     fn send_open_order(&self, py: Python<'_>, order_id: OrderId, view: &crate::client_core::OrderView) -> PyResult<()> {
-        let c = Contract {
-            con_id: view.contract.con_id,
-            symbol: view.contract.symbol.clone(),
-            sec_type: view.contract.sec_type.clone(),
-            exchange: view.contract.exchange.clone(),
-            primary_exchange: view.contract.primary_exchange.clone(),
-            currency: view.contract.currency.clone(),
-            local_symbol: view.contract.local_symbol.clone(),
-            trading_class: view.contract.trading_class.clone(),
-            ..Default::default()
-        };
+        // A combo's contract with its legs (ibx#470).
+        let c = Contract::from_api(py, &view.contract)?;
         let src = &view.order;
         let mut o = Order::default();
         o.order_id = order_id;
@@ -163,6 +154,12 @@ impl EClient {
         o.trail_stop_price = src.trail_stop_price;
         o.algo_strategy = src.algo_strategy.clone();
         o.what_if = src.what_if;
+        // A combo's per-leg prices and routing (ibx#470).
+        for price in &src.order_combo_legs {
+            o.order_combo_legs.push(Py::new(py, super::super::contract::OrderComboLeg { price: *price })?.into_any());
+        }
+        o.smart_combo_routing_params = src.smart_combo_routing_params.iter()
+            .map(|tv| super::super::contract::TagValue { tag: tv.tag.clone(), value: tv.value.clone() }).collect();
         let mut state = OrderState::default();
         state.status = view.state.status.clone();
         state.commission_and_fees = view.state.commission_and_fees;
@@ -239,18 +236,6 @@ impl EClient {
             let remaining = fill.remaining_fixed as f64 / QTY_SCALE_F;
             let shares = fill.qty_fixed as f64 / QTY_SCALE_F;
             let avg_price = fill.average_price() as f64 / PRICE_SCALE_F;
-            // openOrder then orderStatus for every report of a known order
-            // (ibx#473).
-            let client_id = match self.core.order_view(fill.order_id, shared, status) {
-                Some(view) => {
-                    self.send_open_order(py, fill.order_id, &view)?;
-                    view.client_id
-                }
-                None => 0,
-            };
-            call_wrapper!(self.wrapper, py, "order_status", (fill.order_id, status, cum_qty, remaining,
-                 avg_price, perm_id, parent_id, price, client_id, "", 0.0f64));
-            self.core.record_last_fill_price(fill.order_id, price);
 
             let rich_info = shared.orders.get_order_info(fill.order_id);
             // Build api-level contract for shared storage
@@ -277,6 +262,9 @@ impl EClient {
                 ..Default::default()
             };
             self.core.apply_fill_exec(&mut api_exec, &fill_exec, fill.order_id);
+            // A combo's report shows the combo or the leg (ibx#470).
+            let mut api_contract = api_contract;
+            crate::client_core::ClientCore::apply_combo_exec(&fill_exec, &mut api_contract, &mut api_exec);
 
             // Build Python contract for callback
             let exec_contract = Contract {
@@ -285,6 +273,8 @@ impl EClient {
                 sec_type: api_contract.sec_type.clone(),
                 exchange: api_contract.exchange.clone(),
                 currency: api_contract.currency.clone(),
+                local_symbol: api_contract.local_symbol.clone(),
+                trading_class: api_contract.trading_class.clone(),
                 ..Default::default()
             };
 
@@ -295,14 +285,14 @@ impl EClient {
                 acct_number: api_exec.acct_number.clone(),
                 exchange: api_exec.exchange.clone(),
                 side: api_exec.side.clone(),
-                shares,
-                price,
+                shares: api_exec.shares,
+                price: api_exec.price,
                 perm_id,
                 client_id: api_exec.client_id,
                 order_id: fill.order_id,
                 liquidation: 0,
-                cum_qty,
-                avg_price,
+                cum_qty: api_exec.cum_qty,
+                avg_price: api_exec.avg_price,
                 order_ref: api_exec.order_ref.clone(),
                 model_code: api_exec.model_code.clone(),
                 last_liquidity: 0,
@@ -321,6 +311,20 @@ impl EClient {
             if let Some(cr) = early_report {
                 self.send_commission_report(py, &cr)?;
             }
+
+            // The execution first, then openOrder and orderStatus for every
+            // report of a known order, as the reference (ibx#473; captured
+            // 30/09/2026 on a stock and a combo fill).
+            let client_id = match self.core.order_view(fill.order_id, shared, status) {
+                Some(view) => {
+                    self.send_open_order(py, fill.order_id, &view)?;
+                    view.client_id
+                }
+                None => 0,
+            };
+            call_wrapper!(self.wrapper, py, "order_status", (fill.order_id, status, cum_qty, remaining,
+                 avg_price, perm_id, parent_id, price, client_id, "", 0.0f64));
+            self.core.record_last_fill_price(fill.order_id, price);
 
             // Update open order tracking
             self.core.update_order_fill(fill.order_id, status, cum_qty, remaining);
@@ -573,14 +577,20 @@ impl EClient {
             } else {
                 self.core.peek_what_if(wi.order_id)
             };
-            let (contract_py, order_py) = if let Some((contract, order)) = tracked {
-                let c = Contract {
-                    con_id: contract.con_id,
-                    symbol: contract.symbol,
-                    sec_type: contract.sec_type,
-                    exchange: contract.exchange,
-                    currency: contract.currency,
-                    ..Default::default()
+            let (contract_py, order_py) = if let Some((mut contract, mut order)) = tracked {
+                // A combo shows its combo (ibx#470).
+                crate::client_core::ClientCore::apply_combo_view(wi.order_id, &mut contract, &mut order, shared);
+                let c = if contract.sec_type.eq_ignore_ascii_case("BAG") {
+                    Contract::from_api(py, &contract)?
+                } else {
+                    Contract {
+                        con_id: contract.con_id,
+                        symbol: contract.symbol,
+                        sec_type: contract.sec_type,
+                        exchange: contract.exchange,
+                        currency: contract.currency,
+                        ..Default::default()
+                    }
                 };
                 let mut o = Order::default();
                 o.order_id = order.order_id;

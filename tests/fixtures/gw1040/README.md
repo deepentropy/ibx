@@ -32,7 +32,7 @@ it always comes after the `fix_in` that caused it.
 - Check before adding a file: no match for `\b(DU|DF|U|F)[0-9]{6,8}\b` (outside `8349` signatures), no MAC address,
   no username.
 
-## Files (28/09/2026; depth slices 02/10/2026)
+## Files (28/09/2026; depth slices 02/10/2026; combos 03/10/2026)
 
 | Folder | Session | Scenarios |
 |---|---|---|
@@ -44,6 +44,9 @@ it always comes after the `fix_in` that caused it.
 | `20260928` | RTH | depth_single_iex: AAPL depth on IEX alone, 5 rows (slice: the request, its farm entries, acknowledgements, definitions, depth frames and the first 610 depth callbacks) |
 | `20260928` | RTH | option_chain_aapl: reqSecDefOptParams AAPL STK (slice of i192_f2_option_future_lookup: the request, the derivative query, the stock leg lookup, the chain query and answer, the 41 rows and the end) |
 | `20260928` | RTH | depth_smart: AAPL SmartDepth, 50 rows (slice: first 862 callbacks, with tail deletes), then AXTI SmartDepth, 10 rows (whole) |
+| `20260926` | closed | i105_combo_stock_smart: the first combo order of the session (SMART, SPY / QQQ, BAG symbol SPY,QQQ): the set-up requests, then 478 |
+| `20260926b` | closed | i105_combo_stock_smart, i105_combo_leg_prices, i105_combo_directed: combo orders of the same session (no set-up request), price change and cancel, per-leg prices, a combo on ARCA refused with 200 |
+| `20260930` | RTH | i105_combo_fill: a SMART stock combo bought and sold, its set-up, the fill of the combo and of each leg |
 | `20261002` | pre-open | b1_432_hist_ticks: historical ticks of AAPL and EUR.USD (start, end, both, no zone, refusals, AGGTRADES); b1_429_keep_up_to_date: four keepUpToDate requests, their updates, cancels and refusals; b1_431_hist_format: formatDate 1 and 2 bars, historicalDataEnd strings, head timestamps, cancel of an unknown request |
 
 The `6010` (orderRef) values in the order frames are labels chosen by the recording scripts.

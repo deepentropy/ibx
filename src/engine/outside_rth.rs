@@ -113,7 +113,7 @@ impl RthKind {
 
 /// True when outside-RTH stays on the order (ib-agent#199, conditions A and
 /// B). `exchange` is the order's exchange as sent (BEST for SMART); `tif` the
-/// time-in-force byte. ibx sends no combo, volatility, algo AccuDistr,
+/// time-in-force byte. ibx sends no volatility, algo AccuDistr,
 /// relative-discretionary or OMS container order, so those conditions pass.
 pub(crate) fn outside_rth_applies(kind: RthKind, tif: u8, exchange: &str, types: &RthTypes) -> bool {
     // A4: a market-like type is regular-hours only on a US stock or
@@ -130,7 +130,16 @@ pub(crate) fn outside_rth_applies(kind: RthKind, tif: u8, exchange: &str, types:
     let tif_ok = !kind.moc_loc
         && !matches!(tif, b'?' | b'4' | b'3')
         && (tif != b'2' || exchange == "ARCA");
-    if !((types.rth && tif_ok) || (types.lth && kind.stop_or_touched)) { return false; }
+    // A combo (ibx#470, its BAG definition): never with a market-like
+    // type, else when the time in force allows it or the type is a stop
+    // or touched one (`OutsideRth.a(pe, list, type, exch, tif)` step 2).
+    // Whether the combo's exchange enables outside RTH for combos (A3) is
+    // not known here; it is taken as enabled.
+    if types.sec_type == "BAG" {
+        if kind.market_like || !(tif_ok || kind.stop_or_touched) { return false; }
+    } else if !((types.rth && tif_ok) || (types.lth && kind.stop_or_touched)) {
+        return false;
+    }
     // A9: not the overnight venues.
     if matches!(exchange, "OVERNIGHT" | "IBEOS") { return false; }
     // B: session-only lists.

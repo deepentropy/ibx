@@ -338,13 +338,19 @@ impl EClient {
     /// contract is a lookup; a registration waits for the engine with the
     /// interpreter lock released (ibx#271).
     pub(crate) fn find_or_register_instrument(&self, py: Python<'_>, contract: &Contract) -> PyResult<u32> {
+        self.find_or_register_con_id(py, contract.con_id, contract)
+    }
+
+    /// `find_or_register_instrument` under another conId: a smart combo
+    /// goes out on its currency's smart combo conId (ibx#470).
+    pub(crate) fn find_or_register_con_id(&self, py: Python<'_>, con_id: i64, contract: &Contract) -> PyResult<u32> {
         let tx = self.tx()?;
-        if let Some(&id) = self.core.con_id_to_instrument.lock().unwrap().get(&contract.con_id) {
+        if let Some(&id) = self.core.con_id_to_instrument.lock().unwrap().get(&con_id) {
             return Ok(id);
         }
         py.detach(|| self.core.find_or_register_instrument(
             &tx,
-            contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
+            con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
         )).map_err(|e| PyRuntimeError::new_err(e))
     }
 }
