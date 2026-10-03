@@ -13,10 +13,10 @@
 //! The fixtures are under tests/fixtures/gw1040/codec/ (`codec/1`, made by
 //! scripts/codec_fixtures.py).
 
-mod account;
-mod fixture;
-mod hmds;
+pub(crate) mod account;
+pub(crate) mod fixture;
+pub(crate) mod hmds;
 mod l1;
-mod orders;
-mod replay;
-mod session;
+pub(crate) mod orders;
+pub(crate) mod replay;
+pub(crate) mod session;

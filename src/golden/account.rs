@@ -19,7 +19,7 @@ fn request_message(f: &Fields) -> String {
     to_pipe(&out)
 }
 
-struct AccountReplay {
+pub(crate) struct AccountReplay {
     ours: Vec<String>,
     theirs: Vec<String>,
     requests_ours: Vec<String>,
@@ -28,7 +28,7 @@ struct AccountReplay {
 
 /// Replay the account summary requests of a fixture: the server's frames
 /// with ibx's subscription id in place of the reference's.
-fn replay_account_summary(fx: &Fixture) -> AccountReplay {
+pub(crate) fn replay_account_summary(fx: &Fixture) -> AccountReplay {
     let mut s = Session::new();
     let mut theirs = Vec::new();
     let mut requests_theirs = Vec::new();

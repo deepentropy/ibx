@@ -3,6 +3,7 @@
 //! normaliser. Built only for the tests (`test-support` feature); never part
 //! of a release build.
 
+pub mod decoders;
 pub mod normalise;
 pub mod peer;
 

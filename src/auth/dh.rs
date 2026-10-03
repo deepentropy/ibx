@@ -234,7 +234,7 @@ impl SecureChannel {
 
     /// Test channel with all-zero keys and IVs: two of them encrypt for
     /// each other.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn zero_keys_for_test() -> Self {
         Self {
             client_random: [0u8; 32],

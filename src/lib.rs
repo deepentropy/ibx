@@ -25,5 +25,9 @@ pub mod test_support;
 #[cfg(test)]
 mod golden;
 
+/// Robustness tests on network input and callbacks (ibx#488).
+#[cfg(test)]
+mod robustness;
+
 // Re-exports for convenience.
 pub use api::{EClient, EClientConfig, Wrapper};

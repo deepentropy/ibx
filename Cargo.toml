@@ -68,6 +68,8 @@ jiff = "0.2.28"
 
 [dev-dependencies]
 serde_json = "1"
+# Property tests of the network decoders (ibx#488).
+proptest = { version = "1", default-features = false, features = ["std"] }
 ibx = { path = ".", features = ["test-support"] }
 
 [profile.release]

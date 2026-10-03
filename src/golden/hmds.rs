@@ -41,7 +41,7 @@ fn query_id(f: &Fields) -> Option<String> {
 }
 
 /// A historical replay: callbacks and the queries of both sides.
-struct HmdsReplayed {
+pub(crate) struct HmdsReplayed {
     ours: Vec<String>,
     theirs: Vec<String>,
     queries_ours: Vec<String>,
@@ -52,7 +52,7 @@ struct HmdsReplayed {
 /// against the reference's, the farm's answers (decompressed, ibx's query
 /// ids in place of the reference's, compressed again) and the contract
 /// lookups' replies (to ibx's lookup of the same symbol, in order).
-fn replay_hmds(fx: &Fixture) -> HmdsReplayed {
+pub(crate) fn replay_hmds(fx: &Fixture) -> HmdsReplayed {
     let mut s = Session::new();
     let mut theirs = Vec::new();
     let mut queries_theirs: Vec<(Fields, bool)> = Vec::new();

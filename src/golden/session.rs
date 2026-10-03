@@ -15,6 +15,24 @@ use super::fixture::{attr_mask, n, order_price, perm, OPEN_ORDER_FIELDS};
 
 pub(crate) const ACCOUNT: &str = "DUXXXXXXX";
 
+/// Makes bad copies of a server frame (the robustness tests, ibx#488).
+pub(crate) type BadCopies = Box<dyn FnMut(&[u8]) -> Vec<Vec<u8>>>;
+
+thread_local! {
+    /// When set, each server frame a replay sends is preceded by the bad
+    /// copies this makes of it, given straight to the engine's handler:
+    /// the replay then runs on with the bad input in between.
+    pub(crate) static BAD_COPIES: std::cell::RefCell<Option<BadCopies>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A link of the session.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Link {
+    Farm,
+    Ccp,
+    Hmds,
+}
+
 /// Steps of the engine after each input: enough for a request to reach the
 /// wire and for its reply to reach the queues.
 const SETTLE_STEPS: usize = 4;
@@ -106,13 +124,42 @@ impl Session {
     }
 
     pub fn send_farm(&mut self, raw: &[u8]) {
+        self.give_bad_copies(raw, Link::Farm);
         self.farm.send_raw(raw);
         self.settle();
     }
 
     pub fn send_ccp(&mut self, raw: &[u8]) {
+        self.give_bad_copies(raw, Link::Ccp);
         self.ccp.send_raw(raw);
         self.settle();
+    }
+
+    /// The bad copies [`BAD_COPIES`] makes of a server frame, handed to the
+    /// engine's message handler of `link` (a compressed copy opened first).
+    /// A panic names the copy.
+    pub fn give_bad_copies(&mut self, raw: &[u8], link: Link) {
+        let copies = BAD_COPIES.with(|hook| hook.borrow_mut().as_mut().map(|make| make(raw))).unwrap_or_default();
+        for copy in copies {
+            let msgs = if copy.starts_with(b"8=FIXCOMP\x01") {
+                crate::protocol::fixcomp::fixcomp_decompress(&copy).unwrap_or_default()
+            } else {
+                vec![copy]
+            };
+            for m in msgs {
+                let engine = &mut self.engine;
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match link {
+                    Link::Farm => engine.inject_farm_message(&m),
+                    Link::Ccp => engine.inject_ccp_message(&m),
+                    Link::Hmds => engine.inject_hmds_message(&m),
+                }));
+                if let Err(e) = run {
+                    let text = e.downcast_ref::<String>().cloned()
+                        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                    panic!("{link:?} handler panicked ({text}) on {}", crate::protocol::fix::fmt_pipe(&m));
+                }
+            }
+        }
     }
 
     /// A message to the engine on the historical link, compressed as the
@@ -120,6 +167,9 @@ impl Session {
     pub fn send_hmds_message(&mut self, fields: &Fields) {
         let f: Vec<(u32, &str)> = fields.iter().filter(|(t, _)| !matches!(t, 8 | 9 | 10 | 34))
             .map(|(t, v)| (*t, v.as_str())).collect();
+        if BAD_COPIES.with(|hook| hook.borrow().is_some()) {
+            self.give_bad_copies(&crate::protocol::fix::fix_build(&f, 0), Link::Hmds);
+        }
         self.hmds.send_fixcomp(&f);
         self.settle();
     }
