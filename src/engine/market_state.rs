@@ -124,6 +124,21 @@ pub struct MarketState {
     sec_types: [Option<String>; MAX_INSTRUMENTS],
     /// Per-instrument requested exchange. Empty slot = default routing.
     exchanges: [Option<String>; MAX_INSTRUMENTS],
+    /// The terms of an option, written on its orders; None for any other
+    /// contract.
+    option_terms: [Option<Box<OptionTerms>>; MAX_INSTRUMENTS],
+}
+
+/// The terms of an option contract its orders carry, as the reference
+/// writes them after the symbol (`jclient.pe.c(StringBuffer)@1195-1235`,
+/// `@1485`): the maturity (tag 200, the definition's own 200), the right
+/// (201: 1 call, 0 put), the strike (202) and the multiplier (231).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OptionTerms {
+    pub maturity: String,
+    pub call: bool,
+    pub strike: f64,
+    pub multiplier: f64,
 }
 
 impl MarketState {
@@ -147,6 +162,7 @@ impl MarketState {
             currencies: std::array::from_fn(|_| None),
             sec_types: std::array::from_fn(|_| None),
             exchanges: std::array::from_fn(|_| None),
+            option_terms: std::array::from_fn(|_| None),
         }
     }
 
@@ -239,6 +255,7 @@ impl MarketState {
         self.currencies[instrument as usize] = None;
         self.sec_types[instrument as usize] = None;
         self.exchanges[instrument as usize] = None;
+        self.option_terms[instrument as usize] = None;
         self.min_ticks[instrument as usize] = 0.0;
         self.min_tick_scaled[instrument as usize] = 0;
         self.last_ts_base[instrument as usize] = 0;
@@ -386,6 +403,16 @@ impl MarketState {
     /// (ibx#217): order encoders derive their routing tags from these
     /// instead of hardcoding stock-on-SMART. Empty strings leave the
     /// defaults in place.
+    /// Record the terms of an option instrument, for its orders.
+    pub fn set_option_terms(&mut self, id: InstrumentId, terms: OptionTerms) {
+        self.option_terms[id as usize] = Some(Box::new(terms));
+    }
+
+    /// The terms of an option instrument, None for any other.
+    pub fn option_terms(&self, id: InstrumentId) -> Option<&OptionTerms> {
+        self.option_terms[id as usize].as_deref()
+    }
+
     pub fn set_routing(&mut self, id: InstrumentId, sec_type: &str, exchange: &str) {
         if !sec_type.is_empty() {
             self.sec_types[id as usize] = Some(sec_type.to_uppercase());

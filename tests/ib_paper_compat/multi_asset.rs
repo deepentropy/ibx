@@ -357,8 +357,21 @@ pub(super) fn phase_options_order(conns: Conns) -> Conns {
     let (mut hot_loop, control_tx) = HotLoop::with_connections(
         shared.clone(), Some(event_tx), account_id.clone(), conns.farm, ccp, conns.hmds, None,
     );
-    let inst = hot_loop.context_mut().register_instrument(opt_con_id);
-    hot_loop.context_mut().set_symbol(inst, "SPY".to_string());
+    // The option as the clients register it, with the terms its orders
+    // carry: security type, routing, currency, maturity, right, strike and
+    // multiplier, so the order goes out as an option order, as the
+    // reference writes it.
+    let ctx = hot_loop.context_mut();
+    let inst = ctx.register_instrument(opt_con_id);
+    ctx.set_symbol(inst, opt.symbol.clone());
+    ctx.set_routing(inst, "OPT", "SMART");
+    ctx.set_currency(inst, &opt.currency);
+    ctx.set_option_terms(inst, ibx::engine::market_state::OptionTerms {
+        maturity: if opt.contract_month.is_empty() { opt.last_trade_date.chars().take(6).collect() } else { opt.contract_month.clone() },
+        call: opt.right == Some(contracts::OptionRight::Call),
+        strike: opt.strike,
+        multiplier: opt.multiplier,
+    });
 
     let oid = next_order_id();
     control_tx.send(ControlCommand::Order(OrderRequest::SubmitLimitGtc {

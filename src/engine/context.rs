@@ -1094,6 +1094,22 @@ impl Context {
         self.market.set_symbol(id, symbol);
     }
 
+    /// The security type and exchange of an instrument, which its orders
+    /// are routed by.
+    pub fn set_routing(&mut self, id: InstrumentId, sec_type: &str, exchange: &str) {
+        self.market.set_routing(id, sec_type, exchange);
+    }
+
+    /// The currency of an instrument, written on its orders.
+    pub fn set_currency(&mut self, id: InstrumentId, currency: &str) {
+        self.market.set_currency(id, currency);
+    }
+
+    /// The terms of an option instrument, written on its orders.
+    pub fn set_option_terms(&mut self, id: InstrumentId, terms: crate::engine::market_state::OptionTerms) {
+        self.market.set_option_terms(id, terms);
+    }
+
     pub fn set_quote(&mut self, id: InstrumentId, quote: Quote) {
         *self.market.quote_mut(id) = quote;
     }

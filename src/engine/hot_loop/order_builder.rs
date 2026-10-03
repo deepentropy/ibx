@@ -1776,6 +1776,14 @@ fn send_new_order(
         .filter(|id| id.parse::<i32>().is_ok_and(|n| n >= 0));
     let client_id = context.api_client_id.to_string();
     let stock = fields.iter().any(|&(t, v)| t == 167 && v == "STK");
+    // An option's terms after its symbol, and its multiplier
+    // (`jclient.pe.c(StringBuffer)@1195-1235`, `@1485`).
+    let option = context.market.option_terms(instrument).map(|t| (
+        t.maturity.clone(),
+        if t.call { "1" } else { "0" },
+        super::format_price((t.strike * crate::types::PRICE_SCALE as f64).round() as crate::types::Price).to_string(),
+        format_price_ref((t.multiplier * crate::types::PRICE_SCALE as f64).round() as crate::types::Price).to_string(),
+    ));
     let mut out: Vec<(u32, &str)> = Vec::with_capacity(fields.len() + short_sale.len() + 10);
     for &(tag, value) in fields {
         match (tag, what_if) {
@@ -1810,8 +1818,11 @@ fn send_new_order(
     if context.price_mgmt_send && !crate::engine::price_mgmt::excluded_frame(&out) { out.push((8339, "1")); }
     if let Some(id) = order_id { out.push((6121, id)); }
     out.push((6119, &client_id));
-    // A stock's multiplier, as the reference writes it.
+    // A stock's multiplier, as the reference writes it; an option's terms.
     if stock { out.push((231, "1.00")); }
+    if let Some((maturity, right, strike, multiplier)) = &option {
+        out.extend([(200, maturity.as_str()), (201, *right), (202, strike.as_str()), (231, multiplier.as_str())]);
+    }
     out.push((6088, "Socket"));
     out.push((6211, ""));
     out.push((6238, ""));
@@ -1941,7 +1952,8 @@ pub(super) fn reference_rank(tag: u32) -> u16 {
         40 => 121,
         211 => 122,
         18 => 123,
-        55 => 124,
+        // An option's maturity, right and strike follow the symbol.
+        55 | 200 | 201 | 202 => 124,
         167 => 125,
         231 => 126,
         54 => 127,
@@ -5765,5 +5777,29 @@ mod tests {
             .map(|f| if f.starts_with('c') { "c" } else { f.split("|11=").nth(1).and_then(|r| r.split('|').next()).unwrap_or("?") })
             .collect();
         assert_eq!(sent, vec!["c", "14.0", "10.0", "11.0", "12.0", "13.0"]);
+    }
+
+    // An option order carries the option's terms after its symbol and its
+    // multiplier, as the reference's new-order writer
+    // (`jclient.pe.c(StringBuffer)@1195-1485`): maturity 200, right 201
+    // (1 call), strike 202, 167=OPT, 231. Without them the server refused
+    // the option's conId sent as a stock (201 "Contract does not match
+    // supplied contract parameters", paper 03/10/2026).
+    #[test]
+    fn option_orders_carry_the_option_terms() {
+        let tags = wire_tags_with(|c| {
+            c.market.set_symbol(0, "SPY".into());
+            c.market.set_routing(0, "OPT", "SMART");
+            c.market.set_option_terms(0, crate::engine::market_state::OptionTerms {
+                maturity: "202610".into(), call: true, strike: 768.0, multiplier: 100.0,
+            });
+            c.rth_types.insert((265598, "BEST".to_string()), crate::engine::outside_rth::RthTypes {
+                rth: true, sec_type: "OPT".into(), ..Default::default()
+            });
+        }, OrderRequest::SubmitLimitGtc { order_id: 9, instrument: 0, side: Side::Buy, qty: 1, price: P / 100, outside_rth: false });
+        let order: Vec<(u32, &str)> = tags.iter().map(|(t, v)| (*t, v.as_str()))
+            .filter(|(t, _)| matches!(t, 55 | 200 | 201 | 202 | 167 | 231 | 54 | 100 | 6008)).collect();
+        assert_eq!(order, [(55, "SPY"), (200, "202610"), (201, "1"), (202, "768"), (167, "OPT"), (231, "100.00"),
+            (54, "1"), (100, "BEST"), (6008, "265598")]);
     }
 }
