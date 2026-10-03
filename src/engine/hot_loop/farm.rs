@@ -656,7 +656,7 @@ impl FarmState {
                 }
             }
 
-            context.market.apply_tick(instrument, route.price_tick, route.trade, tick);
+            context.market.apply_tick_sized(instrument, route.price_tick, route.size_tick, route.trade, tick);
 
             notified[word] |= bit;
         }
@@ -741,7 +741,10 @@ impl FarmState {
 
         // The tick scales the prices of this server tag only; the bid/ask
         // entry's valid tick is also the contract's, as in the reference.
-        context.market.register_farm_tag(self.rx_farm, server_tag, instrument, min_tick);
+        // So does the size increment (ibx#287, ibx#446); absent from older
+        // acks.
+        let size_min_tick = parts.get(8).and_then(|v| v.parse::<f64>().ok());
+        context.market.register_farm_tag_sized(self.rx_farm, server_tag, instrument, min_tick, size_min_tick);
         let bid_ask = self.instrument_md_reqs.iter().find(|(id, _)| *id == instrument)
             .and_then(|(_, reqs)| reqs.iter().position(|r| *r == req_id))
             .is_some_and(|p| p % 2 == 0);
@@ -759,10 +762,6 @@ impl FarmState {
                 instrument, min_tick, bbo_exchange: bbo, snapshot_permissions: permissions,
             });
             return;
-        }
-        // The size increment (ibx#287); absent from older acks.
-        if let Some(size_min_tick) = parts.get(8).and_then(|v| v.parse::<f64>().ok()) {
-            context.market.set_size_min_tick(instrument, size_min_tick);
         }
         log::info!("Subscribed instrument {} -> server_tag {}, minTick {}", instrument, server_tag, min_tick);
 
@@ -881,12 +880,10 @@ impl FarmState {
 
         if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
             // A trade stream tag, kept apart from the quote tags (#292),
-            // with the tick its trades are scaled by.
-            context.market.register_trade_tag(self.rx_farm, server_tag, instrument, min_tick);
-            // The size increment, when present (ibx#287).
-            if let Some(size_min_tick) = parts.get(4).and_then(|v| v.parse::<f64>().ok()) {
-                context.market.set_size_min_tick(instrument, size_min_tick);
-            }
+            // with the tick and the size increment (when present, ibx#287)
+            // its trades are scaled by.
+            let size_min_tick = parts.get(4).and_then(|v| v.parse::<f64>().ok());
+            context.market.register_trade_tag_sized(self.rx_farm, server_tag, instrument, min_tick, size_min_tick);
             log::info!("Ticker setup: con_id {} -> server_tag {}, minTick {}", con_id, server_tag, min_tick);
         }
     }

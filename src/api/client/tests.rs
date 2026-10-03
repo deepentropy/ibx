@@ -961,7 +961,7 @@ fn market_data_rejects_are_reported() {
     assert!(client.core.delayed_reqs.lock().unwrap().contains(&5), "its ticks are delayed ones");
     assert_eq!(crate::client_core::delayed_tick_type(1), 66);
     assert_eq!(crate::client_core::delayed_tick_type(14), 76);
-    assert_eq!(crate::client_core::delayed_tick_type(45), 45);
+    assert_eq!(crate::client_core::delayed_tick_type(45), 88);
     assert!(!client.core.req_to_instrument.lock().unwrap().contains_key(&6));
     assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Unsubscribe { instrument: 1 })));
 }
@@ -5617,6 +5617,108 @@ fn spy_snapshot_in_the_reference_order() {
         "price:1:1:766.24:auto", "size:1:0:800", "price:1:2:766.34:auto", "size:1:3:1000",
         "end:1",
     ]);
+    drop(engine);
+}
+
+// ibx#446, from the reference's delayed sender (`jextend.dL.b(List, s,
+// int, pa, dy, o, SnapshotPreference, Set)`): a delayed snapshot sends the
+// trade's time as 88, never the exchanges nor a halted tick, and ends once
+// the delayed bid, ask, last, open, close and time came.
+#[test]
+fn delayed_snapshot_sends_its_own_time_and_no_exchanges() {
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    client.req_mkt_data(1, &spy_stk(), "", true, false).unwrap();
+    client.core.delayed_reqs.lock().unwrap().insert(1);
+    let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100;
+    let q = crate::types::QTY_SCALE;
+    shared.market.push_quote(5, &crate::types::Quote {
+        bid: p(76_624), ask: p(76_634), bid_size: 800 * q, ask_size: 1000 * q, last: p(76_659), last_size: 80 * q,
+        close: p(76_399), open: p(76_442), timestamp_ns: 1_790_921_446 * 1_000_000_000,
+        bid_exch_mask: 1, ask_exch_mask: 1, ..Default::default()
+    });
+    let mut marks = crate::types::QuoteMarks::default();
+    marks.set_halted(0);
+    shared.market.push_marks(5, marks);
+    let mut w = SeqRec::default();
+    client.process_msgs(&mut w);
+    let ticks: Vec<&str> = w.events.iter().map(String::as_str)
+        .filter(|e| !e.starts_with("mdt:") && !e.starts_with("params:")).collect();
+    assert_eq!(ticks, vec![
+        "string:1:88:1790921446", "price:1:68:766.59:-", "size:1:71:80",
+        "price:1:75:763.99:-", "price:1:76:764.42:-",
+        "price:1:66:766.24:-", "size:1:69:800", "price:1:67:766.34:-", "size:1:70:1000",
+        "end:1",
+    ]);
+    drop(engine);
+}
+
+// ibx#446: a side with no quote is -1 on the wire (captured 28/09/2026);
+// the reference sends it as it is: tickPrice -1 with size 0, on a stream
+// and in a snapshot.
+#[test]
+fn empty_quote_side_goes_out_as_minus_one() {
+    use crate::types::{QuoteMarks, SizeKind};
+    for snapshot in [false, true] {
+        let (client, rx, shared) = test_client();
+        let engine = top_engine(rx);
+        client.req_mkt_data(1, &spy_stk(), "", snapshot, false).unwrap();
+        let s = crate::types::PRICE_SCALE;
+        let mut marks = QuoteMarks::default();
+        marks.begin_message();
+        marks.note_quote_update();
+        for kind in [SizeKind::Bid, SizeKind::Ask] {
+            marks.set_seen(kind);
+        }
+        shared.market.push_quote(5, &crate::types::Quote { bid: -s, ask: -s, ..Default::default() });
+        shared.market.push_marks(5, marks);
+        let mut w = SeqRec::default();
+        client.process_msgs(&mut w);
+        let quote: Vec<&str> = w.events.iter().map(String::as_str)
+            .filter(|e| e.starts_with("price:") || e.starts_with("size:")).take(4).collect();
+        let auto = if snapshot { "-" } else { "auto" };
+        assert_eq!(quote, vec![
+            format!("price:1:1:-1:{auto}"), "size:1:0:0".into(), format!("price:1:2:-1:{auto}"), "size:1:3:0".into(),
+        ], "snapshot {snapshot}");
+        drop(engine);
+    }
+}
+
+// ibx#446, from the reference's delayed sender: a delayed stream sends the
+// trade's time as 88 and a halted state as 90 (when its bits change, then
+// in each step until the next book update, as 49), and no exchanges.
+#[test]
+fn delayed_stream_sends_88_and_90_and_no_exchanges() {
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    client.req_mkt_data(1, &spy_stk(), "", false, false).unwrap();
+    client.core.delayed_reqs.lock().unwrap().insert(1);
+    let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100;
+    let q = crate::types::QTY_SCALE;
+    let quote = crate::types::Quote {
+        bid: p(76_624), ask: p(76_634), bid_size: 800 * q, ask_size: 1000 * q, last: p(76_659), last_size: 80 * q,
+        timestamp_ns: 1_790_921_446 * 1_000_000_000, bid_exch_mask: 1, ask_exch_mask: 1, ..Default::default()
+    };
+    let mut marks = crate::types::QuoteMarks::default();
+    marks.begin_message();
+    marks.begin_trade();
+    marks.trade_gives(false);
+    marks.note_quote_update();
+    marks.set_halted(1);
+    shared.market.push_quote(5, &quote);
+    shared.market.push_marks(5, marks);
+    let mut w = SeqRec::default();
+    client.process_msgs(&mut w);
+    let ticks: Vec<&str> = w.events.iter().map(String::as_str)
+        .filter(|e| !e.starts_with("mdt:") && !e.starts_with("params:")).collect();
+    assert_eq!(ticks, vec![
+        "string:1:88:1790921446", "generic:1:90:1",
+        "price:1:68:766.59:-", "size:1:71:80", "size:1:71:80", "generic:1:90:1",
+        "price:1:66:766.24:-", "size:1:69:800", "price:1:67:766.34:-", "size:1:70:1000",
+        "size:1:69:800", "size:1:70:1000", "generic:1:90:1",
+    ]);
+    assert!(!w.events.iter().any(|e| e.contains(":32:") || e.contains(":33:") || e.contains(":45:") || e.contains(":49:")),
+        "{:?}", w.events);
     drop(engine);
 }
 

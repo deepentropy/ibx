@@ -855,7 +855,8 @@ pub struct StreamState {
 /// The fields of a stream step, in the order the reference sends them
 /// (indexes of the polled quote fields).
 const STEP_ALL: [usize; 14] = [0, 1, 2, 3, 4, 5, 8, 6, 7, 9, 10, 12, 13, 11];
-/// The delayed data sender's order: the volume after the low.
+/// The delayed data sender's order: the volume after the low; it sends no
+/// exchanges (12, 13 are skipped for delayed data).
 const STEP_ALL_DELAYED: [usize; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 11];
 const STEP_DAILY: [usize; 5] = [8, 6, 7, 9, 10];
 const STEP_DAILY_DELAYED: [usize; 5] = [6, 7, 8, 9, 10];
@@ -919,8 +920,10 @@ impl StreamPass<'_> {
                 9 => self.price(TICK_CLOSE, 9, false),
                 10 => self.price(TICK_OPEN, 10, false),
                 11 => self.ticks.push(MdTick::Text {
-                    tick_type: TICK_LAST_TIMESTAMP, value: (self.fields[11] / 1_000_000_000).to_string(),
+                    tick_type: self.api(TICK_LAST_TIMESTAMP), value: (self.fields[11] / 1_000_000_000).to_string(),
                 }),
+                // The delayed sender sends no exchanges.
+                12 | 13 if self.delayed => {}
                 12 | 13 => {
                     let tick_type = if idx == 12 { TICK_BID_EXCHANGE } else { TICK_ASK_EXCHANGE };
                     self.ticks.push(MdTick::Text { tick_type, value: render_exchange_mask(self.fields[idx], self.instrument, self.shared) });
@@ -933,7 +936,8 @@ impl StreamPass<'_> {
 
     fn halted(&mut self, value: Option<f64>) {
         if let Some(value) = value {
-            self.ticks.push(MdTick::Generic { tick_type: TICK_HALTED, value });
+            let tick_type = self.api(TICK_HALTED);
+            self.ticks.push(MdTick::Generic { tick_type, value });
         }
     }
 }
@@ -1048,6 +1052,11 @@ pub struct ClientCore {
     pub what_if_orders: Mutex<HashMap<OrderId, std::collections::VecDeque<(ApiContract, ApiOrder)>>>,
     // Ids of tracked orders that were filled or cancelled: never sent again (ibx#463).
     pub finished_orders: Mutex<HashSet<OrderId>>,
+    /// The highest order id this client placed (orders and what-ifs), as
+    /// the reference records it for the client when an order goes on
+    /// (`jextend.bH.Z()@78`, `jextend.H.c(int)`): a new order at or below
+    /// it is refused with 103 (ibx#462).
+    pub highest_order_id: AtomicI64,
 
     // Market data type callback tracking
     pub market_data_type: AtomicI32,
@@ -1070,12 +1079,16 @@ pub struct ClientCore {
 
 /// The delayed tick type of a real-time one, from the API tick type table
 /// (bid 1 -> 66, ask 2 -> 67, last 4 -> 68, sizes 0/3/5 -> 69/70/71, high
-/// 6 -> 72, low 7 -> 73, volume 8 -> 74, close 9 -> 75, open 14 -> 76);
-/// others unchanged (ibx#447).
+/// 6 -> 72, low 7 -> 73, volume 8 -> 74, close 9 -> 75, open 14 -> 76, last
+/// time 45 -> 88, halted 49 -> 90); others unchanged (ibx#447). The
+/// reference's delayed sender writes 88 and 90 where the real-time one
+/// writes 45 and 49 (ibx#446, `jextend.dL.b(List, s, int, pa, dy, o,
+/// SnapshotPreference, Set)@2165-2524`).
 pub fn delayed_tick_type(tick_type: i32) -> i32 {
     match tick_type {
         1 => 66, 2 => 67, 4 => 68, 0 => 69, 3 => 70, 5 => 71,
         6 => 72, 7 => 73, 8 => 74, 9 => 75, 14 => 76,
+        45 => 88, 49 => 90,
         other => other,
     }
 }
@@ -1292,6 +1305,7 @@ impl ClientCore {
             held_open_orders: Mutex::new(Vec::new()),
             what_if_orders: Mutex::new(HashMap::new()),
             finished_orders: Mutex::new(HashSet::new()),
+            highest_order_id: AtomicI64::new(0),
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashSet::new()),
             delayed_reqs: Mutex::new(HashSet::new()),
@@ -1336,8 +1350,10 @@ impl ClientCore {
         self.pending_commissions.lock().unwrap().clear();
         self.open_orders.lock().unwrap().clear();
         self.what_if_orders.lock().unwrap().clear();
-        // `finished_orders` is kept: the server still knows those orders
-        // after a reconnect, so their ids must not be sent as new orders.
+        // `finished_orders` and `highest_order_id` are kept: the server
+        // still knows those orders after a reconnect, so their ids must not
+        // be sent as new orders (the reference keeps the highest id of a
+        // client in its settings).
         self.market_data_type.store(1, Ordering::Relaxed);
         self.mdt_sent.lock().unwrap().clear();
         self.delayed_reqs.lock().unwrap().clear();
@@ -2750,6 +2766,7 @@ impl ClientCore {
         // Kept with the time in force the reference reports for it, which
         // a modify must restate (ibx#467).
         order.tif = Self::held_tif(&order).to_string();
+        self.note_order_id(order_id);
         let mut orders = self.open_orders.lock().unwrap();
         if let Some(o) = orders.get_mut(&order_id) {
             o.contract = contract;
@@ -2840,27 +2857,52 @@ impl ClientCore {
         }
     }
 
-    /// The reference's answer when `place_order` names an order this client
-    /// tracked that is filled or cancelled: error 104 and nothing sent
-    /// (ibx#463). A new order with that id would be a second real order.
-    /// A pending cancel is checked by the engine, which holds the current
-    /// status. A what-if is not a modify: it is refused only when its id
-    /// is an order of this client the server has not answered yet, with
-    /// error 103 and nothing sent (ibx#462, captured 02/10/2026: a
-    /// what-if sent right after a live order with the same id; the
-    /// reference's new-order id check `jextend.bH.W()@222` does not find
-    /// that order in its book yet).
-    pub fn refusal_for_order_id(&self, order_id: OrderId, order: &ApiOrder) -> Option<(i64, String)> {
-        if order.what_if {
-            let pending = self.open_orders.lock().unwrap().get(&order_id)
-                .is_some_and(|t| t.status == "PendingSubmit");
-            return pending.then(|| (103, "Duplicate order id".to_string()));
-        }
+    /// The reference's answers to the order id of `place_order`.
+    ///
+    /// Its id check (`jextend.bH.W()`) looks the id up in the client's
+    /// order book (`jclient.jv.b(int, int)`): an order found there goes on
+    /// (a modify, or a what-if preview). Any other id must be above the
+    /// highest id the client placed (`jextend.H.b(int)`), else error 103
+    /// and nothing sent (`bH.W()@222`).
+    ///
+    /// The reference looks each order's contract up on the server before
+    /// it puts the order in its book, so an order just placed is not there
+    /// for about one server round trip: a what-if sent right after a live
+    /// order with the same id got 103 (ibx#462, captured 02/10/2026). ibx
+    /// counts a tracked order as not in the book until the server answered
+    /// it, for a what-if; a modify of such an order goes on as before.
+    ///
+    /// An order this client tracked that is filled or cancelled: error
+    /// 104 and nothing sent (ibx#463); a what-if is not a modify and
+    /// previews it. A pending cancel is checked by the engine, which holds
+    /// the current status.
+    pub fn refusal_for_order_id(&self, order_id: OrderId, order: &ApiOrder, shared: &SharedState) -> Option<(i64, String)> {
+        let duplicate = || Some((103, "Duplicate order id".to_string()));
         if self.finished_orders.lock().unwrap().contains(&order_id) {
+            if order.what_if {
+                return None;
+            }
             let (code, message) = MODIFY_OF_FINISHED_ORDER;
             return Some((code, message.into()));
         }
+        let pending = self.open_orders.lock().unwrap().get(&order_id).map(|t| t.status == "PendingSubmit");
+        if let Some(pending) = pending {
+            return if order.what_if && pending { duplicate() } else { None };
+        }
+        // A new id: above the highest placed one, unless the server knows
+        // the order (one of an earlier session).
+        if order_id > 0 && order_id <= self.highest_order_id.load(Ordering::Acquire)
+            && shared.orders.get_order_info(order_id).is_none()
+        {
+            return duplicate();
+        }
         None
+    }
+
+    /// Note an order id this client placed: the highest one bounds the
+    /// ids of new orders (ibx#462).
+    pub fn note_order_id(&self, order_id: OrderId) {
+        self.highest_order_id.fetch_max(order_id, Ordering::AcqRel);
     }
 
     /// Hold an open-order request from the logon, or from a lost auth link,
@@ -3029,7 +3071,8 @@ impl ClientCore {
         } else {
             (true, true)
         };
-        let halted = if delayed { None } else { marks.halted().map(crate::types::QuoteMarks::halted_tick_value) };
+        // Delayed data has its own halted tick (90), with the same rule.
+        let halted = marks.halted().map(crate::types::QuoteMarks::halted_tick_value);
         let mut pending = st.halted_pending;
 
         let mut out = StreamPass { ticks: Vec::new(), todo, fields: &fields, delayed, shared, instrument: iid, bid_auto, ask_auto };
@@ -3198,9 +3241,9 @@ impl ClientCore {
 
         let mut ticks = Vec::new();
         let trade = |ticks: &mut Vec<MdTick>, snap: &mut crate::control::snapshot::PlainSnapshot| {
-            if q.timestamp_ns != 0 && snap.take(TICK_LAST_TIMESTAMP) {
+            if q.timestamp_ns != 0 && snap.take(api(TICK_LAST_TIMESTAMP)) {
                 ticks.push(MdTick::Text {
-                    tick_type: TICK_LAST_TIMESTAMP, value: (q.timestamp_ns / 1_000_000_000).to_string(),
+                    tick_type: api(TICK_LAST_TIMESTAMP), value: (q.timestamp_ns / 1_000_000_000).to_string(),
                 });
             }
             if q.last != 0 && snap.take(api(4)) {
@@ -3244,7 +3287,7 @@ impl ClientCore {
             }
         }
         for (mask, tt) in [(q.bid_exch_mask, TICK_BID_EXCHANGE), (q.ask_exch_mask, TICK_ASK_EXCHANGE)] {
-            if mask != 0 && snap.take(tt) {
+            if !delayed && mask != 0 && snap.take(tt) {
                 ticks.push(MdTick::Text { tick_type: tt, value: render_exchange_mask(mask, iid, shared) });
             }
         }
@@ -4422,6 +4465,9 @@ impl ClientCore {
 
     /// Keep a what-if preview for its answer (ibx#462).
     pub fn track_what_if(&self, order_id: OrderId, contract: ApiContract, order: ApiOrder) {
+        // A what-if goes through the same id record as an order
+        // (`jextend.bH.Z()`).
+        self.note_order_id(order_id);
         self.what_if_orders.lock().unwrap().entry(order_id).or_default().push_back((contract, order));
     }
 
@@ -5751,11 +5797,13 @@ mod tests {
     #[test]
     fn place_on_a_filled_order_id_is_refused() {
         let core = ClientCore::new();
+        let shared = SharedState::new();
         core.track_order(7, ApiContract::default(), lmt(100.0), 0);
-        assert!(core.refusal_for_order_id(7, &lmt(101.0)).is_none(), "working: a modify");
+        core.update_order_status(7, "Submitted", 0.0, 100.0);
+        assert!(core.refusal_for_order_id(7, &lmt(101.0), &shared).is_none(), "working: a modify");
         core.update_order_fill(7, "Filled", 100.0, 0.0);
         assert_eq!(core.tracked_order_type(7), None);
-        assert_eq!(core.refusal_for_order_id(7, &lmt(101.0)),
+        assert_eq!(core.refusal_for_order_id(7, &lmt(101.0), &shared),
             Some((104, "Cannot modify a filled order.".to_string())));
     }
 
@@ -5764,7 +5812,7 @@ mod tests {
         let core = ClientCore::new();
         core.track_order(8, ApiContract::default(), lmt(100.0), 0);
         core.update_order_status(8, "Cancelled", 0.0, 100.0);
-        assert_eq!(core.refusal_for_order_id(8, &lmt(101.0)).map(|r| r.0), Some(104));
+        assert_eq!(core.refusal_for_order_id(8, &lmt(101.0), &SharedState::new()).map(|r| r.0), Some(104));
     }
 
     #[test]
@@ -5773,7 +5821,7 @@ mod tests {
         core.track_order(9, ApiContract::default(), lmt(100.0), 0);
         core.update_order_fill(9, "Filled", 100.0, 0.0);
         let what_if = ApiOrder { what_if: true, ..lmt(101.0) };
-        assert!(core.refusal_for_order_id(9, &what_if).is_none());
+        assert!(core.refusal_for_order_id(9, &what_if, &SharedState::new()).is_none());
     }
 
     #[test]
@@ -5782,7 +5830,51 @@ mod tests {
         core.track_order(10, ApiContract::default(), lmt(100.0), 0);
         core.update_order_fill(10, "Filled", 100.0, 0.0);
         core.reset();
-        assert!(core.refusal_for_order_id(10, &lmt(101.0)).is_some());
+        assert!(core.refusal_for_order_id(10, &lmt(101.0), &SharedState::new()).is_some());
+    }
+
+    // ibx#462, `jextend.bH.W()@222`: a new order id at or below the highest
+    // id the client placed is refused with 103, also after a reconnect; a
+    // higher one goes on; a what-if counts as placed.
+    #[test]
+    fn a_new_order_at_or_below_the_highest_id_is_refused() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        let duplicate = Some((103, "Duplicate order id".to_string()));
+        assert!(core.refusal_for_order_id(5, &lmt(100.0), &shared).is_none(), "nothing placed yet");
+        core.track_order(5, ApiContract::default(), lmt(100.0), 0);
+        core.update_order_status(5, "Submitted", 0.0, 100.0);
+        assert_eq!(core.refusal_for_order_id(3, &lmt(100.0), &shared), duplicate, "below the highest");
+        assert!(core.refusal_for_order_id(6, &lmt(100.0), &shared).is_none(), "above the highest");
+        let what_if = ApiOrder { what_if: true, ..lmt(100.0) };
+        assert_eq!(core.refusal_for_order_id(4, &what_if, &shared), duplicate, "a what-if too");
+        core.track_what_if(9, ApiContract::default(), what_if.clone());
+        assert_eq!(core.refusal_for_order_id(8, &lmt(100.0), &shared), duplicate, "a what-if's id counts");
+        core.reset();
+        assert_eq!(core.refusal_for_order_id(9, &lmt(100.0), &shared), duplicate, "kept after a reconnect");
+        assert!(core.refusal_for_order_id(10, &lmt(100.0), &shared).is_none());
+    }
+
+    // ibx#462: a what-if with the id of an order the server has not
+    // answered yet gets 103 (captured 02/10/2026); once answered, it is a
+    // preview. A modify goes on either way. An id below the highest that
+    // the server knows (an order of an earlier session) is no new id.
+    #[test]
+    fn what_if_on_an_order_not_answered_yet_and_known_ids() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        let what_if = ApiOrder { what_if: true, ..lmt(101.0) };
+        core.track_order(79, ApiContract::default(), lmt(100.0), 0);
+        assert_eq!(core.refusal_for_order_id(79, &what_if, &shared).map(|r| r.0), Some(103));
+        assert!(core.refusal_for_order_id(79, &lmt(101.0), &shared).is_none(), "a modify");
+        core.update_order_status(79, "Submitted", 0.0, 1.0);
+        assert!(core.refusal_for_order_id(79, &what_if, &shared).is_none(), "a preview");
+        assert_eq!(core.refusal_for_order_id(60, &lmt(100.0), &shared).map(|r| r.0), Some(103));
+        shared.orders.push_order_info(60, crate::bridge::RichOrderInfo {
+            contract: ApiContract::default(), order: lmt(100.0),
+            order_state: Default::default(), last_exec: Default::default(),
+        });
+        assert!(core.refusal_for_order_id(60, &lmt(100.0), &shared).is_none());
     }
 
     // Reports for executions this client never sees are dropped oldest

@@ -1069,7 +1069,15 @@ impl CcpState {
             log::info!("What-if reply for {} that this session did not send: dropped", clord);
             return;
         };
-        if parsed.get(&39).map(|s| s.as_str()) == Some("8") {
+        // A reject report (150=8, or 39=8: the reference reads the report
+        // kind from 39 unless 150 is 8, `jexec.fq.<init>@2690-2752`) takes
+        // the reject path, error 201 alone (`jclient.dS.a(dk, fq, pe, long,
+        // boolean)@168-189`, `trader.order.h.a(pe, fq)`), unless it is a
+        // status report (20=3): those go to the preview's reply handling
+        // whatever their status (`dS.a(dk, fq, pe, boolean, boolean)@262-345`).
+        let tag = |t: u32| parsed.get(&t).map(|s| s.as_str());
+        let reject = tag(150) == Some("8") || tag(39) == Some("8");
+        if reject && tag(20) != Some("3") {
             context.what_ifs.remove(clord.as_str());
             let reason = parsed.get(&58).map(|s| s.as_str()).unwrap_or("");
             shared.orders.push_order_error(order_id, 201, format!("Order rejected - reason:{}", reason));
@@ -1084,6 +1092,9 @@ impl CcpState {
         // message as its warning text, and the preview waits for its data
         // frame (ibx#462, `trader.order.bQ.a(gi, e3, fq)@263-321`).
         let warning_text = parsed.get(&6361).cloned().unwrap_or_default();
+        // A status report that rejects the preview is its final reply, with
+        // or without numbers: the open order, then error 201.
+        let is_data_frame = is_data_frame || (reject && parsed.contains_key(&58));
         if !is_data_frame && warning_text.is_empty() {
             return;
         }
@@ -4005,6 +4016,32 @@ mod tests {
             Ok(Event::WhatIf(answer)) => assert_eq!(answer.state.equity_with_loan_after, Some(945923.47)),
             other => panic!("the data reply is the answer: {other:?}"),
         }
+        assert!(context.what_ifs.is_empty());
+    }
+
+    // ibx#462, from the reference's code: a reject report of a preview
+    // (150=8 or 39=8, not a status report) gives error 201 alone; a status
+    // report (20=3) with 39=8 is the preview's reply: the open order with
+    // the Inactive status, then error 201 with its reason.
+    #[test]
+    fn what_if_reject_report_and_rejected_status_report() {
+        let (mut ccp, mut context, shared) = what_if_test_state();
+        let reason = "YOUR ORDER IS NOT ACCEPTED";
+        ccp.handle_exec_report(&what_if_frame(&[(20, "0"), (150, "8"), (39, "8"), (58, reason)]),
+            &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_what_if_responses().is_empty(), "no open order");
+        assert_eq!(shared.orders.drain_order_errors(),
+            vec![(42, 201, format!("Order rejected - reason:{reason}"))]);
+        assert!(context.what_ifs.is_empty());
+
+        let (mut ccp, mut context, shared) = what_if_test_state();
+        ccp.handle_exec_report(&what_if_frame(&[(20, "3"), (150, "A"), (39, "8"), (58, reason)]),
+            &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_order_errors().is_empty());
+        let responses = shared.orders.drain_what_if_responses();
+        assert_eq!(responses.len(), 1);
+        assert!(responses[0].final_reply);
+        assert_eq!((responses[0].state.status.as_str(), responses[0].state.reject_reason.as_str()), ("Inactive", reason));
         assert!(context.what_ifs.is_empty());
     }
 

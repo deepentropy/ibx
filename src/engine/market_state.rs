@@ -41,11 +41,15 @@ impl std::hash::Hasher for TagHasher {
 /// of that tag times PRICE_SCALE. The reference keeps the tick per server
 /// tag, not per contract: the two entries of one contract can tick in
 /// different steps (a currency pair's bid/ask book and its last price).
-/// `trade` is set for a trade stream tag.
+/// `trade` is set for a trade stream tag. `size_tick` is the size
+/// increment of the tag times QTY_SCALE: the reference keeps it per server
+/// tag too (`jmdclient.bB` from the first acknowledgement of the tag,
+/// `jmdclient.p` from the latest trade setup; ibx#446).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TagRoute {
     pub instrument: InstrumentId,
     pub price_tick: i64,
+    pub size_tick: i64,
     pub trade: bool,
 }
 
@@ -57,6 +61,14 @@ type TagMap = HashMap<u64, TagRoute, std::hash::BuildHasherDefault<TagHasher>>;
 #[inline]
 fn scale_tick(min_tick: f64) -> i64 {
     (min_tick * PRICE_SCALE as f64).round() as i64
+}
+
+/// A size increment times QTY_SCALE; absent or not a positive number: 1,
+/// as the reference uses a default for an invalid one.
+#[inline]
+fn scale_size(size_min_tick: Option<f64>) -> i64 {
+    let scaled = size_min_tick.map(|s| (s * QTY_SCALE as f64).round()).unwrap_or(f64::NAN);
+    if scaled.is_finite() && scaled >= 1.0 { scaled as i64 } else { QTY_SCALE }
 }
 
 #[inline(always)]
@@ -112,8 +124,6 @@ pub struct MarketState {
     /// Round lot the bid, ask and last sizes are counted in: 1, or the
     /// contract's lot for a US stock when the session scales US lots.
     round_lots: [i64; MAX_INSTRUMENTS],
-    /// size_min_tick_scaled * round lot, for the bid, ask and last sizes.
-    size_scale: [i64; MAX_INSTRUMENTS],
     /// Per-instrument symbol name. Flat array indexed by InstrumentId.
     symbols: [Option<String>; MAX_INSTRUMENTS],
     /// Contract currency for the orders (tag 15, ibx#466).
@@ -157,7 +167,6 @@ impl MarketState {
             last_ts_base: [0; MAX_INSTRUMENTS],
             size_min_tick_scaled: [QTY_SCALE; MAX_INSTRUMENTS],
             round_lots: [1; MAX_INSTRUMENTS],
-            size_scale: [QTY_SCALE; MAX_INSTRUMENTS],
             symbols: std::array::from_fn(|_| None),
             currencies: std::array::from_fn(|_| None),
             sec_types: std::array::from_fn(|_| None),
@@ -261,7 +270,6 @@ impl MarketState {
         self.last_ts_base[instrument as usize] = 0;
         self.size_min_tick_scaled[instrument as usize] = QTY_SCALE;
         self.round_lots[instrument as usize] = 1;
-        self.size_scale[instrument as usize] = QTY_SCALE;
         self.server_tags.retain(|_, r| r.instrument != instrument);
         // The trade stream tags belong to the contract: they go with its
         // last slot (#292).
@@ -289,16 +297,35 @@ impl MarketState {
     /// (the other entry of the contract) joins that record and the first
     /// tick stays.
     pub fn register_farm_tag(&mut self, farm: u8, server_tag: u32, instrument: InstrumentId, min_tick: f64) {
+        self.register_farm_tag_sized(farm, server_tag, instrument, min_tick, None);
+    }
+
+    /// The same with the size increment of the acknowledgement, which
+    /// also stays from the first acknowledgement of the tag.
+    pub fn register_farm_tag_sized(
+        &mut self, farm: u8, server_tag: u32, instrument: InstrumentId, min_tick: f64, size_min_tick: Option<f64>,
+    ) {
         self.server_tags.entry(tag_key(farm, server_tag))
             .and_modify(|r| r.instrument = instrument)
-            .or_insert(TagRoute { instrument, price_tick: scale_tick(min_tick), trade: false });
+            .or_insert(TagRoute {
+                instrument, price_tick: scale_tick(min_tick), size_tick: scale_size(size_min_tick), trade: false,
+            });
     }
 
     /// Map a trade stream tag of a farm to an instrument (#292), with the
     /// minimum tick of the trade setup. A later setup of the same tag
     /// replaces it, as in the reference.
     pub fn register_trade_tag(&mut self, farm: u8, server_tag: u32, instrument: InstrumentId, min_tick: f64) {
-        self.trade_tags.insert(tag_key(farm, server_tag), TagRoute { instrument, price_tick: scale_tick(min_tick), trade: true });
+        self.register_trade_tag_sized(farm, server_tag, instrument, min_tick, None);
+    }
+
+    /// The same with the size increment of the trade setup.
+    pub fn register_trade_tag_sized(
+        &mut self, farm: u8, server_tag: u32, instrument: InstrumentId, min_tick: f64, size_min_tick: Option<f64>,
+    ) {
+        self.trade_tags.insert(tag_key(farm, server_tag), TagRoute {
+            instrument, price_tick: scale_tick(min_tick), size_tick: scale_size(size_min_tick), trade: true,
+        });
     }
 
     /// Free the quote tags of an instrument whose market data record is no
@@ -460,14 +487,14 @@ impl MarketState {
         self.min_tick_scaled[id as usize] = scale_tick(min_tick);
     }
 
-    /// Set the size increment of the market data (ibx#287). Not a
-    /// positive number: 1, as the reference uses a default for an invalid
-    /// one.
+    /// Set the size increment `apply_tick` uses for the instrument
+    /// (ibx#287). Not a positive number: 1, as the reference uses a
+    /// default for an invalid one. The farm path uses the increment of
+    /// each server tag instead (`TagRoute`, ibx#446).
     pub fn set_size_min_tick(&mut self, id: InstrumentId, size_min_tick: f64) {
         let scaled = (size_min_tick * QTY_SCALE as f64).round();
         let scaled = if scaled.is_finite() && scaled >= 1.0 { scaled as i64 } else { QTY_SCALE };
         self.size_min_tick_scaled[id as usize] = scaled;
-        self.size_scale[id as usize] = scaled * self.round_lots[id as usize];
     }
 
     /// Set the round lot the bid, ask and last sizes are multiplied by
@@ -475,7 +502,6 @@ impl MarketState {
     pub fn set_round_lot(&mut self, id: InstrumentId, round_lot: i64) {
         let lot = round_lot.max(1);
         self.round_lots[id as usize] = lot;
-        self.size_scale[id as usize] = self.size_min_tick_scaled[id as usize] * lot;
     }
 
     /// The round lot of an instrument's sizes (1 unless set).
@@ -510,13 +536,21 @@ impl MarketState {
     /// automatically (ibx#446).
     #[inline]
     pub fn apply_tick(&mut self, id: InstrumentId, price_tick: i64, trade: bool, tick: &RawTick) {
+        let size_tick = self.size_min_tick_scaled[id as usize];
+        self.apply_tick_sized(id, price_tick, size_tick, trade, tick);
+    }
+
+    /// `apply_tick` with the size increment of the tick's server tag times
+    /// QTY_SCALE (`TagRoute`), as the farm path applies it (ibx#446).
+    #[inline]
+    pub fn apply_tick_sized(&mut self, id: InstrumentId, price_tick: i64, size_tick: i64, trade: bool, tick: &RawTick) {
         #[inline(always)]
         fn set(field: &mut i64, value: Option<i64>) {
             if let Some(v) = value { *field = v; }
         }
         let i = id as usize;
         let mts = price_tick;
-        let sizes = self.size_scale[i];
+        let sizes = size_tick * self.round_lots[i];
         let m = tick.magnitude;
         let q = &mut self.quotes[i];
         match tick.tick_type {
@@ -540,7 +574,7 @@ impl MarketState {
                 self.marks[i].set_seen(SizeKind::Last);
             }
             td::O_VOLUME => {
-                set(&mut q.volume, m.checked_mul(self.size_min_tick_scaled[i]));
+                set(&mut q.volume, m.checked_mul(size_tick));
                 self.marks[i].set_seen(SizeKind::Volume);
             }
             td::O_BID_EXCH => q.bid_exch_mask = m,
@@ -1145,10 +1179,10 @@ mod tests {
         let id = ms.register(265598);
         ms.register_server_tag(1101, id, 0.01);
         ms.register_server_tag(1101, id, 0.05);
-        assert_eq!(ms.route_server_tag(1101), Some(TagRoute { instrument: id, price_tick: CENT, trade: false }));
+        assert_eq!(ms.route_server_tag(1101), Some(TagRoute { instrument: id, price_tick: CENT, size_tick: QTY_SCALE, trade: false }));
         ms.register_trade_tag(0, 1098, id, 0.05);
         ms.register_trade_tag(0, 1098, id, 0.01);
-        assert_eq!(ms.route_server_tag(1098), Some(TagRoute { instrument: id, price_tick: CENT, trade: true }));
+        assert_eq!(ms.route_server_tag(1098), Some(TagRoute { instrument: id, price_tick: CENT, size_tick: QTY_SCALE, trade: true }));
     }
 
     // A trade tag moved to the contract's other slot keeps its tick.
@@ -1160,7 +1194,7 @@ mod tests {
         ms.resolve_con_id(b, 12087792);
         ms.register_trade_tag(0, 26, a, 0.00005);
         ms.unregister(a);
-        assert_eq!(ms.route_server_tag(26), Some(TagRoute { instrument: b, price_tick: 5_000, trade: true }));
+        assert_eq!(ms.route_server_tag(26), Some(TagRoute { instrument: b, price_tick: 5_000, size_tick: QTY_SCALE, trade: true }));
     }
 
     // ── ibx#448: wire tick types land in the right quote fields ──
@@ -1267,6 +1301,36 @@ mod tests {
         assert_eq!(q.ask_size, 120 * QTY_SCALE);
         assert_eq!(q.last_size, 80 * QTY_SCALE);
         assert_eq!(q.volume, 1466 * QTY_SCALE, "volume is never multiplied by the lot");
+    }
+
+    // ibx#446: the size increment is the server tag's, as the price tick:
+    // a quote tag keeps the first acknowledgement's, a trade tag the
+    // latest setup's; the round lot stays the contract's.
+    #[test]
+    fn size_increment_per_server_tag() {
+        let mut ms = MarketState::new();
+        let id = ms.register(265598);
+        ms.set_round_lot(id, 40);
+        ms.register_farm_tag_sized(0, 1101, id, 0.01, Some(0.01));
+        ms.register_farm_tag_sized(0, 1101, id, 0.01, Some(1.0));
+        ms.register_trade_tag_sized(0, 1098, id, 0.01, Some(0.5));
+        ms.register_trade_tag_sized(0, 1098, id, 0.01, Some(2.0));
+        ms.register_farm_tag_sized(0, 7, id, 0.01, None);
+        let route = |ms: &MarketState, tag| ms.route_server_tag(tag).unwrap();
+        assert_eq!(route(&ms, 1101).size_tick, QTY_SCALE / 100, "the first ack stays");
+        assert_eq!(route(&ms, 1098).size_tick, 2 * QTY_SCALE, "the latest setup");
+        assert_eq!(route(&ms, 7).size_tick, QTY_SCALE, "absent: 1");
+        let apply = |ms: &mut MarketState, tag, t: RawTick| {
+            let r = route(ms, tag);
+            ms.apply_tick_sized(r.instrument, r.price_tick, r.size_tick, r.trade, &t);
+        };
+        apply(&mut ms, 1101, raw(4, 500));
+        apply(&mut ms, 1098, raw(6, 3));
+        apply(&mut ms, 1098, RawTick { stats_block: true, ..raw(10, 1000) });
+        let q = ms.quote(id);
+        assert_eq!(q.bid_size, 200 * QTY_SCALE); // 500 x 0.01 x 40
+        assert_eq!(q.last_size, 240 * QTY_SCALE); // 3 x 2 x 40
+        assert_eq!(q.volume, 2000 * QTY_SCALE); // 1000 x 2, no lot
     }
 
     #[test]

@@ -751,6 +751,21 @@ mod tests {
         assert_eq!(r.read_unsigned(1), None); // exhausted
     }
 
+    // ibx#446, captured 28/09/2026 (fix-agent-gw.20260928-164130.jsonl,
+    // 16:07:16.345): a side with no quote comes as -100 at tick 0.01, a
+    // price of -1, with size 0. The reference keeps it as it is
+    // (`jccp.f.a(jutils.a)` = raw x tick, `jclient.record.ck.a(jccp.h, ar,
+    // MarketDataType)@282-357`) and sends tickPrice -1 with size 0.
+    #[test]
+    fn empty_quote_side_is_minus_one_tick_count() {
+        let hex = "01480000055004e424000ce42c005800000005501600851634016c00a76aba1e3dac00d80000000550b000";
+        let body: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        let ticks = decode_ticks_35p(&body);
+        let quote: Vec<(u64, i64)> = ticks.iter().take(5).map(|t| (t.tick_type, t.magnitude)).collect();
+        assert!(ticks[..5].iter().all(|t| t.server_tag == 1360 && !t.stats_block));
+        assert_eq!(quote, [(O_BID_PRICE, -100), (O_BID_SIZE, 0), (O_ASK_PRICE, -100), (O_ASK_SIZE, 0), (11, 0)]);
+    }
+
     #[test]
     fn bit_reader_overflow() {
         let data = [0xFF];

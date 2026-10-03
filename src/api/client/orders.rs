@@ -40,7 +40,7 @@ impl EClient {
             .or_else(|| ClientCore::good_till_date_refusal(order, contract_zone.as_deref()))
             .or_else(|| ClientCore::condition_time_zone_refusal(order, contract_zone.as_deref()))
             .or_else(|| ClientCore::price_refusal(order))
-            .or_else(|| self.core.refusal_for_order_id(oid, order))
+            .or_else(|| self.core.refusal_for_order_id(oid, order, &self.shared))
         {
             self.shared.orders.push_order_error(oid, code, message);
             return Ok(());
