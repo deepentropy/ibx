@@ -4205,7 +4205,7 @@ impl ClientCore {
             "MTL" | "BOX TOP" => OrderKind::Mtl,
             "MKT PRT" => OrderKind::MktPrt,
             "STP PRT" => OrderKind::StpPrt { stop_price: scale(order.aux_price) },
-            "REL" => OrderKind::Rel { offset: scale(order.aux_price) },
+            "REL" => OrderKind::Rel { price: scale(aux_or_zero(order.lmt_price)), offset: scale(order.aux_price) },
             "PEG MKT" => OrderKind::PegMkt {
                 price: scale(aux_or_zero(order.lmt_price)), offset: scale(aux_or_zero(order.aux_price)),
             },
@@ -4315,7 +4315,8 @@ impl ClientCore {
             qty: order.total_quantity as u32,
             kind: Self::order_kind(order)?,
             tif: order.tif_byte(),
-            attrs: order.attrs(),
+            // The algo, restated by the reference's replace (ibx#263).
+            attrs: crate::types::OrderAttrs { algo: Self::order_algo(order)?, ..order.attrs() },
         })))
     }
 
@@ -4525,8 +4526,10 @@ impl ClientCore {
                 else { OrderRequest::SubmitStpPrt { order_id, instrument, side, qty, stop_price: stop } }
             }
             "REL" => {
+                // The price cap when given, as the reference (ibx#263).
                 let offset = (order.aux_price * PRICE_SCALE_F) as i64;
-                if extended { ex(OrderKind::Rel { offset }) }
+                let price = (aux_or_zero(order.lmt_price) * PRICE_SCALE_F) as i64;
+                if extended || price > 0 { ex(OrderKind::Rel { price, offset }) }
                 else { OrderRequest::SubmitRel { order_id, instrument, side, qty, offset } }
             }
             // The limit price when given, and the offset (ibx#414).
@@ -5349,6 +5352,26 @@ mod tests {
 
     fn lmt(price: f64) -> ApiOrder {
         ApiOrder { action: "BUY".into(), order_type: "LMT".into(), total_quantity: 100.0, lmt_price: price, ..Default::default() }
+    }
+
+    // ibx#263: the replace of an algo order keeps its algo, which the
+    // reference restates; a REL keeps its price cap.
+    #[test]
+    fn modify_keeps_the_algo_and_the_rel_price_cap() {
+        use crate::types::{AdaptivePriority, OrderAlgo, OrderKind};
+        let adaptive = ApiOrder { algo_strategy: "Adaptive".into(),
+            algo_params: vec![crate::api::types::TagValue { tag: "adaptivePriority".into(), value: "Urgent".into() }], ..lmt(100.0) };
+        let Ok(ModifyPlan::Send(ControlCommand::Order(OrderRequest::Modify { attrs, .. }))) =
+            ClientCore::build_modify_request(&adaptive, 5, &adaptive) else { panic!("not a modify") };
+        assert!(matches!(attrs.algo, Some(OrderAlgo::Adaptive(AdaptivePriority::Urgent))), "{:?}", attrs.algo);
+        let rel = ApiOrder { order_type: "REL".into(), aux_price: 0.01, ..lmt(250.0) };
+        let Ok(ModifyPlan::Send(ControlCommand::Order(OrderRequest::Modify { kind, .. }))) =
+            ClientCore::build_modify_request(&rel, 6, &rel) else { panic!("not a modify") };
+        assert!(matches!(kind, OrderKind::Rel { price, offset } if price == 250 * crate::types::PRICE_SCALE && offset == crate::types::PRICE_SCALE / 100), "{kind:?}");
+        let Ok(ControlCommand::Order(OrderRequest::SubmitEx { kind, .. })) = ClientCore::build_order_request(&rel, 7, 0) else {
+            panic!("a REL with a price cap takes the extended path");
+        };
+        assert!(matches!(kind, OrderKind::Rel { price, offset } if price == 250 * crate::types::PRICE_SCALE && offset == crate::types::PRICE_SCALE / 100), "{kind:?}");
     }
 
     // ibx#463: a filled order was forgotten, so place_order with its id sent

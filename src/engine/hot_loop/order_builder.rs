@@ -1664,6 +1664,12 @@ fn send_new_order(
     // The default trigger method on the stop types, when the order did not
     // carry its own (ibx#263).
     if !out.iter().any(|&(t, _)| t == 6115) && has_trigger_method(&out) { out.push((6115, "0")); }
+    // The trail unit of a trailing type, amount (0) when the order did not
+    // carry percent (ibx#263).
+    if !out.iter().any(|&(t, _)| t == 6268) && trailing_type(&out) { out.push((6268, "0")); }
+    // The touched trigger of MIT and LIT, their stop price (ibx#263).
+    let touched_trigger = touched_type(&out).then(|| out.iter().find(|&&(t, _)| t == 99).map(|&(_, v)| v)).flatten();
+    if let Some(v) = touched_trigger.filter(|_| !out.iter().any(|&(t, _)| t == 6117)) { out.push((6117, v)); }
     if con_id > 0 { out.push((6008, &con_id_str)); }
     if what_if.is_some() { out.push((6091, "1")); }
     out.push((6122, "c"));
@@ -1688,12 +1694,32 @@ fn send_new_order(
 /// LIT, TRAIL MIT and TRAIL LIT (captured on all but STP PRT), never on a
 /// replace. A trailing stop is the pegged type with the trailing letter.
 fn has_trigger_method(fields: &[(u32, &str)]) -> bool {
-    let value = |tag: u32| fields.iter().find(|&&(t, _)| t == tag).map(|&(_, v)| v);
-    match value(40) {
-        Some("3" | "4" | "SP" | "TSL" | "J" | "LT" | "TMIT" | "TLIT") => true,
-        Some("P") => value(18).is_some_and(|v| v.split(' ').next() == Some("a")),
+    matches!(field(fields, 40), Some("3" | "4" | "SP" | "J" | "LT")) || trailing_type(fields)
+}
+
+/// Whether the frame's type is a trailing one, which writes the trail
+/// unit (6268) on a new order and a replace (`jattrib.attribs.TrailingUnit.b`,
+/// true for `jibtypes.s.as()`): TRAIL, TRAIL LIMIT, TRAIL MIT, TRAIL LIT
+/// (ibx#263; captured with 6268 on all four, new orders and replaces).
+fn trailing_type(fields: &[(u32, &str)]) -> bool {
+    match field(fields, 40) {
+        Some("TSL" | "TMIT" | "TLIT") => true,
+        Some("P") => field(fields, 18).is_some_and(|v| v.split(' ').next() == Some("a")),
         _ => false,
     }
+}
+
+/// Whether the frame's type is a touched one, whose stop price the
+/// reference keeps as the touched trigger and writes in 6117 among the
+/// order attributes (`jclient.pe.D(double)` for `jibtypes.s.v()`,
+/// `jattrib.attribs.TouchedTrigger.b`): MIT and LIT (ibx#263, captured in
+/// ib-agent#199 on new orders and replaces).
+fn touched_type(fields: &[(u32, &str)]) -> bool {
+    matches!(field(fields, 40), Some("J" | "LT"))
+}
+
+fn field<'a>(fields: &[(u32, &'a str)], tag: u32) -> Option<&'a str> {
+    fields.iter().find(|&&(t, _)| t == tag).map(|&(_, v)| v)
 }
 
 /// Put new-order fields in the order of the reference's new-order writer
@@ -1704,7 +1730,15 @@ fn has_trigger_method(fields: &[(u32, &str)]) -> bool {
 /// reference in no fixed order; they get one fixed place each here, as
 /// seen in captured frames where it could be.
 fn in_reference_order(fields: &mut [(u32, &str)]) {
-    fields.sort_by_key(|&(tag, _)| reference_rank(tag));
+    let touched = touched_type(fields);
+    fields.sort_by_key(|&(tag, _)| rank_in_frame(tag, touched));
+}
+
+/// The place of a field, the touched trigger of MIT and LIT among the
+/// order attributes (after outside-RTH, as captured in ib-agent#199), the
+/// stop trigger of the other types before them.
+fn rank_in_frame(tag: u32, touched: bool) -> u16 {
+    if touched && tag == 6117 { 76 } else { reference_rank(tag) }
 }
 
 /// The place of a field in the reference's new-order writer (ibx#375).
@@ -1912,6 +1946,7 @@ fn modify_fields(
     // type. A trail value rides both the stop field and the trail field.
     let mut before_account: Vec<(u32, String)> = Vec::new();
     let mut stop_trigger: Option<String> = None; // restated for STP / STP LMT
+    let mut touched_trigger: Option<String> = None; // MIT / LIT, an attribute
     let mut trail_offset: Option<String> = None; // TRAIL LIMIT limit offset
     let mut trail_unit: Option<&str> = None;     // 0 = amount, 100 = percent
     let mut after_type: Vec<(u32, String)> = Vec::new();
@@ -1958,10 +1993,15 @@ fn modify_fields(
         }
         K::Moc => "5",
         K::Loc { price } => { before_account.push((44, p(price))); "B" }
-        K::Mit { stop_price } => { before_account.push((99, p(stop_price))); "J" }
+        K::Mit { stop_price } => {
+            before_account.push((99, p(stop_price)));
+            touched_trigger = Some(p(stop_price));
+            "J"
+        }
         K::Lit { price, stop_price } => {
             before_account.push((44, p(price)));
             before_account.push((99, p(stop_price)));
+            touched_trigger = Some(p(stop_price));
             "LT"
         }
         K::Mtl => "K",
@@ -1983,7 +2023,9 @@ fn modify_fields(
             after_type.extend(types.into_iter().filter(|(t, _)| *t != 18));
             "P"
         }
-        K::Rel { offset } => {
+        K::Rel { price, offset } => {
+            // The price cap, restated (ib-agent#199).
+            if price > 0 { before_account.push((44, p(price))); }
             after_type.push((211, p(offset)));
             "P"
         }
@@ -2034,10 +2076,15 @@ fn modify_fields(
     // Outside-RTH only when the order has it: a replace without it leaves
     // the order regular-hours only (ibx#247).
     if attrs.outside_rth { f.push((6433, "1".to_string())); }
+    // The touched trigger of MIT and LIT, restated (ib-agent#199, ibx#263).
+    if let Some(t) = touched_trigger { f.push((6117, t)); }
     if let Some(u) = trail_unit { f.push((6268, u.to_string())); }
     f.extend(bench_attrs);
     // The price management flag, last of the attributes (ibx#492).
     if price_mgmt && !crate::engine::price_mgmt::excluded_kind(&kind) { f.push((8339, "1".to_string())); }
+    // The algo block, restated as on the new order (`jclient.pe.d` writes
+    // it through the same `jclient.pe.j`; ibx#263).
+    if let Some(algo) = &attrs.algo { f.extend(algo_fields(algo)); }
     f.push((38, format_uint(qty as u64).to_string()));
     f.push((54, side.to_string()));
     f.push((40, ord_type.to_string()));
@@ -2456,7 +2503,7 @@ fn send_order_ex(
         K::SnapPri { offset } => (crate::types::ORD_SNAP_PRI, 0, offset),
         K::PegMkt { price, offset } => (crate::types::ORD_PEG_MKT, price, offset),
         K::PegMid { price, offset } => (crate::types::ORD_PEG_MID, price, offset),
-        K::Rel { offset } => (b'R', 0, offset),
+        K::Rel { price, offset } => (b'R', price, offset),
         K::AdjustableStop { stop_price, .. } => (b'3', 0, stop_price),
         K::PegBench { starting_price, .. } => (crate::types::ORD_PEG_BENCH, starting_price, 0),
     };
@@ -2576,10 +2623,12 @@ fn send_order_ex(
             fields.extend(types.into_iter().filter(|(t, _)| *t != 18));
             fields.extend(prices);
         }
-        K::Rel { offset } => {
+        K::Rel { price, offset } => {
             // Per ib-agent#138 capture: Relative shares OrdType=P and is
-            // disambiguated by 18=R; peg offset on 211, no tag 44.
+            // disambiguated by 18=R; peg offset on 211; the price cap in 44
+            // when set (ib-agent#199, ibx#263).
             fields.push((40, "P".to_string()));
+            if price > 0 { fields.push((44, format_price(price).to_string())); }
             fields.push((211, format_price(offset).to_string()));
         }
         // The adjustable tags themselves follow the common block below.
@@ -3744,7 +3793,9 @@ mod tests {
         });
         assert_eq!(tag(&ex, 6117), Some("235.14"));
         let mit = wire_tags(OrderRequest::SubmitMit { order_id: 14, instrument: 0, side: Side::Sell, qty: 1, stop_price: 235 * P });
-        assert_eq!(tag(&mit, 6117), None, "not on MIT");
+        // MIT writes its stop price in 6117 too, as its touched trigger
+        // among the attributes (ib-agent#199, ibx#263).
+        assert_eq!(tag(&mit, 6117), Some("235"));
     }
 
     // ib-agent#194, captured 25/09/2026: a TRAIL LIMIT with lmtPrice only
@@ -4478,7 +4529,7 @@ mod tests {
             (OrderRequest::SubmitMit { order_id: id, instrument: 0, side, qty, stop_price: 90 * P }, K::Mit { stop_price: 90 * P }, b'0', Default::default()),
             (OrderRequest::SubmitLit { order_id: id, instrument: 0, side, qty, price: 89 * P, stop_price: 90 * P },
                 K::Lit { price: 89 * P, stop_price: 90 * P }, b'0', Default::default()),
-            (OrderRequest::SubmitRel { order_id: id, instrument: 0, side, qty, offset: P / 10 }, K::Rel { offset: P / 10 }, b'0', Default::default()),
+            (OrderRequest::SubmitRel { order_id: id, instrument: 0, side, qty, offset: P / 10 }, K::Rel { price: 0, offset: P / 10 }, b'0', Default::default()),
             (OrderRequest::SubmitMtl { order_id: id, instrument: 0, side, qty }, K::Mtl, b'0', Default::default()),
             (OrderRequest::SubmitMktPrt { order_id: id, instrument: 0, side, qty }, K::MktPrt, b'0', Default::default()),
             (OrderRequest::SubmitStpPrt { order_id: id, instrument: 0, side, qty, stop_price: 90 * P }, K::StpPrt { stop_price: 90 * P }, b'0', Default::default()),
@@ -4507,7 +4558,8 @@ mod tests {
             let ours = order_body(wire_tags(plain));
             let ex = order_body(wire_tags(OrderRequest::SubmitEx { order_id: id, instrument: 0, side, qty, kind, tif, attrs }));
             assert_eq!(ours, ex, "{label}");
-            let ranks: Vec<u16> = ours.iter().map(|(t, _)| reference_rank(*t)).collect();
+            let touched = touched_type(&ours.iter().map(|(t, v)| (*t, v.as_str())).collect::<Vec<_>>());
+            let ranks: Vec<u16> = ours.iter().map(|(t, _)| rank_in_frame(*t, touched)).collect();
             assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "{label}: {ours:?}");
             assert!(ranks.iter().all(|r| *r != u16::MAX), "{label}: a field with no place: {ours:?}");
         }
@@ -4680,7 +4732,7 @@ mod tests {
         assert_eq!((tag(&market, 40), tag(&market, 44), tag(&market, 18)), (Some("1"), None, Some("e")));
         let trail = wire_tags(ex(K::TrailingStop { trail_amt: px(1.0), trail_stop_price: 0 }, adaptive()));
         assert_eq!((tag(&trail, 40), tag(&trail, 211), tag(&trail, 18)), (Some("P"), Some("1"), Some("a e")));
-        let rel = wire_tags(ex(K::Rel { offset: px(0.05) }, OrderAttrs { all_or_none: true, ..adaptive() }));
+        let rel = wire_tags(ex(K::Rel { price: 0, offset: px(0.05) }, OrderAttrs { all_or_none: true, ..adaptive() }));
         assert_eq!((tag(&rel, 40), tag(&rel, 18)), (Some("P"), Some("R G e")));
         let bench = wire_tags(ex(K::PegBench { starting_price: px(100.0), stock_ref_price: 0, ref_con_id: 1,
             is_peg_decrease: false, pegged_change_amount: px(0.1), ref_change_amount: px(0.1) }, adaptive()));
@@ -4762,7 +4814,7 @@ mod tests {
             K::MktPrt,
             K::MidPrice { price_cap: px(100.0) },
             K::SnapMkt { offset: px(0.05) },
-            K::Rel { offset: px(0.05) },
+            K::Rel { price: 0, offset: px(0.05) },
             K::PegMkt { price: px(100.0), offset: px(0.05) },
             K::PegMid { price: px(100.0), offset: 0 },
             K::PegBench { starting_price: px(100.0), stock_ref_price: 0, ref_con_id: 1, is_peg_decrease: false,
@@ -4781,7 +4833,7 @@ mod tests {
         let aon = OrderAttrs { all_or_none: true, ..Default::default() };
         let trail = wire_tags(ex(K::TrailingStop { trail_amt: px(0.5), trail_stop_price: 0 }, aon.clone()));
         assert_eq!((tag(&trail, 18), tag(&trail, 6115)), (Some("a G"), Some("0")));
-        let rel = wire_tags(ex(K::Rel { offset: px(0.05) }, aon));
+        let rel = wire_tags(ex(K::Rel { price: 0, offset: px(0.05) }, aon));
         assert_eq!((tag(&rel, 18), tag(&rel, 6115)), (Some("R G"), None));
     }
 
@@ -4797,7 +4849,7 @@ mod tests {
         let cases = [
             (K::TrailingStop { trail_amt: px(1.0), trail_stop_price: 0 }, Some("a G")),
             (K::TrailPct { trail_pct: 150, trail_stop_price: 0 }, Some("a G")),
-            (K::Rel { offset: px(0.05) }, Some("R G")),
+            (K::Rel { price: 0, offset: px(0.05) }, Some("R G")),
             (K::Limit { price: px(100.0) }, Some("G")),
             (K::Stop { stop_price: px(90.0) }, Some("G")),
             (K::PegMid { price: px(100.0), offset: 0 }, Some("M G")),
@@ -4810,10 +4862,137 @@ mod tests {
             assert!(at(40) < at(18) && at(211) < at(18) && at(18) < at(55), "{kind:?}: {ours:?}");
         }
         // Without all-or-none, as before.
-        let rel = replace_fields(62, Side::Sell, 1, K::Rel { offset: px(0.05) }, b'0', OrderAttrs::default());
+        let rel = replace_fields(62, Side::Sell, 1, K::Rel { price: 0, offset: px(0.05) }, b'0', OrderAttrs::default());
         assert_eq!(tag(&rel, 18), Some("R"));
         let lmt = replace_fields(63, Side::Sell, 1, K::Limit { price: px(100.0) }, b'0', OrderAttrs::default());
         assert_eq!(tag(&lmt, 18), None);
+    }
+
+    // ibx#263 (captured 23/09/2026, ib-agent#192 B8d and A3b, and
+    // 28/09/2026, ib-agent#199; paper, AAPL, account masked): the trail
+    // unit 6268=0 of an amount TRAIL and a TRAIL LIMIT, the touched trigger
+    // 6117 of MIT and LIT (their stop price, among the attributes), and the
+    // price cap 44 of a REL, through both encoders. The ids (ClOrdID,
+    // account, API order and client ids) are left out; prices compare as
+    // numbers (ibx writes 450 and 0.5 where the reference writes 450.00
+    // and 0.50).
+    #[test]
+    fn new_trailing_touched_and_relative_orders_are_the_captured_frames() {
+        use crate::types::{OrderAttrs, OrderKind as K};
+        const TRAIL: &str = "35=D|11=1626578557.0|99=101.92|1=DUXXXXXXX|6115=0|6122=c|6268=0|6121=9|6119=192|38=1|40=P|211=101.92|18=a|55=AAPL|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const TRAIL_LIMIT: &str = "35=D|11=1626578568.0|99=101.92|1=DUXXXXXXX|6117=237.82|6115=0|6370=0.50|6122=c|6268=0|6121=29|6119=192|38=1|40=TSL|211=101.92|55=AAPL|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const MIT: &str = "35=D|11=117065670.0|99=450.00|1=DUXXXXXXX|6115=0|6010=c199-mit_gtc|6122=c|6117=450.00|6121=5|6119=199|38=1|40=J|55=AAPL|167=STK|231=1.00|54=2|59=1|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const LIT: &str = "35=D|11=117065671.0|44=450.00|99=450.00|1=DUXXXXXXX|6115=0|6010=c199-lit_gtc|6122=c|6433=1|6117=450.00|8339=1|6121=6|6119=199|38=1|40=LT|55=AAPL|167=STK|231=1.00|54=2|59=1|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const REL: &str = "35=D|11=117065675.0|44=250.00|1=DUXXXXXXX|6010=c199-rel_day|6122=c|6433=1|8339=1|6121=10|6119=199|38=1|40=P|211=0.01|18=R|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        let qty = 1;
+        let ex = |side, kind, tif, attrs| OrderRequest::SubmitEx { order_id: 7, instrument: 0, side, qty, kind, tif, attrs };
+        let order_ref = |r: &str, outside_rth: bool| OrderAttrs { order_ref: r.into(), outside_rth, ..Default::default() };
+        let trail = K::TrailingStop { trail_amt: px(101.92), trail_stop_price: 0 };
+        let trail_limit = K::TrailingStopLimit { lmt_offset: px(0.5), lmt_price: None, trail_amt: px(101.92), trail_stop_price: px(237.82) };
+        let cases: Vec<(&str, bool, OrderRequest)> = vec![
+            (TRAIL, false, ex(Side::Sell, trail, b'0', OrderAttrs::default())),
+            (TRAIL, false, OrderRequest::SubmitTrailingStop { order_id: 7, instrument: 0, side: Side::Sell, qty, trail_amt: px(101.92), trail_stop_price: 0 }),
+            (TRAIL_LIMIT, false, ex(Side::Sell, trail_limit, b'0', OrderAttrs::default())),
+            (TRAIL_LIMIT, false, OrderRequest::SubmitTrailingStopLimit { order_id: 7, instrument: 0, side: Side::Sell, qty,
+                lmt_offset: px(0.5), lmt_price: None, trail_amt: px(101.92), trail_stop_price: px(237.82) }),
+            (MIT, false, ex(Side::Sell, K::Mit { stop_price: px(450.0) }, b'1', order_ref("c199-mit_gtc", false))),
+            (LIT, true, ex(Side::Sell, K::Lit { price: px(450.0), stop_price: px(450.0) }, b'1', order_ref("c199-lit_gtc", true))),
+            (REL, true, ex(Side::Buy, K::Rel { price: px(250.0), offset: px(0.01) }, b'0', order_ref("c199-rel_day", true))),
+        ];
+        let not_id = |(t, _): &(u32, String)| !matches!(t, 35 | 11 | 1 | 6121 | 6119);
+        let as_numbers = |fields: Vec<(u32, String)>| -> Vec<(u32, String)> {
+            fields.into_iter().map(|(t, v)| match v.parse::<f64>() {
+                Ok(n) if v.contains('.') => (t, n.to_string()),
+                _ => (t, v),
+            }).collect()
+        };
+        for (captured, price_mgmt, req) in cases {
+            let label = format!("{req:?}");
+            let sent = order_body(wire_tags_with(|ctx| session(ctx, price_mgmt), req));
+            let (mine, theirs) = common_order(&sent, captured);
+            assert_eq!(mine, theirs, "{label}: field order");
+            let mut ours = as_numbers(sent);
+            ours.retain(not_id);
+            let mut want = as_numbers(parse_frame(captured));
+            want.retain(not_id);
+            ours.sort();
+            want.sort();
+            assert_eq!(ours, want, "{label}");
+        }
+        // The MIT's touched trigger is among the attributes, after
+        // outside-RTH, not after the account like a stop's.
+        let lit = wire_tags(ex(Side::Sell, K::Lit { price: px(450.0), stop_price: px(450.0) }, b'1', order_ref("x", true)));
+        let at = |tag: u32| lit.iter().position(|(t, _)| *t == tag);
+        assert!(at(6122) < at(6117) && at(6433) < at(6117), "{lit:?}");
+        // A REL without a price cap has no 44.
+        let rel = wire_tags(ex(Side::Buy, K::Rel { price: 0, offset: px(0.01) }, b'0', OrderAttrs::default()));
+        assert_eq!(tag(&rel, 44), None);
+    }
+
+    /// AAPL, and when asked a session with price management on and a
+    /// definition that keeps outside RTH.
+    fn session(ctx: &mut Context, price_mgmt: bool) {
+        ctx.set_symbol(0, "AAPL".to_string());
+        if price_mgmt {
+            price_mgmt_session(ctx);
+            ctx.rth_types.insert((265598, "BEST".to_string()), crate::engine::outside_rth::RthTypes {
+                rth: true, sec_type: "STK".into(), types_known: true, price_chk: true, ..Default::default()
+            });
+        }
+    }
+
+    /// Send one Modify as `replace_fields`, in `session`.
+    fn replace_fields_mgmt(order_id: OrderId, side: Side, kind: crate::types::OrderKind, tif: u8,
+                           attrs: crate::types::OrderAttrs, price_mgmt: bool) -> Vec<(u32, String)> {
+        wire_tags_with(
+            |ctx| {
+                session(ctx, price_mgmt);
+                ctx.insert_order(Order::new(order_id, 0, side, 1, 0, b'2', b'0', 0));
+            },
+            OrderRequest::Modify { new_order_id: order_id, order_id, qty: 1, kind, tif, attrs },
+        )
+        .into_iter()
+        .filter(|(t, _)| !matches!(t, 8 | 9 | 34 | 52 | 10))
+        .collect()
+    }
+
+    // ibx#263 (captured 28/09/2026, ib-agent#199, paper, AAPL, account
+    // masked): a replace of MIT and LIT restates the touched trigger 6117
+    // among the attributes, a replace of REL its price cap 44; field for
+    // field, in the captured order.
+    #[test]
+    fn replace_of_touched_and_relative_orders_matches_reference() {
+        use crate::types::{OrderAttrs, OrderKind as K};
+        const MIT: &str = "35=G|11=117065670.1|41=117065670.0|99=451.00|1=DUXXXXXXX|6010=c199-mit_gtc|6122=c|6117=451.00|38=1|54=2|40=J|55=AAPL|167=STK|6035=AAPL|59=1|6008=265598|6088=Socket|6211=|6238=";
+        const LIT: &str = "35=G|11=117065671.1|41=117065671.0|44=450.00|99=451.00|1=DUXXXXXXX|6010=c199-lit_gtc|6122=c|6433=1|6117=451.00|8339=1|38=1|54=2|40=LT|55=AAPL|167=STK|6035=AAPL|59=1|6008=265598|6088=Socket|6211=|6238=";
+        const REL: &str = "35=G|11=117065675.1|41=117065675.0|44=249.00|1=DUXXXXXXX|6010=c199-rel_day|6122=c|6433=1|8339=1|38=1|54=1|40=P|211=0.01|18=R|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=";
+        let attrs = |r: &str, outside_rth: bool| OrderAttrs { order_ref: r.into(), outside_rth, ..Default::default() };
+        let cases = [
+            (MIT, 117065670, Side::Sell, K::Mit { stop_price: px(451.0) }, b'1', attrs("c199-mit_gtc", false), false),
+            (LIT, 117065671, Side::Sell, K::Lit { price: px(450.0), stop_price: px(451.0) }, b'1', attrs("c199-lit_gtc", true), true),
+            (REL, 117065675, Side::Buy, K::Rel { price: px(249.0), offset: px(0.01) }, b'0', attrs("c199-rel_day", true), true),
+        ];
+        for (captured, id, side, kind, tif, attrs, price_mgmt) in cases {
+            let ours = replace_fields_mgmt(id, side, kind, tif, attrs, price_mgmt);
+            assert_same_replace(&ours, &captured.replace("DUXXXXXXX", "DU1"));
+        }
+    }
+
+    // ibx#263: a replace of an algo order restates the algo letter in 18
+    // and the algo block after the attributes, as the new order: the
+    // reference's replace writer `jclient.pe.d` writes them through the
+    // same `jclient.pe.j` and `jclient.pe.gI()`. Not captured.
+    #[test]
+    fn replace_of_an_algo_order_restates_the_algo() {
+        use crate::types::{AdaptivePriority, OrderAlgo, OrderAttrs, OrderKind as K};
+        let attrs = OrderAttrs { algo: Some(OrderAlgo::Adaptive(AdaptivePriority::Normal)), ..Default::default() };
+        let stop = replace_fields(64, Side::Buy, 1, K::Stop { stop_price: px(495.48) }, b'0', attrs.clone());
+        let tags: Vec<u32> = stop.iter().map(|(t, _)| *t).collect();
+        assert_eq!(tags, vec![35, 11, 41, 99, 1, 6117, 6122, 847, 5957, 5958, 5960, 38, 54, 40, 18, 55, 167, 6035, 59, 6008, 6088, 6211, 6238]);
+        assert_eq!((tag(&stop, 18), tag(&stop, 847), tag(&stop, 5958), tag(&stop, 5960)),
+            (Some("e"), Some("Adaptive"), Some("adaptivePriority"), Some("Normal")));
+        let aon = replace_fields(65, Side::Buy, 1, K::Limit { price: px(100.0) }, b'0', OrderAttrs { all_or_none: true, ..attrs });
+        assert_eq!(tag(&aon, 18), Some("G e"));
     }
 
     // ibx#466: the API order id is an int; a larger order id is not sent.

@@ -220,7 +220,7 @@ mod tests {
             ("LMT FOK", k(OrderKind::Limit { price: 1 }), b'4', "BEST", false),
             ("LMT IOC", k(OrderKind::Limit { price: 1 }), b'3', "BEST", false),
             ("LMT OPG", k(OrderKind::Limit { price: 1 }), b'2', "BEST", false),
-            ("REL DAY", k(OrderKind::Rel { offset: 1 }), b'0', "BEST", true),
+            ("REL DAY", k(OrderKind::Rel { price: 0, offset: 1 }), b'0', "BEST", true),
             ("LMT DAY", k(OrderKind::Limit { price: 1 }), b'0', "BEST", true),
             ("LMT GTC", k(OrderKind::Limit { price: 1 }), b'1', "BEST", true),
         ];

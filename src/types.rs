@@ -787,7 +787,9 @@ pub enum OrderKind {
     /// always sends a zero offset, as the reference).
     PegMkt { price: Price, offset: Price },
     PegMid { price: Price, offset: Price },
-    Rel { offset: Price },
+    /// Relative: `price` is the price cap (the API lmtPrice), 0 = unset;
+    /// `offset` the API auxPrice (ibx#263).
+    Rel { price: Price, offset: Price },
     /// Pegged to benchmark (ibx#415): the starting price (0 = unset), the
     /// stock reference price (0 = unset), the reference contract, the
     /// pegged change (sent negative for a decrease) and the reference
@@ -837,7 +839,8 @@ impl OrderKind {
             }
             OrderKind::MidPrice { price_cap } => s(price_cap),
             OrderKind::PegMkt { price, offset } | OrderKind::PegMid { price, offset } => { s(price); s(offset); }
-            OrderKind::Rel { offset } | OrderKind::SnapMkt { offset }
+            OrderKind::Rel { price, offset } => { s(price); s(offset); }
+            OrderKind::SnapMkt { offset }
             | OrderKind::SnapMid { offset } | OrderKind::SnapPri { offset } => s(offset),
             OrderKind::PegBench { starting_price, pegged_change_amount, ref_change_amount, .. } => {
                 s(starting_price); s(pegged_change_amount); s(ref_change_amount);
