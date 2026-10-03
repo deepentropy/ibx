@@ -31,42 +31,98 @@ pub enum Frame {
     Control(Vec<u8>),
 }
 
-/// Stream wrapper supporting both TLS and raw TCP.
+/// The byte stream under a [`Connection`]. A connection holds one through
+/// [`Stream`], a closed enum: the send and receive path is a static match,
+/// with no boxing and no virtual call.
+pub trait Transport: Read + Write {
+    /// Close both directions. Later reads see the end of the stream and
+    /// later writes fail. Errors are ignored: it may be closed already.
+    fn shutdown(&mut self);
+    /// Writes that return at once with what the stream takes now (`true`),
+    /// or the default mode (`false`).
+    fn set_nonblocking(&mut self, on: bool) -> io::Result<()>;
+}
+
+impl Transport for TcpStream {
+    fn shutdown(&mut self) {
+        let _ = TcpStream::shutdown(self, std::net::Shutdown::Both);
+    }
+
+    fn set_nonblocking(&mut self, on: bool) -> io::Result<()> {
+        TcpStream::set_nonblocking(self, on)
+    }
+}
+
+impl Transport for TlsStream<TcpStream> {
+    fn shutdown(&mut self) {
+        let _ = self.get_ref().shutdown(std::net::Shutdown::Both);
+    }
+
+    fn set_nonblocking(&mut self, on: bool) -> io::Result<()> {
+        self.get_ref().set_nonblocking(on)
+    }
+}
+
+/// The transports a connection runs on: TLS, raw TCP, and for the tests an
+/// in-memory pipe ([`MemTransport`], `test-support` feature only, so a
+/// release build has the two socket arms alone).
 enum Stream {
     Tls(TlsStream<TcpStream>),
     Raw(TcpStream),
+    #[cfg(any(test, feature = "test-support"))]
+    Mem(MemTransport),
 }
 
 impl Read for Stream {
+    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Tls(s) => s.read(buf),
             Self::Raw(s) => s.read(buf),
-        }
-    }
-}
-
-impl Stream {
-    fn tcp(&self) -> &TcpStream {
-        match self {
-            Self::Tls(s) => s.get_ref(),
-            Self::Raw(s) => s,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mem(s) => s.read(buf),
         }
     }
 }
 
 impl Write for Stream {
+    #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Self::Tls(s) => s.write(buf),
             Self::Raw(s) => s.write(buf),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mem(s) => s.write(buf),
         }
     }
 
+    #[inline]
     fn flush(&mut self) -> io::Result<()> {
         match self {
             Self::Tls(s) => s.flush(),
             Self::Raw(s) => s.flush(),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mem(s) => s.flush(),
+        }
+    }
+}
+
+impl Transport for Stream {
+    fn shutdown(&mut self) {
+        match self {
+            Self::Tls(s) => Transport::shutdown(s),
+            Self::Raw(s) => Transport::shutdown(s),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mem(s) => Transport::shutdown(s),
+        }
+    }
+
+    fn set_nonblocking(&mut self, on: bool) -> io::Result<()> {
+        match self {
+            Self::Tls(s) => Transport::set_nonblocking(s, on),
+            Self::Raw(s) => Transport::set_nonblocking(s, on),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mem(s) => Transport::set_nonblocking(s, on),
         }
     }
 }
@@ -107,8 +163,12 @@ impl Connection {
     /// or surface a hard error, which the hot-loop reconnect path handles.
     pub fn new(stream: TlsStream<TcpStream>) -> io::Result<Self> {
         stream.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(1)))?;
-        Ok(Self {
-            stream: Stream::Tls(stream),
+        Ok(Self::on(Stream::Tls(stream)))
+    }
+
+    fn on(stream: Stream) -> Self {
+        Self {
+            stream,
             buf: Vec::with_capacity(RECV_BUF_SIZE),
             seq: 0,
             sign_key: Vec::new(),
@@ -119,7 +179,7 @@ impl Connection {
             out_pos: 0,
             queued_writes: false,
             write_error: None,
-        })
+        }
     }
 
     /// Create a new connection from a raw TCP stream (for farm connections).
@@ -131,19 +191,16 @@ impl Connection {
         // messages to never reach the farm — the sign_iv still advances, permanently
         // breaking the signing chain.
         stream.set_read_timeout(Some(std::time::Duration::from_millis(1)))?;
-        Ok(Self {
-            stream: Stream::Raw(stream),
-            buf: Vec::with_capacity(RECV_BUF_SIZE),
-            seq: 0,
-            sign_key: Vec::new(),
-            sign_iv: Vec::new(),
-            read_key: Vec::new(),
-            read_iv: Vec::new(),
-            out: VecDeque::new(),
-            out_pos: 0,
-            queued_writes: false,
-            write_error: None,
-        })
+        Ok(Self::on(Stream::Raw(stream)))
+    }
+
+    /// A connection on one end of an in-memory pipe (tests): the same
+    /// framing, compression, signing and queued-write path as a socket.
+    /// A read waits 1 ms for data, as the sockets do.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_mem(stream: MemTransport) -> Self {
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(1)));
+        Self::on(Stream::Mem(stream))
     }
 
     /// Set HMAC keys and IVs after authentication.
@@ -330,7 +387,7 @@ impl Connection {
     /// be read any more (signature mismatch, ibx#275). Errors are ignored:
     /// the socket may be closed already.
     pub fn shutdown(&mut self) {
-        let _ = self.stream.tcp().shutdown(std::net::Shutdown::Both);
+        self.stream.shutdown();
     }
 
     /// Writes of this connection stop blocking the caller (ibx#254): each
@@ -394,7 +451,7 @@ impl Connection {
         if self.out.is_empty() {
             return Ok(());
         }
-        if let Err(e) = self.stream.tcp().set_nonblocking(true) {
+        if let Err(e) = self.stream.set_nonblocking(true) {
             return Err(self.record_write_error(e));
         }
         let result = loop {
@@ -415,7 +472,7 @@ impl Connection {
                 Err(e) => break Err(e),
             }
         };
-        let restored = self.stream.tcp().set_nonblocking(false);
+        let restored = self.stream.set_nonblocking(false);
         match result.and(restored) {
             Ok(()) => Ok(()),
             Err(e) => Err(self.record_write_error(e)),
@@ -540,6 +597,190 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|w| w == needle)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub use mem::{mem_pair, MemTransport};
+
+/// An in-memory byte pipe standing in for a socket in the tests, so the
+/// engine runs against a scripted peer with no network. Built only for the
+/// tests (`test-support` feature).
+#[cfg(any(test, feature = "test-support"))]
+mod mem {
+    use std::collections::VecDeque;
+    use std::io::{self, Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// One direction of a pipe.
+    #[derive(Default)]
+    struct Pipe {
+        data: VecDeque<u8>,
+        /// The writing end closed: the reader gets the end of the stream
+        /// once the data is read.
+        write_closed: bool,
+        /// The reading end closed: a write fails, as on a reset socket.
+        read_closed: bool,
+        /// Most bytes waiting at once; None for no limit.
+        capacity: Option<usize>,
+    }
+
+    #[derive(Default)]
+    struct Shared {
+        pipe: Mutex<Pipe>,
+        changed: Condvar,
+    }
+
+    /// No read timeout: a read waits until data or the end of the stream.
+    const WAIT_FOREVER: u64 = u64::MAX;
+
+    /// One end of an in-memory pipe ([`mem_pair`]). It reads and writes as a
+    /// TCP stream does: a read waits for data up to the read timeout, then
+    /// fails with `WouldBlock`; a closed peer gives the end of the stream to
+    /// a read and `BrokenPipe` to a write. Dropping an end closes it.
+    pub struct MemTransport {
+        rx: Arc<Shared>,
+        tx: Arc<Shared>,
+        /// Read timeout in nanoseconds; 0 for a read that returns at once,
+        /// [`WAIT_FOREVER`] for none.
+        read_timeout: AtomicU64,
+        /// Reads and writes return at once (`WouldBlock`) when they cannot
+        /// proceed.
+        nonblocking: bool,
+    }
+
+    /// Two connected ends: what one writes, the other reads.
+    pub fn mem_pair() -> (MemTransport, MemTransport) {
+        let a = Arc::new(Shared::default());
+        let b = Arc::new(Shared::default());
+        let end = |rx: &Arc<Shared>, tx: &Arc<Shared>| MemTransport {
+            rx: rx.clone(),
+            tx: tx.clone(),
+            read_timeout: AtomicU64::new(WAIT_FOREVER),
+            nonblocking: false,
+        };
+        (end(&a, &b), end(&b, &a))
+    }
+
+    impl MemTransport {
+        /// As `TcpStream::set_read_timeout`; `Some(Duration::ZERO)` makes a
+        /// read return at once.
+        pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+            let nanos = timeout.map_or(WAIT_FOREVER, |d| d.as_nanos().min(WAIT_FOREVER as u128 - 1) as u64);
+            self.read_timeout.store(nanos, Ordering::Relaxed);
+            Ok(())
+        }
+
+        /// As `TcpStream::set_nonblocking`: a read or write that cannot
+        /// proceed at once fails with `WouldBlock`.
+        pub fn set_nonblocking(&mut self, on: bool) -> io::Result<()> {
+            self.nonblocking = on;
+            Ok(())
+        }
+
+        /// Most bytes this end's output holds before a write waits (or, in
+        /// non-blocking mode, takes only what fits): a peer that does not
+        /// read fills it, as a socket buffer.
+        pub fn set_write_capacity(&self, capacity: Option<usize>) {
+            self.tx.pipe.lock().unwrap().capacity = capacity;
+            self.tx.changed.notify_all();
+        }
+
+        /// Bytes written by this end that the peer has not read yet.
+        pub fn unread_output(&self) -> usize {
+            self.tx.pipe.lock().unwrap().data.len()
+        }
+
+        fn close(&self) {
+            self.tx.pipe.lock().unwrap().write_closed = true;
+            self.tx.changed.notify_all();
+            self.rx.pipe.lock().unwrap().read_closed = true;
+            self.rx.changed.notify_all();
+        }
+    }
+
+    impl Drop for MemTransport {
+        fn drop(&mut self) {
+            self.close();
+        }
+    }
+
+    impl Read for MemTransport {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let timeout = if self.nonblocking { 0 } else { self.read_timeout.load(Ordering::Relaxed) };
+            let deadline = (timeout != WAIT_FOREVER).then(|| Instant::now() + Duration::from_nanos(timeout));
+            let mut pipe = self.rx.pipe.lock().unwrap();
+            loop {
+                if pipe.read_closed {
+                    return Ok(0);
+                }
+                if !pipe.data.is_empty() {
+                    let n = buf.len().min(pipe.data.len());
+                    for (dst, src) in buf.iter_mut().zip(pipe.data.drain(..n)) {
+                        *dst = src;
+                    }
+                    self.rx.changed.notify_all();
+                    return Ok(n);
+                }
+                if pipe.write_closed {
+                    return Ok(0);
+                }
+                match deadline {
+                    None => pipe = self.rx.changed.wait(pipe).unwrap(),
+                    Some(at) => {
+                        let now = Instant::now();
+                        if now >= at {
+                            return Err(io::Error::new(io::ErrorKind::WouldBlock, "no data"));
+                        }
+                        pipe = self.rx.changed.wait_timeout(pipe, at - now).unwrap().0;
+                    }
+                }
+            }
+        }
+    }
+
+    impl Write for MemTransport {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let mut pipe = self.tx.pipe.lock().unwrap();
+            loop {
+                if pipe.write_closed || pipe.read_closed {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"));
+                }
+                let room = pipe.capacity.map_or(buf.len(), |c| c.saturating_sub(pipe.data.len()));
+                if room > 0 {
+                    let n = room.min(buf.len());
+                    pipe.data.extend(&buf[..n]);
+                    self.tx.changed.notify_all();
+                    return Ok(n);
+                }
+                if self.nonblocking {
+                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "pipe full"));
+                }
+                pipe = self.tx.changed.wait(pipe).unwrap();
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl super::Transport for MemTransport {
+        fn shutdown(&mut self) {
+            self.close();
+        }
+
+        fn set_nonblocking(&mut self, on: bool) -> io::Result<()> {
+            MemTransport::set_nonblocking(self, on)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,36 +875,21 @@ mod tests {
         assert_eq!(find_subsequence(b"8=FIX.4.1\x01", b"8=FIX."), Some(0));
     }
 
-    /// Helper: create a Connection with a dummy TCP stream for buffer tests.
-    /// We connect to a local listener so we get a valid TcpStream.
+    /// A connection on an in-memory pipe with `buf` already received.
     fn test_connection_with_buf(buf: Vec<u8>) -> Connection {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let stream = std::net::TcpStream::connect(addr).unwrap();
-        stream.set_nonblocking(true).unwrap();
-        Connection {
-            stream: Stream::Raw(stream),
-            buf,
-            seq: 0,
-            sign_key: Vec::new(),
-            sign_iv: Vec::new(),
-            read_key: Vec::new(),
-            read_iv: Vec::new(),
-            out: VecDeque::new(),
-            out_pos: 0,
-            queued_writes: false,
-            write_error: None,
-        }
+        let (end, _peer) = mem_pair();
+        let mut conn = Connection::new_mem(end);
+        conn.seed_buffer(&buf);
+        conn
     }
 
-    fn loopback() -> (Connection, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        (Connection::new_raw(client).unwrap(), server)
+    /// A connection and the peer end of its pipe.
+    fn loopback() -> (Connection, MemTransport) {
+        let (end, peer) = mem_pair();
+        (Connection::new_mem(end), peer)
     }
 
-    fn read_available(server: &mut std::net::TcpStream, want: usize) -> Vec<u8> {
+    fn read_available(server: &mut MemTransport, want: usize) -> Vec<u8> {
         server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
         let mut out = Vec::new();
         let mut buf = vec![0u8; 1 << 16];
@@ -677,12 +903,22 @@ mod tests {
         out
     }
 
+    /// The in-memory transport under a connection made by `loopback`.
+    fn conn_output(conn: &mut Connection) -> &mut MemTransport {
+        match &mut conn.stream {
+            Stream::Mem(t) => t,
+            _ => unreachable!("an in-memory connection"),
+        }
+    }
+
     // ibx#254: with a peer that does not read, sends return at once and the
     // output waits on the connection, in order; it goes out when the peer
     // reads again. No timeout ends the wait.
     #[test]
     fn queued_writes_never_block_on_a_peer_that_does_not_read() {
         let (mut conn, mut server) = loopback();
+        // The connection's output holds 256 KB, as a socket buffer.
+        conn_output(&mut conn).set_write_capacity(Some(256 * 1024));
         conn.set_queued_writes(true);
         let frame = vec![b'x'; 64 * 1024];
         let mut sent = 0usize;
@@ -936,13 +1172,10 @@ mod tests {
         find_subsequence(b"hello", b"");
     }
 
-    fn keyed_conn(mac_key: &[u8], iv: &[u8]) -> (Connection, TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        let mut conn = Connection::new_raw(client).unwrap();
+    fn keyed_conn(mac_key: &[u8], iv: &[u8]) -> (Connection, MemTransport) {
+        let (mut conn, peer) = loopback();
         conn.set_keys(Vec::new(), Vec::new(), mac_key.to_vec(), iv.to_vec());
-        (conn, server)
+        (conn, peer)
     }
 
     /// `msg` signed with its signature value changed (body intact).
