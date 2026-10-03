@@ -6,6 +6,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
+use crate::protocol::tick_decoder::rtbar_entries;
 use crate::types::{InstrumentId, ReqId, TbtType, PRICE_SCALE};
 use crossbeam_channel::Sender;
 
@@ -2426,34 +2427,6 @@ impl HmdsState {
     }
 }
 
-/// The bars of a 5-second bar frame body, read as the reference reads
-/// them (ibx#454): ticker id, bar time and payload of each.
-fn rtbar_entries(body: &[u8]) -> Vec<(u32, u32, &[u8])> {
-    let mut entries = Vec::new();
-    if body.len() < 2 {
-        return entries;
-    }
-    let mut bits = u16::from_be_bytes([body[0], body[1]]) as usize;
-    let available = (body.len() - 2) * 8;
-    while bits + 65536 <= available {
-        bits += 65536;
-    }
-    let end = (2 + bits.div_ceil(8)).min(body.len());
-    let mut pos = 2;
-    while pos + 9 <= end {
-        let ticker_id = u32::from_be_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
-        let time = u32::from_be_bytes([body[pos + 4], body[pos + 5], body[pos + 6], body[pos + 7]]);
-        let len = body[pos + 8] as usize;
-        let start = pos + 9;
-        if start + len > end {
-            break;
-        }
-        entries.push((ticker_id, time, &body[start..start + len]));
-        pos = start + len;
-    }
-    entries
-}
-
 /// The cancel of a 5-second router: `ticker:{id}` (ibx#429).
 fn ticker_cancel_xml(ticker_id: u32) -> String {
     crate::control::historical::query_cancel_xml(&format!("ticker:{}", ticker_id))
@@ -3199,11 +3172,9 @@ pub(crate) mod tests {
         let mut hmds = HmdsState::new();
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
+        let (client, mut server) = crate::protocol::connection::mem_pair();
         server.set_read_timeout(Some(std::time::Duration::from_millis(300))).unwrap();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut sent = || {
             let mut buf = Vec::new();
             let mut chunk = [0u8; 8192];

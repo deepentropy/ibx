@@ -513,14 +513,12 @@ fn borrowed(fields: &[(u32, String)]) -> Vec<(u32, &str)> {
 mod tests {
     use super::*;
 
-    fn loopback() -> (Connection, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        (Connection::new_raw(client).unwrap(), server)
+    fn loopback() -> (Connection, crate::protocol::connection::MemTransport) {
+        let (client, server) = crate::protocol::connection::mem_pair();
+        (Connection::new_mem(client), server)
     }
 
-    fn read_all(server: &mut std::net::TcpStream) -> Vec<u8> {
+    fn read_all(server: &mut crate::protocol::connection::MemTransport) -> Vec<u8> {
         use std::io::Read;
         server.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
         let mut out = Vec::new();

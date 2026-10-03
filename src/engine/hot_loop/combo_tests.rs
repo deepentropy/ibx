@@ -15,6 +15,8 @@ use crate::api::types::{ComboLeg, Contract as ApiContract, Execution, Order as A
 use crate::api::wrapper::Wrapper;
 use crate::bridge::SharedState;
 
+use crate::test_support::normalise::{Normaliser, FRAMING, ORDER_UNSTABLE};
+
 const ACCOUNT: &str = "DUXXXXXXX";
 const SPY: i64 = 756733;
 const QQQ: i64 = 320227571;
@@ -34,7 +36,7 @@ fn fixture(name: &str) -> Vec<(String, Frame)> {
         let Some(fields) = rec["fields"].as_array() else { continue };
         let frame: Frame = fields.iter().filter_map(|f| {
             let tag: u32 = f[0].as_str()?.parse().ok()?;
-            (!matches!(tag, 8 | 9 | 34 | 52 | 10)).then(|| (tag, f[1].as_str().unwrap_or("").to_string()))
+            (!FRAMING.contains(&tag)).then(|| (tag, f[1].as_str().unwrap_or("").to_string()))
         }).collect();
         out.push((rec["leg"].as_str().unwrap().to_string(), frame));
     }
@@ -68,19 +70,17 @@ fn is_attribute(t: u32) -> bool {
 }
 
 /// The same message, field for field: the other fields in order, the
-/// attributes in any order, the request id by its label, the order ids
-/// and the limit price by value.
+/// attributes in any order, the request id by its label, the session fields
+/// by the shared normaliser (order ids by their version), the limit price
+/// by value.
 fn assert_same(ours: &[(u32, String)], theirs: &[(u32, String)]) {
+    let session = Normaliser::session().keep(ORDER_UNSTABLE);
     let norm = |f: &[(u32, String)]| -> (Frame, Frame) {
         let mut plain = Vec::new();
         let mut attrs = Vec::new();
-        for (t, v) in f {
-            let v = match *t {
-                320 => label(v).to_string(),
-                11 | 41 => String::new(),
-                _ => v.clone(),
-            };
-            if is_attribute(*t) { attrs.push((*t, v)); } else { plain.push((*t, v)); }
+        for (t, v) in session.apply(f) {
+            let v = if t == 320 { label(&v).to_string() } else { v };
+            if is_attribute(t) { attrs.push((t, v)); } else { plain.push((t, v)); }
         }
         attrs.sort();
         (plain, attrs)
@@ -88,10 +88,8 @@ fn assert_same(ours: &[(u32, String)], theirs: &[(u32, String)]) {
     assert_eq!(norm(ours), norm(theirs), "\nours:   {ours:?}\ntheirs: {theirs:?}");
 }
 
-fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (server, _) = listener.accept().unwrap();
+fn socket_pair() -> (crate::protocol::connection::MemTransport, crate::protocol::connection::MemTransport) {
+    let (client, server) = crate::protocol::connection::mem_pair();
     (client, server)
 }
 
@@ -130,7 +128,7 @@ impl Wrapper for Callbacks {
 /// One engine and one API client on a captured gateway session.
 struct Session {
     engine: HotLoop,
-    server: std::net::TcpStream,
+    server: crate::protocol::connection::MemTransport,
     client: EClient,
     /// Frames the engine sent that the test has not compared yet.
     queued: std::collections::VecDeque<Frame>,
@@ -146,7 +144,7 @@ impl Session {
         shared.reference.set_api_client_id(198);
         let mut engine = HotLoop::new(shared.clone(), None, None);
         let (c, server) = socket_pair();
-        engine.ccp_conn = Some(Connection::new_raw(c).unwrap());
+        engine.ccp_conn = Some(Connection::new_mem(c));
         let (tx, rx) = crossbeam_channel::unbounded();
         engine.set_control_rx(rx);
         let id = engine.context.market.register(SMART_COMBO);

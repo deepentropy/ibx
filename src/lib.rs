@@ -16,5 +16,10 @@ pub mod engine;
 #[cfg(feature = "python")]
 mod python;
 
+/// Test helpers (in-memory peer, normaliser); built only for the tests.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support;
+
 // Re-exports for convenience.
 pub use api::{EClient, EClientConfig, Wrapper};

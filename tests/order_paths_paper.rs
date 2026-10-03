@@ -514,15 +514,10 @@ fn contract_id_on_new_orders(paper: &mut Paper) {
 }
 
 #[test]
+#[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
 fn order_paths_paper() {
     wire();
-    let config = match get_config() {
-        Some(c) => c,
-        None => {
-            println!("SKIP: IB_USERNAME / IB_PASSWORD not set");
-            return;
-        }
-    };
+    let config = get_config().expect("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials");
     println!("=== Order paths (paper account) ===");
     let client = EClient::connect(&config).expect("connect to paper failed");
     // Place no order unless this is a paper account (id starts with DU).

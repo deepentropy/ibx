@@ -23,6 +23,7 @@ fn config() -> GatewayConfig {
 }
 
 #[test]
+#[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
 fn farm_reconnect_with_cached_credentials() {
     let cfg = config();
 
@@ -59,6 +60,7 @@ fn farm_reconnect_with_cached_credentials() {
 }
 
 #[test]
+#[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
 fn hotloop_auto_reconnect_on_farm_disconnect() {
     let cfg = config();
 
@@ -142,6 +144,7 @@ fn hotloop_auto_reconnect_on_farm_disconnect() {
 }
 
 #[test]
+#[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
 fn ccp_reconnect_with_cached_credentials() {
     let cfg = config();
 

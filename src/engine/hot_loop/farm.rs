@@ -1863,6 +1863,7 @@ impl FarmState {
     }
 
     /// Test-only: set disconnected without clearing state or emitting events.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn handle_disconnect_for_test(&mut self) {
         self.disconnected = true;
     }

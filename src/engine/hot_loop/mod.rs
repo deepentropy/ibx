@@ -17,7 +17,9 @@ use crate::config::chrono_free_timestamp;
 use crate::gateway::{ccp_reconnect_host, reconnect_ccp_via, CcpReconnect, ReconnectAuth};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
-use crate::types::{ControlCommand, Fill, InstrumentId, ReqId, Price, Qty, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
+use crate::types::{ControlCommand, InstrumentId, ReqId, Price, Qty, PRICE_SCALE, QTY_SCALE};
+#[cfg(any(test, feature = "test-support"))]
+use crate::types::{Fill, TbtQuote, TbtTrade};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 use farm::FarmState;
@@ -2339,23 +2341,27 @@ impl HotLoop {
     }
 
     /// Test-only: force farm into disconnected state.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn force_farm_disconnect(&mut self) {
         self.farm.handle_disconnect_for_test();
     }
 
     /// Test-only: lose the farm connection through the same path as a real
     /// loss (subscription state cleared, socket dropped).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn lose_farm_for_test(&mut self) {
         self.farm.handle_disconnect(&mut self.context, &self.event_tx);
         self.farm_conn = None;
     }
 
     /// Test-only: the engine's instrument table.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn market_for_test(&mut self) -> &mut crate::engine::market_state::MarketState {
         &mut self.context.market
     }
 
     /// Test-only: poll the farm socket once.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn poll_farm_for_test(&mut self) {
         self.farm.poll_market_data(
             &mut self.farm_conn, &mut self.context, &self.shared,
@@ -2364,16 +2370,19 @@ impl HotLoop {
     }
 
     /// Test-only: poll the auth socket once, as step 3 of the loop does.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn poll_auth_for_test(&mut self) {
         self.poll_auth();
     }
 
     /// Test-only: trigger farm reconnect spawn.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn spawn_farm_reconnect_for_test(&mut self) {
         self.spawn_farm_reconnect();
     }
 
     /// Test-only: poll pending farm reconnect.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn poll_farm_reconnect_for_test(&mut self) {
         self.poll_farm_reconnect();
     }
@@ -2384,38 +2393,45 @@ impl HotLoop {
     }
 
     /// Inject a raw farm message for testing. Processes it through the full decode pipeline.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_farm_message(&mut self, msg: &[u8]) {
         self.farm.process_farm_message(msg, &mut self.farm_conn, &mut self.context, &self.shared, &self.event_tx, &mut self.hb);
     }
 
     /// Inject a raw auth message for testing. Processes execution reports, etc.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_ccp_message(&mut self, msg: &[u8]) {
         self.ccp.process_ccp_message(msg, &mut self.ccp_conn, &mut self.context, &self.shared, &self.event_tx, &mut self.hb, &self.account_id);
     }
 
     /// Inject a raw HMDS message for testing. Processes historical data, news, etc.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_hmds_message(&mut self, msg: &[u8]) {
         self.hmds.process_hmds_message(msg, &mut self.hmds_conn, &self.shared, &self.event_tx, &mut self.hb);
     }
 
     /// Inject a TBT trade for testing. Pushes to SharedState and emits event.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_tbt_trade(&mut self, trade: &TbtTrade) {
         self.shared.market.push_tbt_trade(trade.clone());
         emit(&self.event_tx, Event::TbtTrade(trade.clone()));
     }
 
     /// Inject a TBT quote for testing. Pushes to SharedState.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_tbt_quote(&mut self, quote: &TbtQuote) {
         self.shared.market.push_tbt_quote(quote.clone());
     }
 
     /// Inject a simulated tick for testing.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_tick(&mut self, instrument: InstrumentId) {
         self.shared.market.push_quote(instrument, self.context.quote(instrument));
         emit(&self.event_tx, Event::Tick(instrument));
     }
 
     /// Simulate a fill for testing. Updates position and notifies.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_fill(&mut self, fill: &Fill) {
         let delta = match fill.side {
             crate::types::Side::Buy => fill.qty_fixed,
@@ -3158,14 +3174,15 @@ mod tests {
         assert!(lo < Duration::from_secs(7) && hi > Duration::from_secs(13), "jittered over the range: {:?}..{:?}", lo, hi);
     }
 
-    fn loopback_conn() -> (Connection, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        (Connection::new_raw(client).unwrap(), server)
+    /// A link and its peer end; the link's output holds 256 KB, as a
+    /// socket buffer, so a peer that does not read stalls it.
+    fn loopback_conn() -> (Connection, crate::protocol::connection::MemTransport) {
+        let (client, server) = crate::protocol::connection::mem_pair();
+        client.set_write_capacity(Some(256 * 1024));
+        (Connection::new_mem(client), server)
     }
 
-    fn engine_with_links() -> (HotLoop, Arc<SharedState>, Vec<std::net::TcpStream>) {
+    fn engine_with_links() -> (HotLoop, Arc<SharedState>, Vec<crate::protocol::connection::MemTransport>) {
         let shared = Arc::new(SharedState::new());
         let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.set_reconnect_auth(reconnect_auth_with_host("gw.example"));
@@ -3202,7 +3219,7 @@ mod tests {
     }
 
     /// Bytes the peer of a loopback link has received so far.
-    fn received(server: &mut std::net::TcpStream) -> Vec<u8> {
+    fn received(server: &mut crate::protocol::connection::MemTransport) -> Vec<u8> {
         use std::io::Read;
         server.set_nonblocking(true).unwrap();
         let mut out = Vec::new();
@@ -3506,15 +3523,13 @@ mod tests {
     // historical connection never came back.
     #[test]
     fn a_lost_hmds_socket_is_dropped_and_reconnect_is_scheduled() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
+        let (client, server) = crate::protocol::connection::mem_pair();
         drop(server);
 
         let shared = Arc::new(SharedState::new());
         let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.set_reconnect_auth(reconnect_auth_with_host("gw.example"));
-        engine.hmds_conn = Some(Connection::new_raw(client).unwrap());
+        engine.hmds_conn = Some(Connection::new_mem(client));
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while !engine.hmds.disconnected && Instant::now() < deadline {
@@ -3529,11 +3544,11 @@ mod tests {
 
     /// A keyed connection and its server side, plus a frame the server
     /// signed whose signature value was then changed.
-    fn conn_with_bad_signed_frame() -> (Connection, std::net::TcpStream, Vec<u8>) {
+    fn conn_with_bad_signed_frame() -> (Connection, crate::protocol::connection::MemTransport, Vec<u8>) {
         let (client, server) = socket_pair();
         let mac_key: Vec<u8> = (0..20).collect();
         let iv: Vec<u8> = (0..16).collect();
-        let mut conn = Connection::new_raw(client).unwrap();
+        let mut conn = Connection::new_mem(client);
         conn.set_keys(Vec::new(), Vec::new(), mac_key.clone(), iv.clone());
         let (mut signed, _) = fix::fix_sign(&fix::fix_build(&[(35, "0")], 1), &mac_key, &iv);
         let pos = signed.windows(5).position(|w| w == b"8349=").unwrap() + 5;
@@ -3588,15 +3603,13 @@ mod tests {
         assert!(engine.hmds_next_attempt_at.is_some(), "reconnect scheduled");
     }
 
-    fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
+    fn socket_pair() -> (crate::protocol::connection::MemTransport, crate::protocol::connection::MemTransport) {
+        let (client, server) = crate::protocol::connection::mem_pair();
         (client, server)
     }
 
     /// Every compressed message the engine wrote to `server`, as inner text.
-    fn farm_messages_sent(server: &mut std::net::TcpStream) -> Vec<String> {
+    fn farm_messages_sent(server: &mut crate::protocol::connection::MemTransport) -> Vec<String> {
         use std::io::Read;
         server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let mut buf = Vec::new();
@@ -3617,7 +3630,7 @@ mod tests {
     }
 
     /// Every plain message the engine wrote to `server`, `|` separated.
-    fn plain_messages_sent(server: &mut std::net::TcpStream) -> Vec<String> {
+    fn plain_messages_sent(server: &mut crate::protocol::connection::MemTransport) -> Vec<String> {
         use std::io::Read;
         server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let mut buf = Vec::new();
@@ -3648,10 +3661,10 @@ mod tests {
         out
     }
 
-    fn scanner_engine(shared: &Arc<SharedState>) -> (HotLoop, std::net::TcpStream, Sender<ControlCommand>) {
+    fn scanner_engine(shared: &Arc<SharedState>) -> (HotLoop, crate::protocol::connection::MemTransport, Sender<ControlCommand>) {
         let mut engine = HotLoop::new(shared.clone(), None, None);
         let (c, server) = socket_pair();
-        engine.hmds_conn = Some(Connection::new_raw(c).unwrap());
+        engine.hmds_conn = Some(Connection::new_mem(c));
         let (tx, rx) = crossbeam_channel::unbounded();
         engine.set_control_rx(rx);
         (engine, server, tx)
@@ -3667,7 +3680,7 @@ mod tests {
         }
     }
 
-    fn load_scanner_params(engine: &mut HotLoop, server: &mut std::net::TcpStream, xml: &str) {
+    fn load_scanner_params(engine: &mut HotLoop, server: &mut crate::protocol::connection::MemTransport, xml: &str) {
         load_scanner_params_keep(engine, xml);
         let _ = plain_messages_sent(server);
     }
@@ -4007,8 +4020,8 @@ mod tests {
         let mut engine = HotLoop::new(shared.clone(), None, None);
         let (c1, mut farm_side) = socket_pair();
         let (c2, mut ccp_side) = socket_pair();
-        engine.farm_conn = Some(Connection::new_raw(c1).unwrap());
-        engine.ccp_conn = Some(Connection::new_raw(c2).unwrap());
+        engine.farm_conn = Some(Connection::new_mem(c1));
+        engine.ccp_conn = Some(Connection::new_mem(c2));
         engine.set_scale_us_lots(true);
         let (tx, rx) = crossbeam_channel::bounded(8);
         engine.set_control_rx(rx);
@@ -4055,8 +4068,8 @@ mod tests {
         let mut engine = HotLoop::new(shared.clone(), None, None);
         let (c1, mut farm_side) = socket_pair();
         let (c2, mut ccp_side) = socket_pair();
-        engine.farm_conn = Some(Connection::new_raw(c1).unwrap());
-        engine.ccp_conn = Some(Connection::new_raw(c2).unwrap());
+        engine.farm_conn = Some(Connection::new_mem(c1));
+        engine.ccp_conn = Some(Connection::new_mem(c2));
         let (tx, rx) = crossbeam_channel::bounded(8);
         engine.set_control_rx(rx);
         let by_symbol = |symbol: &str, sec_type: &str, reply: crossbeam_channel::Sender<Result<InstrumentId, String>>| {
@@ -4115,7 +4128,7 @@ mod tests {
         let shared = Arc::new(SharedState::new());
         let mut engine = HotLoop::new(shared.clone(), None, None);
         let (c1, mut hmds_side) = socket_pair();
-        engine.hmds_conn = Some(Connection::new_raw(c1).unwrap());
+        engine.hmds_conn = Some(Connection::new_mem(c1));
         let (tx, rx) = crossbeam_channel::bounded(8);
         engine.set_control_rx(rx);
         let tbt = |req_id, tbt_type, number_of_ticks| ControlCommand::SubscribeTbt {
@@ -4177,8 +4190,8 @@ mod tests {
         let mut engine = HotLoop::new(shared.clone(), None, None);
         let (c1, mut farm_side) = socket_pair();
         let (c2, mut ccp_side) = socket_pair();
-        engine.farm_conn = Some(Connection::new_raw(c1).unwrap());
-        engine.ccp_conn = Some(Connection::new_raw(c2).unwrap());
+        engine.farm_conn = Some(Connection::new_mem(c1));
+        engine.ccp_conn = Some(Connection::new_mem(c2));
         let (tx, rx) = crossbeam_channel::bounded(8);
         engine.set_control_rx(rx);
 
@@ -4220,7 +4233,7 @@ mod tests {
         let shared = Arc::new(SharedState::new());
         let mut engine = HotLoop::new(shared, None, None);
         let (c1, _s1) = socket_pair();
-        engine.farm_conn = Some(Connection::new_raw(c1).unwrap());
+        engine.farm_conn = Some(Connection::new_mem(c1));
         let aapl = engine.context.market.register(265598);
         let msft = engine.context.market.register(272093);
         let spy = engine.context.market.register(756733);
@@ -4235,7 +4248,7 @@ mod tests {
         engine.farm.send_mktdata_unsubscribe(msft, &mut engine.farm_conn, &mut engine.hb);
 
         let (c2, mut s2) = socket_pair();
-        engine.reconnect_farm(Connection::new_raw(c2).unwrap());
+        engine.reconnect_farm(Connection::new_mem(c2));
 
         let sent = farm_messages_sent(&mut s2);
         assert_eq!(sent.len(), 2, "one subscribe per live instrument: {:?}", sent);
@@ -4251,7 +4264,7 @@ mod tests {
         // A second drop and reconnect re-issues them again.
         engine.farm.handle_disconnect(&mut engine.context, &None);
         let (c3, mut s3) = socket_pair();
-        engine.reconnect_farm(Connection::new_raw(c3).unwrap());
+        engine.reconnect_farm(Connection::new_mem(c3));
         assert_eq!(farm_messages_sent(&mut s3).len(), 2);
     }
 
@@ -4280,7 +4293,7 @@ mod tests {
             let shared = Arc::new(SharedState::new());
             let mut engine = HotLoop::new(shared.clone(), None, None);
             let (c1, mut s1) = socket_pair();
-            engine.farm_conn = Some(Connection::new_raw(c1).unwrap());
+            engine.farm_conn = Some(Connection::new_mem(c1));
             engine.farm.md_modes.apply(market_data_type);
             let jp = engine.context.market.register(13905804);
             engine.farm.send_mktdata_subscribe(13905804, "7203", "SMART", "STK", "", 0.0, "", "", jp, 0,
@@ -4330,14 +4343,12 @@ mod routing_tests {
         IDEALPRO,CASH,Top|Deep,4,*,ndc1.example,4000,cashfarm;\
         NASDAQ,STK,Top|Deep2|Deep,-1,*,cdc1.example,4000,usfarm";
 
-    fn loopback() -> (Connection, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        (Connection::new_raw(client).unwrap(), server)
+    fn loopback() -> (Connection, crate::protocol::connection::MemTransport) {
+        let (client, server) = crate::protocol::connection::mem_pair();
+        (Connection::new_mem(client), server)
     }
 
-    fn sent(server: &mut std::net::TcpStream) -> Vec<String> {
+    fn sent(server: &mut crate::protocol::connection::MemTransport) -> Vec<String> {
         use std::io::Read;
         server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let mut buf = Vec::new();
@@ -4365,7 +4376,7 @@ mod routing_tests {
         }
     }
 
-    fn engine() -> (HotLoop, std::net::TcpStream) {
+    fn engine() -> (HotLoop, crate::protocol::connection::MemTransport) {
         let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
         engine.set_farm_name("usfarm".into());
         let (farm, farm_side) = loopback();
@@ -4615,16 +4626,14 @@ mod news_tests {
 
     const ALL: &str = "BRFG,BRFUPDN,DJ-N,DJ-RTA,DJ-RTE,DJ-RTG,DJ-RTPRO,DJNL";
 
-    pub(super) fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
+    pub(super) fn socket_pair() -> (crate::protocol::connection::MemTransport, crate::protocol::connection::MemTransport) {
+        let (client, server) = crate::protocol::connection::mem_pair();
         (client, server)
     }
 
     /// The compressed messages the engine wrote, without the header,
     /// sequence and time tags.
-    pub(super) fn sent(server: &mut std::net::TcpStream) -> Vec<String> {
+    pub(super) fn sent(server: &mut crate::protocol::connection::MemTransport) -> Vec<String> {
         use std::io::Read;
         server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let mut buf = Vec::new();
@@ -4647,11 +4656,11 @@ mod news_tests {
         out
     }
 
-    pub(super) fn engine() -> (HotLoop, Arc<SharedState>, std::net::TcpStream, Sender<ControlCommand>) {
+    pub(super) fn engine() -> (HotLoop, Arc<SharedState>, crate::protocol::connection::MemTransport, Sender<ControlCommand>) {
         let shared = Arc::new(SharedState::new());
         let mut engine = HotLoop::new(shared.clone(), None, None);
         let (c, server) = socket_pair();
-        engine.farm_conn = Some(Connection::new_raw(c).unwrap());
+        engine.farm_conn = Some(Connection::new_mem(c));
         let (tx, rx) = crossbeam_channel::unbounded();
         engine.set_control_rx(rx);
         (engine, shared, server, tx)
@@ -4780,7 +4789,7 @@ mod news_tests {
         use crate::control::contracts::tests::pipe_msg;
         let (mut engine, shared, mut farm_side, tx) = engine();
         let (c2, mut ccp_side) = socket_pair();
-        engine.ccp_conn = Some(Connection::new_raw(c2).unwrap());
+        engine.ccp_conn = Some(Connection::new_mem(c2));
         let mut ids = Vec::new();
         for (symbol, refusal) in [("NVDA", Some("API News error:Source code unchecked in API news Settings: XYZ")), ("MSFT", None)] {
             let (reply, answer) = crossbeam_channel::bounded(1);
@@ -4834,7 +4843,7 @@ mod news_tests {
         engine.farm.handle_disconnect(&mut engine.context, &None);
         assert!(!engine.farm.news[0].live && engine.farm.news[0].tag.is_none());
         let (c, mut farm_side) = socket_pair();
-        engine.reconnect_farm(Connection::new_raw(c).unwrap());
+        engine.reconnect_farm(Connection::new_mem(c));
         let out = sent(&mut farm_side);
         assert!(out.iter().any(|m| m == "35=V|263=1|146=1|262=6|6008=265598|207=NEWS|167=CS|264=292|6472=BRFG|6088=Socket|9830=1|"), "{out:?}");
         assert!(shared.market.drain_tick_news().is_empty());
@@ -4910,7 +4919,7 @@ mod sharing_tests {
         use crate::control::contracts::tests::pipe_msg;
         let (mut engine, shared, mut farm_side, tx) = engine();
         let (c2, _ccp_side) = socket_pair();
-        engine.ccp_conn = Some(Connection::new_raw(c2).unwrap());
+        engine.ccp_conn = Some(Connection::new_mem(c2));
         let first = aapl(&tx, &mut engine, ALL);
         let _ = sent(&mut farm_side);
         let (reply, answer) = crossbeam_channel::bounded(1);
@@ -4953,14 +4962,12 @@ mod tbt_tests {
     use crate::bridge::SharedState;
     use crate::engine::routing::TableKind;
 
-    fn loopback() -> (Connection, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        (Connection::new_raw(client).unwrap(), server)
+    fn loopback() -> (Connection, crate::protocol::connection::MemTransport) {
+        let (client, server) = crate::protocol::connection::mem_pair();
+        (Connection::new_mem(client), server)
     }
 
-    fn plain_sent(server: &mut std::net::TcpStream) -> Vec<String> {
+    fn plain_sent(server: &mut crate::protocol::connection::MemTransport) -> Vec<String> {
         use std::io::Read;
         server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let mut buf = Vec::new();
@@ -5466,10 +5473,8 @@ mod bars_routing_tests {
     fn bars_routed_by_the_historical_table() {
         let shared = Arc::new(SharedState::new());
         let mut engine = HotLoop::new(shared.clone(), None, None);
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let _server = listener.accept().unwrap();
-        engine.hmds_conn = Some(Connection::new_raw(client).unwrap());
+        let (client, _server) = crate::protocol::connection::mem_pair();
+        engine.hmds_conn = Some(Connection::new_mem(client));
         engine.set_routing_table(TableKind::Historical,
             "IDEALPRO,CASH,DayChart|Bar5Sec,4,*,ndc1.example,4000,cashhmds;IDEALPRO,CASH,EODChart,4,*,ndc1.example,4000,cashhmds2");
         let (tx, rx) = crossbeam_channel::bounded(8);
@@ -5509,14 +5514,12 @@ mod depth_tests {
         IBEOS,STK,Top,-1,*,ndc1.example,4000,usfarm.nj;\
         CME,FUT,Top|Deep,-1,*,cdc1.example,4000,usfuture";
 
-    fn loopback() -> (Connection, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        (Connection::new_raw(client).unwrap(), server)
+    fn loopback() -> (Connection, crate::protocol::connection::MemTransport) {
+        let (client, server) = crate::protocol::connection::mem_pair();
+        (Connection::new_mem(client), server)
     }
 
-    fn sent(server: &mut std::net::TcpStream) -> Vec<String> {
+    fn sent(server: &mut crate::protocol::connection::MemTransport) -> Vec<String> {
         use std::io::Read;
         server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
         let mut buf = Vec::new();
@@ -5544,7 +5547,7 @@ mod depth_tests {
 
     /// An engine with the table, and the definitions of the contracts
     /// known (group and components).
-    fn engine() -> (HotLoop, Arc<SharedState>, std::net::TcpStream, crossbeam_channel::Sender<ControlCommand>) {
+    fn engine() -> (HotLoop, Arc<SharedState>, crate::protocol::connection::MemTransport, crossbeam_channel::Sender<ControlCommand>) {
         let shared = Arc::new(SharedState::new());
         let mut engine = HotLoop::new(shared.clone(), None, None);
         engine.set_farm_name("usfarm".into());

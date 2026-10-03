@@ -82,12 +82,12 @@ fn scaled(row: &BTreeMap<u32, String>, tag: u32) -> i64 {
 }
 
 #[test]
+#[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
 fn every_portfolio_row_is_applied() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     wire();
     let (Ok(username), Ok(password)) = (std::env::var("IB_USERNAME"), std::env::var("IB_PASSWORD")) else {
-        println!("SKIP: IB_USERNAME / IB_PASSWORD not set");
-        return;
+        panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials");
     };
     let cfg = GatewayConfig {
         username,
@@ -198,11 +198,11 @@ impl ibx::api::wrapper::Wrapper for Probe {
 }
 
 #[test]
+#[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
 fn eclient_delivers_update_portfolio() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (Ok(username), Ok(password)) = (std::env::var("IB_USERNAME"), std::env::var("IB_PASSWORD")) else {
-        println!("SKIP: IB_USERNAME / IB_PASSWORD not set");
-        return;
+        panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials");
     };
     let host = std::env::var("IB_HOST").unwrap_or_else(|_| "cdc1.ibllc.com".to_string());
     println!("=== update_portfolio through EClient (paper account) ===");

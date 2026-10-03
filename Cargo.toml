@@ -14,7 +14,10 @@ path = "src/main.rs"
 [features]
 default = []
 python = ["pyo3"]
-compat = []
+# Test helpers (in-memory transport, scripted peer, normaliser, injection
+# hooks). Never enabled by a release build; the test targets turn it on
+# through the dev-dependency on this crate below.
+test-support = []
 
 [dependencies]
 # Hot loop
@@ -65,6 +68,7 @@ jiff = "0.2.28"
 
 [dev-dependencies]
 serde_json = "1"
+ibx = { path = ".", features = ["test-support"] }
 
 [profile.release]
 lto = "fat"

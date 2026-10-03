@@ -80,14 +80,9 @@ fn connect_paper(config: &EClientConfig) -> EClient {
 }
 
 #[test]
+#[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
 fn global_cancel_reaches_orders_from_an_earlier_session() {
-    let config = match get_config() {
-        Some(c) => c,
-        None => {
-            println!("SKIP: IB_USERNAME / IB_PASSWORD not set");
-            return;
-        }
-    };
+    let config = get_config().expect("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials");
     println!("=== Global cancel (paper account) ===");
 
     // Session 1: leave one GTC order working.

@@ -416,22 +416,29 @@ fn poll_until(client: &EClient, wrapper: &mut RecWrapper, pred: impl Fn(&[Cb]) -
 
 // ── Comparison helpers ──
 
+/// The field equals the reference value; a reference without the key is a
+/// failure, not a pass.
 fn assert_field(name: &str, actual: &str, gt_key: &str, gt: &serde_json::Value) -> bool {
-    if let Some(expected) = gt.get(gt_key).and_then(|v| v.as_str()) {
-        if actual != expected {
-            println!("    FAIL {}: '{}' != GT '{}'", name, actual, expected);
-            return false;
-        }
+    let Some(expected) = gt.get(gt_key).and_then(|v| v.as_str()) else {
+        println!("    FAIL {}: no text '{}' in the reference", name, gt_key);
+        return false;
+    };
+    if actual != expected {
+        println!("    FAIL {}: '{}' != GT '{}'", name, actual, expected);
+        return false;
     }
     true
 }
 
+/// As `assert_field`, for a number.
 fn assert_field_i64(name: &str, actual: i64, gt_key: &str, gt: &serde_json::Value) -> bool {
-    if let Some(expected) = gt.get(gt_key).and_then(|v| v.as_i64()) {
-        if actual != expected {
-            println!("    FAIL {}: {} != GT {}", name, actual, expected);
-            return false;
-        }
+    let Some(expected) = gt.get(gt_key).and_then(|v| v.as_i64()) else {
+        println!("    FAIL {}: no number '{}' in the reference", name, gt_key);
+        return false;
+    };
+    if actual != expected {
+        println!("    FAIL {}: {} != GT {}", name, actual, expected);
+        return false;
     }
     true
 }
@@ -439,11 +446,12 @@ fn assert_field_i64(name: &str, actual: i64, gt_key: &str, gt: &serde_json::Valu
 // ── Tests ──
 
 #[test]
+#[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
 fn api_gt_suite() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
 
     println!("=== Rust API GT Integration Suite ===\n");
@@ -1523,7 +1531,7 @@ fn api_snapshot_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -1590,7 +1598,7 @@ fn api_eurusd_prices_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -1673,7 +1681,7 @@ fn api_stream_order_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -1752,7 +1760,7 @@ fn api_smart_components_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -1835,7 +1843,7 @@ fn api_contract_lookups_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -1939,7 +1947,7 @@ fn api_contract_details_fields_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -2109,7 +2117,7 @@ fn api_historical_b1_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -2176,7 +2184,7 @@ fn api_news_ticks_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -2240,7 +2248,7 @@ fn api_logon_values_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -2314,7 +2322,7 @@ fn api_depth_books_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -2461,7 +2469,7 @@ fn api_shared_requests_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -2557,7 +2565,7 @@ fn api_option_chains_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {
@@ -2652,7 +2660,7 @@ fn api_stops_all_or_none_live() {
     let _ = env_logger::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let client = EClient::connect(&config).expect("EClient::connect failed");
     if !client.account_id.starts_with("DU") {

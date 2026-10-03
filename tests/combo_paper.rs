@@ -136,10 +136,7 @@ fn last_status(s: &State, id: i64) -> Option<String> {
 #[ignore]
 fn combo_order_on_paper() {
     wire();
-    let Some(config) = get_config() else {
-        println!("Skipping: IB_USERNAME / IB_PASSWORD not set");
-        return;
-    };
+    let config = get_config().expect("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials");
     let client = EClient::connect(&config).expect("connect to paper failed");
     if !client.account_id.starts_with("DU") {
         client.disconnect();

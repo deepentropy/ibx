@@ -94,19 +94,14 @@ pub(super) fn take_rejections() -> Vec<String> {
 /// same trap in a different shape.
 ///
 /// The env is not loaded from `.env` here (no loader dependency); export it
-/// first, e.g. `set -a; . ./.env; set +a`. To skip on purpose (a checkout with
-/// no credentials), set `IBX_ALLOW_SKIP_NO_CREDS=1` and the suite returns `None`
-/// as before.
+/// first, e.g. `set -a; . ./.env; set +a`. The live tests are `#[ignore]`:
+/// a run without `--ignored` lists them as ignored, never as passed.
 pub(super) fn get_config() -> Option<GatewayConfig> {
     let var = |k: &str| env::var(k).ok().filter(|v| !v.trim().is_empty());
     let (username, password) = match (var("IB_USERNAME"), var("IB_PASSWORD")) {
         (Some(u), Some(p)) => (u, p),
-        _ if var("IBX_ALLOW_SKIP_NO_CREDS").as_deref() == Some("1") => return None,
         _ => panic!(
-            "IB_USERNAME/IB_PASSWORD unset or empty — the compat suite tests \
-             nothing without real-server credentials, so it fails rather than \
-             passing silently. Export them first (`set -a; . ./.env; set +a`), \
-             or set IBX_ALLOW_SKIP_NO_CREDS=1 to skip deliberately."
+            "IB_USERNAME/IB_PASSWORD unset or empty: the compat suite tests              nothing without real-server credentials, so it fails rather than              passing silently. Export them first (`set -a; . ./.env; set +a`)."
         ),
     };
     let host = env::var("IB_HOST").unwrap_or_else(|_| "cdc1.ibllc.com".to_string());

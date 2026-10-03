@@ -1368,8 +1368,11 @@ impl ClientCore {
     /// Registration reply timeout.
     #[cfg(not(test))]
     const REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    /// In the unit tests: short, for the tests with no engine to answer,
+    /// and long enough for a stand-in engine thread to answer on a loaded
+    /// machine (1 ms failed at random, "Registration timed out").
     #[cfg(test)]
-    const REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1);
+    const REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
     /// Wait for the hot loop to process a registration command and return the
     /// assigned ID. The engine replies Err when the instrument table is full

@@ -4435,7 +4435,7 @@ mod tests {
             1626578655, instrument, Side::Sell, 1, 50962 * PRICE_SCALE / 100, b'2', b'0', 0,
         ));
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         // The cancel ibx sent: version 1.
         context.modify_versions.insert(1626578655, 1);
@@ -4472,7 +4472,7 @@ mod tests {
         use crate::types::OrderStatus;
         let (mut ccp, mut context, shared) = ord_status_test_state();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         let routed = exec_report_frame(&[(11, "42.0"), (39, "0"), (150, "0"), (20, "0"), (100, "ARCA")]);
         ccp.handle_exec_report(&routed, &mut context, &shared, &None, "DU1");
@@ -4510,7 +4510,7 @@ mod tests {
         use crate::types::OrderStatus;
         let (mut ccp, mut context, shared) = ord_status_test_state();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         context.modify_versions.insert(42, 2);
         context.last_clord.insert(42, "42.2".to_string());
@@ -4922,16 +4922,14 @@ mod tests {
         assert_eq!(strike_divided_by_100("1234.25"), "12.3425");
     }
 
-    fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
+    fn socket_pair() -> (crate::protocol::connection::MemTransport, crate::protocol::connection::MemTransport) {
+        let (client, server) = crate::protocol::connection::mem_pair();
         (client, server)
     }
 
     /// Every message written to `server`, without the framing, sequence
     /// and time fields.
-    fn ccp_messages_sent(server: &mut std::net::TcpStream) -> Vec<String> {
+    fn ccp_messages_sent(server: &mut crate::protocol::connection::MemTransport) -> Vec<String> {
         use std::io::Read;
         server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
         let mut buf = Vec::new();
@@ -4953,7 +4951,7 @@ mod tests {
     fn empty_reply_to_a_strike_lookup_retries_once_then_gives_error_200() {
         let (mut ccp, mut context, shared) = u186_test_state();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         let mut f = option_filters("", "", "");
         f.strike = 342.8;
@@ -5022,7 +5020,7 @@ mod tests {
     fn a_derivative_row_gets_the_industry_of_its_looked_up_company() {
         let (mut ccp, mut context, shared) = u186_test_state();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         let option = |rid: &str| pipe_msg(&format!(
             "35=d|320={rid}|323=4|55=AAPL|167=OPT|207=BEST|6008=926735346|6031=32|146=0|6344=1|6008=926735346|6346=265598|306=APPLE INC"));
@@ -5061,7 +5059,7 @@ mod tests {
     fn records_sharing_a_join_key_ask_their_schedule_once() {
         let (mut ccp, mut context, shared) = u186_test_state();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         ccp.send_secdef_request_by_symbol(22, "MNQ", "FUT", "CME", "USD", &Default::default(), &mut conn, &mut hb);
         let _ = ccp_messages_sent(&mut server);
@@ -5155,7 +5153,7 @@ mod tests {
     fn concurrent_lookups_sharing_a_schedule_key_keep_their_own_rows() {
         let (mut ccp, mut context, shared) = u186_test_state();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         let key = "1/STK/NASDAQ#LITE";
         ccp.send_secdef_request(100, 756733, &mut conn, &mut hb);
@@ -5268,7 +5266,7 @@ mod tests {
     fn contfut_lookup_as_the_reference() {
         let (mut ccp, mut context, shared) = u186_test_state();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         ccp.market_rule_by_exchange.insert((515416632, "CME".into()), 67);
         ccp.send_secdef_request_by_symbol(9480, "ES", "CONTFUT", "CME", "USD", &Default::default(), &mut conn, &mut hb);
@@ -5290,7 +5288,7 @@ mod tests {
     fn fut_and_contfut_lookup_as_the_reference() {
         let (mut ccp, mut context, shared) = u186_test_state();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         for con_id in [515416632, 586139767] {
             ccp.market_rule_by_exchange.insert((con_id, "CME".into()), 67);
@@ -5330,7 +5328,7 @@ mod tests {
     fn bond_issuer_lookup_as_the_reference() {
         let (mut ccp, _context, _shared) = u186_test_state();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         let f = crate::types::SecDefFilters { issuer_id: "e1400789".into(), ..Default::default() };
         ccp.send_secdef_request_by_symbol(9488, "", "BOND", "", "USD", &f, &mut conn, &mut hb);
@@ -5348,7 +5346,7 @@ mod tests {
     fn lookup_by_con_id_as_the_reference() {
         let (mut ccp, mut context, shared) = u186_test_state();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         ccp.send_contract_details_by_con_id(9483, 265598, "ISLAND", &mut conn, &mut hb);
         ccp.send_contract_details_by_con_id(9484, 265598, "", &mut conn, &mut hb);
@@ -5560,7 +5558,7 @@ mod tests {
         assert_eq!(ccp.pending_matching_symbols, vec![(1, 11)]);
     }
 
-    fn sent_frames(server: &mut std::net::TcpStream) -> String {
+    fn sent_frames(server: &mut crate::protocol::connection::MemTransport) -> String {
         use std::io::Read;
         server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
         let mut out = Vec::new();
@@ -5577,10 +5575,8 @@ mod tests {
     #[test]
     fn matching_symbols_requests_carry_own_ids() {
         let (mut ccp, mut context, shared) = u186_test_state();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         ccp.send_matching_symbols_request(500, "AAPL", &mut conn, &mut hb, &shared);
         // The second one waits for the answer of the first and the pause.
@@ -5602,14 +5598,12 @@ mod tests {
     }
 
     /// A connected auth link for the pacing tests, with its server end.
-    fn paced_link() -> (Option<Connection>, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        (Some(Connection::new_raw(client).unwrap()), server)
+    fn paced_link() -> (Option<Connection>, crate::protocol::connection::MemTransport) {
+        let (client, server) = crate::protocol::connection::mem_pair();
+        (Some(Connection::new_mem(client)), server)
     }
 
-    fn sent_patterns(server: &mut std::net::TcpStream) -> Vec<String> {
+    fn sent_patterns(server: &mut crate::protocol::connection::MemTransport) -> Vec<String> {
         sent_frames(server).split('|').filter_map(|f| f.strip_prefix("58=").map(String::from)).collect()
     }
 
@@ -5712,10 +5706,8 @@ mod tests {
         let mut hb = HeartbeatState::new();
         ccp.send_matching_symbols_request(7, "AAPL", &mut None, &mut hb, &shared);
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let _server = listener.accept().unwrap();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let (client, _server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
         ccp.disconnected = true;
         ccp.send_matching_symbols_request(8, "AAPL", &mut conn, &mut hb, &shared);
         ccp.disconnected = false;
