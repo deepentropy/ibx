@@ -6324,6 +6324,30 @@ fn an_invalid_generic_tick_list_is_refused() {
 
 // ibx#450: a valid list goes on (its ticks other than the news are not
 // sent); a snapshot with an invalid list is not refused by this check.
+// ibx#444: `mdoff` (any case, anywhere in the list) turns the top of book
+// off for its request: the reference's sender skips the top pass of that
+// subscriber (`jextend.dL.a(s,int,pa,Map,Set)@136-220`). Another request
+// of the same contract still gets it.
+#[test]
+fn mdoff_request_gets_no_top_of_book() {
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    client.req_mkt_data(1, &spy_stk(), "233,MdOff", false, false).unwrap();
+    client.req_mkt_data(2, &spy_stk(), "", false, false).unwrap();
+    let mut q = Quote::default();
+    q.bid = 150 * PRICE_SCALE;
+    q.ask = 151 * PRICE_SCALE;
+    q.last = 150 * PRICE_SCALE;
+    shared.market.push_quote(5, &q);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("tick_price:1:") || e.starts_with("tick_size:1:")), "{:?}", w.events);
+    assert!(w.events.iter().any(|e| e.starts_with("tick_price:2:1:150")), "{:?}", w.events);
+    client.cancel_mkt_data(1).unwrap();
+    assert!(!client.core.md_top_off.lock().unwrap().contains(&1));
+    let _ = engine.join();
+}
+
 #[test]
 fn a_valid_generic_tick_list_goes_on() {
     let (client, rx, _shared) = test_client();

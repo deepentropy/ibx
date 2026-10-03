@@ -121,6 +121,7 @@ pub enum MdTick {
 
 /// Result of polling quotes for one request: its callbacks in the order
 /// they are sent.
+#[derive(Default)]
 pub struct QuotePollResult {
     pub ticks: Vec<MdTick>,
     /// true if any tick was delivered (for snapshot detection).
@@ -934,6 +935,9 @@ pub struct ClientCore {
     /// The news provider key of each market data request with the news
     /// tick (ibx#444, ibx#458).
     pub md_news: Mutex<HashMap<i64, String>>,
+    /// The market data requests whose generic tick list has `mdoff`: no
+    /// top of book ticks (ibx#444).
+    pub md_top_off: Mutex<HashSet<i64>>,
     /// The last request parameters of each instrument (minimum tick, BBO
     /// exchange, snapshot permissions): a request that joins gets them at
     /// once (ibx#444).
@@ -1222,6 +1226,7 @@ impl ClientCore {
             con_id_to_instrument: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
             md_news: Mutex::new(HashMap::new()),
+            md_top_off: Mutex::new(HashSet::new()),
             instrument_params: Mutex::new(HashMap::new()),
             instrument_news: Mutex::new(HashMap::new()),
             md_joins: Mutex::new(Vec::new()),
@@ -1428,8 +1433,12 @@ impl ClientCore {
                 });
             }
         };
+        // `mdoff` anywhere in the list, in any case, turns the top of book
+        // off for the request, as the reference's `generictick.bq.a(String)`
+        // (ibx#444).
+        let top_off = generic_tick_list.to_ascii_lowercase().contains("mdoff");
         let attach = |instrument: InstrumentId, had_data: bool| {
-            if self.attach_md_request(shared, req_id, instrument, snapshot, sec_type, exchange, news_key.clone(), had_data) {
+            if self.attach_md_request(shared, req_id, instrument, snapshot, sec_type, exchange, news_key.clone(), had_data, top_off) {
                 send_news(instrument);
             }
             Ok(instrument)
@@ -1507,7 +1516,7 @@ impl ClientCore {
     #[allow(clippy::too_many_arguments)]
     fn attach_md_request(
         &self, shared: &SharedState, req_id: i64, instrument: InstrumentId, snapshot: bool, sec_type: &str,
-        exchange: &str, news: Option<String>, had_data: bool,
+        exchange: &str, news: Option<String>, had_data: bool, top_off: bool,
     ) -> bool {
         if let Some(key) = news.clone() {
             self.md_news.lock().unwrap().insert(req_id, key);
@@ -1515,6 +1524,9 @@ impl ClientCore {
         if !self.join_md_observers(shared, req_id, instrument, had_data) {
             self.md_news.lock().unwrap().remove(&req_id);
             return false;
+        }
+        if top_off {
+            self.md_top_off.lock().unwrap().insert(req_id);
         }
         if snapshot {
             self.start_snapshot(req_id, sec_type);
@@ -1772,6 +1784,7 @@ impl ClientCore {
         self.farm_auto_reqs.lock().unwrap().remove(&req_id);
         self.md_joins.lock().unwrap().retain(|(r, _)| *r != req_id);
         let news = self.md_news.lock().unwrap().remove(&req_id);
+        self.md_top_off.lock().unwrap().remove(&req_id);
         self.end_snapshot(req_id);
         if !last {
             return Some(MdCancel::Shared { instrument, news });
@@ -3024,10 +3037,17 @@ impl ClientCore {
     /// its snapshot ended now: a stream gives every change; a plain
     /// snapshot each tick type once, then its end (ibx#446).
     pub fn poll_market_ticks(&self, shared: &SharedState, iid: InstrumentId, req_id: i64) -> (QuotePollResult, bool) {
+        // `mdoff`: the reference's sender skips the top of book pass of the
+        // request (`jextend.dL.a(s,int,pa,Map,Set)@136-220`, `s.o()` false);
+        // a snapshot still ends as the quote completes (ibx#444).
+        let top_off = self.md_top_off.lock().unwrap().contains(&req_id);
         if self.snapshot_count.load(Ordering::Acquire) > 0
-            && let Some(polled) = self.poll_snapshot_ticks(shared, iid, req_id, std::time::Instant::now())
+            && let Some((polled, ended)) = self.poll_snapshot_ticks(shared, iid, req_id, std::time::Instant::now())
         {
-            return polled;
+            return (if top_off { QuotePollResult::default() } else { polled }, ended);
+        }
+        if top_off {
+            return (QuotePollResult::default(), false);
         }
         (self.poll_instrument_ticks(shared, iid, req_id), false)
     }
