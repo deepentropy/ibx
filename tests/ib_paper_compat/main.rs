@@ -102,11 +102,12 @@ use ibx::protocol::fixcomp;
 use common::*;
 
 #[test]
+#[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
 fn compat_suite() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
 
     let (session, et_min) = market_session();
@@ -494,11 +495,12 @@ fn compat_suite() {
 /// ibx#186 focused live entry — runs only the QueryError phase so you don't
 /// pay the full ~128-phase suite cost just to validate this fix.
 #[test]
+#[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
 fn query_error_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
 
     println!("=== ibx#186 focused live test ===\n");
@@ -526,7 +528,7 @@ fn server_reject_phases_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     println!("=== server reject phases (session={:?}) ===
 ", market_session().0);
@@ -563,7 +565,7 @@ fn close_order_phases_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     println!("=== close order phases (session={:?}) ===\n", market_session().0);
     let (mut gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
@@ -592,7 +594,7 @@ fn pd_orders_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     println!("=== bracket key and price management (session={:?}) ===\n", market_session().0);
     let (gw, farm, ccp, hmds) = connect_paper(&config).expect("Gateway::connect() failed");
@@ -681,7 +683,7 @@ fn mtl_snap_phases_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     println!("=== market-to-limit and snap phases (session={:?}) ===
 ", market_session().0);
@@ -713,7 +715,7 @@ fn condition_phases_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     println!("=== condition phases (session={:?}) ===
 ", market_session().0);
@@ -743,7 +745,7 @@ fn account_pnl_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let (gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
         .expect("Gateway::connect() failed");
@@ -769,7 +771,7 @@ fn rapid_order_dedup_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let (gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
         .expect("Gateway::connect() failed");
@@ -789,7 +791,7 @@ fn tbt_unsubscribe_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let (gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
         .expect("Gateway::connect() failed");
@@ -810,7 +812,7 @@ fn tbt_shared_streams_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
     let (gw, farm_conn, ccp_conn, hmds_conn) = connect_paper(&config)
         .expect("Gateway::connect() failed");
@@ -836,7 +838,7 @@ fn cross_session_recovery_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
 
     println!("=== ibx#191 PR A: cross-session recovery test ===\n");
@@ -965,7 +967,7 @@ fn cancel_by_perm_id_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
 
     println!("=== ibx#191 PR B: cancel_order_by_perm_id ===\n");
@@ -1091,7 +1093,7 @@ fn submit_ex_bracket_child_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
 
     println!("=== ibx#224/ibx#215: SubmitEx bracket child ===\n");
@@ -1211,7 +1213,7 @@ fn snap_to_tick_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
 
     println!("=== ibx#216: snap-to-tick ===\n");
@@ -1310,7 +1312,7 @@ fn timeout_sweeps_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
 
     println!("=== ibx#231/ibx#227: happy paths under the deadline sweeps ===\n");
@@ -1407,7 +1409,7 @@ fn reclaim_and_symbol_search_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
 
     println!("=== ibx#233/ibx#228: slot reclaim + symbol search ===\n");
@@ -1495,7 +1497,7 @@ fn rtt_ping_phase_live() {
     let _ = tracing_subscriber::fmt::try_init();
     let config = match get_config() {
         Some(c) => c,
-        None => { println!("Skipping: IB credentials not set"); return; }
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
     };
 
     println!("=== ibx#158: RTT ping ===
