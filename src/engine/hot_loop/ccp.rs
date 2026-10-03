@@ -91,13 +91,17 @@ pub(crate) fn fix_utc_to_unix_secs(s: &str) -> Option<i64> {
 /// message of the four-leg recordings, ibx#486). The exchange is the
 /// listing as the contract details give it, `{primaryExchange}.{marketName}`
 /// (NASDAQ.NMS for AAPL, as in the capture; the form is only checked for
-/// AAPL), else the primary exchange, else the order's exchange.
+/// AAPL), else the primary exchange, else the order's exchange. A combo
+/// shows its own symbol and "Combo" (captured 26/09/2026,
+/// i105_combo_stock_smart and i105_combo_leg_prices: "BUY 1 QQQ,SPY Combo"
+/// where the report says 55=IECombo; ibx#487).
 fn order_message_399(
     parsed: &std::collections::HashMap<u32, String>,
     text: &str,
     context: &Context,
     clord_id: OrderId,
     shared: &SharedState,
+    combo: Option<&api::Contract>,
 ) -> String {
     let action = match parsed.get(&54).map(|s| s.as_str()) {
         Some("1") => "BUY",
@@ -110,6 +114,11 @@ fn order_message_399(
         },
     };
     let quantity = parsed.get(&38).cloned().unwrap_or_default();
+    if let Some(c) = combo {
+        return format!("Order Message:
+{} {} {} Combo
+{}", action, quantity, c.symbol, text);
+    }
     let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
     let cached = shared.reference.get_contract(con_id);
     let symbol = parsed.get(&55).cloned()
@@ -171,6 +180,7 @@ fn fill_exec_of(parsed: &std::collections::HashMap<u32, String>, exec_id: &str) 
         client_id: tag(6119).and_then(|s| s.parse().ok()).unwrap_or(0),
         model_code: tag(6700).cloned().unwrap_or_default(),
         order_ref: tag(6010).cloned().unwrap_or_default(),
+        last_liquidity: tag(851).and_then(|s| s.parse().ok()).unwrap_or(0),
         combo: None,
     }
 }
@@ -1529,7 +1539,7 @@ impl CcpState {
         if parsed.get(&6360).map(|s| s.as_str()) == Some("TIME") && context.order(clord_id).is_some() {
             if let Some(text) = parsed.get(&6361).filter(|t| !t.is_empty()) {
                 if self.order_messages_sent.insert((clord_id, text.clone())) {
-                    let message = order_message_399(parsed, text, context, clord_id, shared);
+                    let message = order_message_399(parsed, text, context, clord_id, shared, combo_view.as_ref().map(|v| &v.contract));
                     shared.orders.push_order_error(clord_id, 399, message);
                 }
             }
@@ -6283,6 +6293,21 @@ mod tests {
         let done = exec_report_frame(&[(39, "4"), (150, "4"), (58, "Order expired")]);
         ccp.handle_exec_report(&done, &mut context, &shared, &None, "");
         assert_eq!(shared.orders.drain_order_notices(), [(42, 202, "Order Canceled - reason:Order expired".to_string())]);
+    }
+
+    // ibx#487: the order message of a combo names the combo's symbol and
+    // "Combo" (captured 26/09/2026, i105_combo_stock_smart: "BUY 1 QQQ,SPY
+    // Combo"), not the report's 55=IECombo and exchange.
+    #[test]
+    fn a_combo_order_message_names_the_combo() {
+        let (_, context, shared) = ord_status_test_state();
+        let text = "Warning: your order will not be placed at the exchange until 2026-09-28 04:00:00 US/Eastern";
+        let report = exec_report_frame(&[(54, "1"), (38, "1"), (55, "IECombo"), (167, "BAG"), (6008, "28812380"), (207, "BEST")]);
+        let combo = api::Contract { con_id: 28812380, symbol: "QQQ,SPY".into(), sec_type: "BAG".into(), exchange: "SMART".into(), ..Default::default() };
+        assert_eq!(order_message_399(&report, text, &context, 42, &shared, Some(&combo)),
+            format!("Order Message:
+BUY 1 QQQ,SPY Combo
+{}", text));
     }
 
     // ibx#465: the captured order message of an OPG order before the open.
