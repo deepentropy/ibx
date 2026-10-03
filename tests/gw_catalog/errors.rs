@@ -393,47 +393,17 @@ fn differences(raises: &[Raise], codes: &BTreeMap<i64, catalog::ErrorCode>) -> V
     problems
 }
 
-/// Known differences, with the open issue: (source file, code, why).
-const OPEN: &[(&str, i64, &str)] = &[
-    ("src/engine/hot_loop/ccp.rs", 200,
-     "ibx#485: a contract details request with no reply in time ends with 200 and an ibx text; no such \
-      timeout was found in the gateway's contract details path"),
-    ("src/engine/hot_loop/hmds.rs", 162,
-     "ibx#485: a historical request with no reply in time ends with 162 and an ibx text; the gateway's \
-      text for this case is not known"),
-];
-
-fn split_open(problems: Vec<String>) -> (Vec<String>, Vec<String>) {
-    problems.into_iter().partition(|p| {
-        !OPEN.iter().any(|(file, code, _)| p.starts_with(file) && p.contains(&format!(": {code} ")))
-    })
-}
-
-/// The raise sites, the differences and the known differences.
-fn checked() -> (Vec<Raise>, Vec<String>, Vec<String>) {
+#[test]
+fn every_error_ibx_raises_is_the_gateways() {
     let codes = catalog::error_codes();
     let mut raises = raises();
     raises.sort_by(|a, b| (&a.at, a.code).cmp(&(&b.at, b.code)));
     raises.dedup_by(|a, b| a.at == b.at && a.code == b.code && a.text == b.text);
-    let (problems, open) = split_open(differences(&raises, &codes));
-    (raises, problems, open)
-}
-
-#[test]
-fn every_error_ibx_raises_is_the_gateways() {
-    let (raises, problems, open) = checked();
     let distinct: std::collections::BTreeSet<i64> = raises.iter().map(|r| r.code).collect();
     println!("{} raise sites, {} codes: {:?}", raises.len(), distinct.len(), distinct);
-    println!("{} known differences (OPEN):\n{}", open.len(), open.join("\n"));
     assert!(raises.len() > 150 && distinct.len() > 80, "the scan finds the raise sites");
+    let problems = differences(&raises, &codes);
     assert!(problems.is_empty(), "{} differences:\n{}", problems.len(), problems.join("\n"));
-}
-
-#[test]
-#[ignore = "ibx#485: the 200 and 162 timeouts of contract details and historical requests use ibx texts"]
-fn the_request_timeouts_use_the_gateways_texts() {
-    let (_, _, open) = checked();
-    assert!(open.is_empty(), "{}", open.join("\n"));
 }
 
 /// The check fails on a code the gateway does not have, on a text that

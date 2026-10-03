@@ -688,7 +688,7 @@ error,163,n/a,no test
 error,165,Historical Market Data Service query message,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,166,HMDS Expired Contract Violation,no test
 error,168,Discretionary amount does not conform to the minimum price variation for this contract,no test
-error,200,No security definition has been found for the request,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/ccp.rs::sweep_times_out_a_negative_request_id_as_the_callers ; src/engine/hot_loop/ccp.rs::empty_secdef_reply_gives_error_200_and_no_end
+error,200,No security definition has been found for the request,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/ccp.rs::empty_secdef_reply_gives_error_200_and_no_end ; src/engine/hot_loop/ccp.rs::empty_reply_to_a_strike_lookup_retries_once_then_gives_error_200
 error,201,Order rejected - reason,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::refused_what_if_gives_open_order_then_201 ; src/api/client/tests.rs::process_msgs_delivers_a_reject_error_before_the_status
 error,202,Order Canceled - reason,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/ccp.rs::a_cancel_gives_202_with_the_reason
 error,203,The security (security) is not available or allowed for this account,no test
@@ -1068,7 +1068,7 @@ error,10144,Trading %s for a Model is not supported.,no test
 error,10145,No algorithm is selected. Please select a valid algorithm strategy from the list.,no test
 error,10147,OrderId %s that needs to be cancelled is not found.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/order_builder.rs::cancel_of_an_unknown_order_is_refused_with_10147
 error,10148,"OrderId %s that needs to be cancelled can not be cancelled, state: %s.",tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/order_builder.rs::cancel_of_an_order_with_a_pending_cancel_is_refused_with_10148
-error,10149,Invalid order id: %s,no test
+error,10149,Invalid order id: %s,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::place_order_with_id_zero_is_refused_with_10149
 error,10150,Child orders stack is too big. New child orders can't be added.,no test
 error,10151,Market Order Confirmation,no test
 error,10152,Stop Variant Order Confirmation,no test
@@ -1106,7 +1106,7 @@ error,10184,Failed to request PNL single,no test
 error,10185,Failed to cancel PNL (not subscribed),tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10186,Failed to cancel PNL single (not subscribed),tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10187,Failed to request historical ticks,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/hmds.rs::historical_ticks_as_recorded
-error,10188,Failed to request histogram data,src/engine/hot_loop/hmds.rs::head_timestamp_and_histogram_time_out
+error,10188,Failed to request histogram data,no test
 error,10189,Failed to request tick-by-tick data,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals ; src/api/client/tests.rs::tick_by_tick_reports_by_request_type
 error,10190,Max number of tick-by-tick requests has been reached,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10191,"Manual Order Time is not allowed for %s orders, but required for %s",no test
@@ -1527,7 +1527,7 @@ local_rule,10314 am.a@103,10314 read: time condition string not parseable,tests/
 local_rule,10315 bH.q@6652,320 read: activeStartTime / activeStopTime format,open #485
 local_rule,10316 bH.q@1493,320 read: message version < 24 with the old outsideRth / trigger flag,open #485
 local_rule,10340 bH.q@10972,320 read: externalUserId / manualOrderIndicator from client versions 187 to 189,open #485
-local_rule,321 bH.S@1380,"321 check: side unknown, or SSHORT when the session has neither the institutional flag nor an away clearing",tests/gw_catalog/refusals.rs::short_side_without_the_logon_flags
+local_rule,321 bH.S@1380,"321 check: side unknown, or SSHORT when the session has neither the institutional flag nor an away clearing",tests/gw_catalog/refusals.rs::short_side_without_the_logon_flags ; tests/gw_catalog/refusals.rs::unknown_action
 local_rule,452 bH.S@449,321 check: exchange empty,open #485
 local_rule,10272 bH.S@232,321 check: duration with TIF not GTD,open #485
 local_rule,10273 bH.S@335,321 check: GTD with both date and duration,open #485
@@ -1598,7 +1598,7 @@ local_rule,10010 bH.r@425,321 check: invalid delta hedge,open #485
 local_rule,10009 bH.r@523,321 check: invalid hedge ratio,open #485
 local_rule,10033 bH.r@630,321 check: invalid beta hedge,open #485
 local_rule,10008 bH.r@714,321 check: invalid beta value,open #485
-local_rule,10149 bH.W@44,10149 flow: orderId 0 or unset,open #485
+local_rule,10149 bH.W@44,10149 flow: orderId 0 or unset,tests/gw_catalog/refusals.rs::order_id_zero
 local_rule,103 bH.W@222,103 flow: orderId not in the order table and not above the highest used,tests/gw_catalog/refusals.rs::a_new_order_id_below_the_highest_used
 local_rule,10268 bH.o@67,10268 flow: eTradeOnly set with the feature on,open #485
 local_rule,10269 bH.o@121,10269 flow: firmQuoteOnly set with the feature on,open #485
@@ -2041,7 +2041,7 @@ eclient,cancel_order,,src/api/client/tests.rs::cancel_order_sends_cancel_command
 eclient,cancel_order_by_perm_id,,no test
 eclient,req_global_cancel,,src/api/client/tests.rs::req_global_cancel_sends_cancel_all_for_each_instrument ; src/api/client/tests.rs::req_global_cancel_no_instruments_no_commands ; tests/error_edge_concurrency.rs::req_global_cancel_no_instruments_no_commands
 eclient,req_ids,,src/api/client/tests.rs::req_ids_calls_wrapper
-eclient,next_order_id,,src/api/client/tests.rs::next_order_id_monotonic
+eclient,next_order_id,,src/api/client/tests.rs::next_order_id_monotonic ; tests/error_edge_concurrency.rs::concurrent_place_order_and_process_msgs
 eclient,req_open_orders,,src/api/client/tests.rs::a_forgotten_order_leaves_without_callbacks ; src/api/client/tests.rs::open_order_requests_wait_for_the_order_replay
 eclient,req_all_open_orders,,src/api/client/tests.rs::open_order_requests_wait_for_the_order_replay
 eclient,req_completed_orders,,tests/scenarios.rs::req_completed_orders_drains_and_dispatches ; tests/scenarios.rs::req_completed_orders_empty_still_fires_end
