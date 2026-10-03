@@ -107,7 +107,6 @@ pub struct WriterRow {
     /// The block name (attributes, algo, conditions, combo...), empty for
     /// a single tag.
     pub block: String,
-    pub site: String,
     /// When the gateway writes it: `always`, `never`, `attribute`,
     /// `other`, `flag:<fact>`, `type_in:<types>`, `type_not_in:<types>`,
     /// joined by ` & `.
@@ -122,7 +121,6 @@ pub fn writer(msg: &str) -> Vec<WriterRow> {
             pos: r["pos"].parse().unwrap(),
             tag: r["tag"].parse().unwrap(),
             block: r["block"].clone(),
-            site: r["site"].clone(),
             when: r["when"].clone(),
         })
         .collect()

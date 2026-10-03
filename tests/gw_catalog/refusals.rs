@@ -32,7 +32,7 @@ fn assert_refused(engine: &mut Engine, id: i64, rule: &str) {
     let mine: Vec<&(i64, i64, String)> = errors.iter().filter(|e| e.0 == id).collect();
     assert!(
         mine.iter().any(|(_, code, text)| *code == rule.api_code && matches_template(&rule.text, text, false)),
-        "rule {}: want {} {:?}, got {:?}", rule.id, rule.api_code, rule.text, errors,
+        "rule {} (gateway code {}): want {} {:?}, got {:?}", rule.id, rule.code, rule.api_code, rule.text, errors,
     );
     // Nothing sent for the refused order: the next order is the first the
     // server reads after it.
