@@ -584,7 +584,10 @@ fn binary_msg_length(data: &[u8]) -> Option<usize> {
         .ok()?
         .parse()
         .ok()?;
-    Some(soh_pos + 1 + body_len)
+    // A length past the address space is no length: the frame never
+    // completes, as one whose length is not a number (ibx#488: the sum
+    // overflowed).
+    (soh_pos + 1).checked_add(body_len)
 }
 
 /// Compute total length of a `8=FIX.4.1\x01 9=<body_len>\x01 ...` message.
@@ -597,7 +600,7 @@ fn fix_msg_length(data: &[u8]) -> Option<usize> {
         .parse()
         .ok()?;
     // header up to and including SOH after tag 9, + body + "10=XXX\x01" (7 bytes)
-    Some(soh_pos + 1 + body_len + 7)
+    (soh_pos + 1 + 7).checked_add(body_len)
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {

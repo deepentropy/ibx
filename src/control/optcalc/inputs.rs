@@ -65,9 +65,11 @@ pub fn parse_reference_xml(xml: &str) -> Vec<XmlItem> {
             .nth(1)
             .map(|v| v.trim_start_matches(['"', '\'']).to_ascii_lowercase().starts_with("true"))
             .unwrap_or(false);
+        // The first 8 characters: a cut at byte 8 panicked inside a
+        // character that is not ASCII (ibx#488).
         let mut date = element_text(body, "date").unwrap_or("").to_string();
-        if date.len() > 8 {
-            date.truncate(8);
+        if let Some((cut, _)) = date.char_indices().nth(8) {
+            date.truncate(cut);
         }
         let amount = element_text(body, "amt").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
         let currency = element_text(body, "curr").unwrap_or("").to_string();

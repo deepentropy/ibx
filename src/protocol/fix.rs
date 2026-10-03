@@ -361,14 +361,13 @@ pub fn fix_unsign(msg: &[u8], mac_key: &[u8], iv: &[u8]) -> (Vec<u8>, Vec<u8>, b
         None => return (msg_bytes, iv.to_vec(), false),
     };
 
-    // Find 8349= tag
+    // The signature field: the last one, after the body. A frame whose
+    // signature comes before its body has none that checks (ibx#488: the
+    // slice panicked).
     let sig_needle = b"8349=";
-    let t8349 = match msg_bytes
-        .windows(sig_needle.len())
-        .position(|w| w == sig_needle)
-    {
-        Some(p) => p,
-        None => return (msg_bytes, iv.to_vec(), false),
+    let t8349 = match msg_bytes.windows(sig_needle.len() + 1).rposition(|w| w[0] == SOH && &w[1..] == sig_needle) {
+        Some(p) if p + 1 >= after9 => p + 1,
+        _ => return (msg_bytes, iv.to_vec(), false),
     };
 
     let body = &msg_bytes[after9..t8349];

@@ -1574,13 +1574,10 @@ pub fn decode_bar_payload(payload: &[u8], min_tick: f64) -> Option<crate::types:
         return None;
     }
 
-    // Low price in ticks (31-bit signed)
+    // Low price in ticks (31-bit signed), sign-extended by shifts: the
+    // subtraction overflowed in a debug build (ibx#488).
     let low_ticks = read_bits(&mut pos, 31);
-    let low_ticks_signed = if low_ticks & (1 << 30) != 0 {
-        low_ticks as i32 - (1 << 31)
-    } else {
-        low_ticks as i32
-    };
+    let low_ticks_signed = ((low_ticks << 1) as i32) >> 1;
     let low = low_ticks_signed as f64 * min_tick;
 
     let (open, high, close, wap_sum);

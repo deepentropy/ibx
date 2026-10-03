@@ -623,10 +623,12 @@ impl HmdsState {
                 if let Some(xml_tag) = parsed.get(&6118) {
                     // Per-frame XML root tracer (kept at debug: fires on every
                     // W/6118 payload). Unmatched payloads still warn below.
+                    // The head is cut by characters: a cut at byte 200
+                    // panicked inside one that is not ASCII (ibx#488).
                     log::debug!(
                         "HMDS W xml head (len={}): {:?}",
                         xml_tag.len(),
-                        &xml_tag[..xml_tag.len().min(200)],
+                        xml_tag.chars().take(200).collect::<String>(),
                     );
                     if let Some(mut resp) = crate::control::historical::parse_bar_response(xml_tag) {
                         let wid = crate::control::historical::window_id(&resp.query_id);

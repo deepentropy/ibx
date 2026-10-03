@@ -102,7 +102,8 @@ pub fn fixcomp_length(data: &[u8]) -> Option<usize> {
     let tag9 = find_tag(&data[soh1..], b"9=").map(|p| soh1 + p)?;
     let soh2 = data[tag9..].iter().position(|&b| b == SOH).map(|p| tag9 + p)?;
     let body_len: usize = std::str::from_utf8(&data[tag9 + 2..soh2]).ok()?.parse().ok()?;
-    let total = soh2 + 1 + body_len;
+    // A length past the address space never completes (ibx#488).
+    let total = (soh2 + 1).checked_add(body_len)?;
     if data.len() < total {
         None
     } else {
@@ -154,10 +155,10 @@ fn split_messages(buf: &[u8]) -> Vec<Vec<u8>> {
                         },
                         Err(_) => break,
                     };
-                    let total = soh9 + 1 + body_len;
-                    if total > chunk.len() {
-                        break;
-                    }
+                    let total = match (soh9 + 1).checked_add(body_len) {
+                        Some(t) if t <= chunk.len() => t,
+                        _ => break,
+                    };
                     messages.push(chunk[..total].to_vec());
                     pos += o + total;
                 } else {
@@ -193,7 +194,12 @@ fn split_messages(buf: &[u8]) -> Vec<Vec<u8>> {
                                     Some(p) => after95 + p,
                                     None => break,
                                 };
-                                scan = tag96 + 3 + rdl;
+                                // A block past the end leaves no
+                                // message (ibx#488: the scan went past it).
+                                scan = match (tag96 + 3).checked_add(rdl) {
+                                    Some(s) if s <= chunk.len() => s,
+                                    _ => break,
+                                };
                                 continue;
                             }
                         }

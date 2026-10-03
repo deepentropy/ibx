@@ -2850,7 +2850,9 @@ pub(crate) fn extract_raw_tag(msg: &[u8], tag: u32) -> Option<Vec<u8>> {
             let needle_bytes = needle.as_bytes();
             if let Some(idx) = msg.windows(needle_bytes.len()).position(|w| w == needle_bytes) {
                 let val_start = idx + needle_bytes.len();
-                let val_end = (val_start + data_len).min(msg.len());
+                // A length past the message takes the rest of it; the sum
+                // overflowed on a length near the largest number (ibx#488).
+                let val_end = val_start.saturating_add(data_len).min(msg.len());
                 return Some(msg[val_start..val_end].to_vec());
             }
         }
