@@ -13,6 +13,7 @@
 //! The fixtures are under tests/fixtures/gw1040/codec/ (`codec/1`, made by
 //! scripts/codec_fixtures.py).
 
+mod account;
 mod fixture;
 mod l1;
 mod orders;

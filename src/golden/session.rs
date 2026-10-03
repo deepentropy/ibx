@@ -140,6 +140,12 @@ impl Wrapper for Recorder {
     fn tick_req_params(&mut self, req_id: i64, min_tick: f64, bbo: &str, perms: i64) {
         self.lines.push(format!("tickReqParams|{req_id}|{}|{bbo}|{perms}", n(min_tick)));
     }
+    fn account_summary(&mut self, req_id: i64, account: &str, tag: &str, value: &str, currency: &str) {
+        self.lines.push(format!("accountSummary|{req_id}|{account}|{tag}|{value}|{currency}"));
+    }
+    fn account_summary_end(&mut self, req_id: i64) {
+        self.lines.push(format!("accountSummaryEnd|{req_id}"));
+    }
     fn smart_components(&mut self, req_id: i64, components: &[crate::types::SmartComponent]) {
         let mut rows: Vec<&crate::types::SmartComponent> = components.iter().collect();
         rows.sort_by_key(|c| c.bit_number);

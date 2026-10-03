@@ -116,6 +116,8 @@ pub(crate) fn canonical(cb: &Value) -> Option<String> {
             i(1), s(2), n(num(&a[3])), n(num(&a[4])), n(num(&a[5])), perm(i(6)), i(7), n(num(&a[8])), i(9), s(10), n(num(&a[11])),
         ),
         "openOrder" => open_order_line(i(1), &a[2], &a[3], &a[4]),
+        "accountSummary" => format!("accountSummary|{}|{}|{}|{}|{}", i(1), s(2), s(3), s(4), s(5)),
+        "accountSummaryEnd" => format!("accountSummaryEnd|{}", i(1)),
         "smartComponents" => {
             let mut rows: Vec<(i64, String)> = a[2].as_object().unwrap().iter()
                 .map(|(bit, v)| (bit.parse().unwrap(), format!("{bit}:{}:{}", v[0].as_str().unwrap(), v[1].as_str().unwrap())))

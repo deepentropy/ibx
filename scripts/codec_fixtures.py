@@ -266,6 +266,15 @@ def order_slice(ranges=None):
     return keep
 
 
+def account_slice():
+    """The account summary request and its answer on the auth link."""
+    def keep(r):
+        if r["kind"] == "api":
+            return True
+        return r["conn"] == "CCP" and r.get("msg_type") in ("U", "UM", "RL", "EB", "UT", "UP")
+    return keep
+
+
 L1_IN = ("Q", "L", "P", "G", "3", "d")
 L1_OUT = ("V", "c")
 ORDER_TYPES = ("D", "G", "F", "8", "c", "d")
@@ -284,6 +293,8 @@ def specs(cap: Path):
     yield (s28 / "premarket_order_types.jsonl", "l1_aapl_preopen_delayed", "decode-l1",
            md_slice([(21956, 22700)]),
            "AAPL (and BMW, 7203 on other farms) with delayed data asked, then AAPL with real-time data, before the open")
+    yield (s26 / "account_summary.jsonl", "account_summary", "decode-account", account_slice(),
+           "reqAccountSummary of four tags and $LEDGER:ALL, its rows and ends, its cancel (market closed)")
     for name in ("lmt_cancel", "modify_cancelled", "bracket", "oca_group"):
         yield (s26 / f"{name}.jsonl", f"orders_{name}", "orders", order_slice(),
                f"{name}: the API orders, the gateway's order messages and the server reports")

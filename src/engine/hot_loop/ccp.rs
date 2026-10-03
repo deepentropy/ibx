@@ -206,6 +206,9 @@ fn perm_id_from_fix_order_id(s: &str) -> i64 {
 }
 
 pub(crate) struct CcpState {
+    /// The group of each account summary subscription, which its cancel
+    /// restates (ibx#486).
+    pub(crate) summary_groups: std::collections::HashMap<String, String>,
     pub(crate) seen_exec_ids: HashSet<String>,
     /// Insertion order for `seen_exec_ids`, oldest at the front. Used to evict
     /// one entry at a time once the dedup window is full, instead of clearing
@@ -627,6 +630,7 @@ fn strike_divided_by_100(strike: &str) -> String {
 impl CcpState {
     pub(crate) fn new() -> Self {
         Self {
+            summary_groups: std::collections::HashMap::new(),
             seen_exec_ids: HashSet::with_capacity(256),
             exec_id_order: VecDeque::with_capacity(256),
             commission_revisions: std::collections::HashMap::with_capacity(256),
@@ -2412,7 +2416,9 @@ impl CcpState {
 
     /// Account summary subscription (ibx#479), as the reference writes it:
     /// `6040=55|6036=1|6529={sr_id}|6374={tags}|6160={group}` to subscribe,
-    /// `6036=0` with the same id to cancel (`subscribe` is `None`).
+    /// `6036=0` with the same id and the group to cancel (`subscribe` is
+    /// `None`; ibx#486, account_summary of 26/09/2026:
+    /// `35=U|6040=55|6036=0|6529=SR.Socket.39|6160=All`).
     pub(crate) fn send_account_summary(
         &mut self,
         sr_id: &str,
@@ -2431,6 +2437,11 @@ impl CcpState {
         ];
         if let Some((tags, group)) = subscribe {
             fields.push((6374, tags));
+            fields.push((6160, group));
+            self.summary_groups.insert(sr_id.to_string(), group.to_string());
+        }
+        let group = if subscribe.is_none() { self.summary_groups.remove(sr_id) } else { None };
+        if let Some(group) = &group {
             fields.push((6160, group));
         }
         let _ = conn.send_fix(&fields);
