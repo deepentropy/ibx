@@ -228,7 +228,9 @@ pub trait Wrapper {
     fn user_info(&mut self, req_id: i64, white_branding_id: &str) {}
 }
 
-/// Test helpers for Wrapper-based testing. Hidden from docs.
+/// Test helpers for Wrapper-based testing. Hidden from docs; built only
+/// for the tests (`test-support` feature).
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod tests {
     use super::*;

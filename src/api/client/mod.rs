@@ -285,6 +285,7 @@ impl EClient {
 
     /// Pre-populate the order tracker (for testing the dispatcher path
     /// without going through the engine's place-order flow).
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn track_order_for_test(
         &self,

@@ -442,6 +442,7 @@ dependencies = [
  "flate2",
  "hex",
  "hmac",
+ "ibx",
  "jiff",
  "log",
  "mac_address",

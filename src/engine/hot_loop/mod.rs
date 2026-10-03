@@ -17,7 +17,9 @@ use crate::config::chrono_free_timestamp;
 use crate::gateway::{ccp_reconnect_host, reconnect_ccp_via, CcpReconnect, ReconnectAuth};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
-use crate::types::{ControlCommand, Fill, InstrumentId, ReqId, Price, Qty, TbtQuote, TbtTrade, PRICE_SCALE, QTY_SCALE};
+use crate::types::{ControlCommand, InstrumentId, ReqId, Price, Qty, PRICE_SCALE, QTY_SCALE};
+#[cfg(any(test, feature = "test-support"))]
+use crate::types::{Fill, TbtQuote, TbtTrade};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 use farm::FarmState;
@@ -2212,23 +2214,27 @@ impl HotLoop {
     }
 
     /// Test-only: force farm into disconnected state.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn force_farm_disconnect(&mut self) {
         self.farm.handle_disconnect_for_test();
     }
 
     /// Test-only: lose the farm connection through the same path as a real
     /// loss (subscription state cleared, socket dropped).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn lose_farm_for_test(&mut self) {
         self.farm.handle_disconnect(&mut self.context, &self.event_tx);
         self.farm_conn = None;
     }
 
     /// Test-only: the engine's instrument table.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn market_for_test(&mut self) -> &mut crate::engine::market_state::MarketState {
         &mut self.context.market
     }
 
     /// Test-only: poll the farm socket once.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn poll_farm_for_test(&mut self) {
         self.farm.poll_market_data(
             &mut self.farm_conn, &mut self.context, &self.shared,
@@ -2237,16 +2243,19 @@ impl HotLoop {
     }
 
     /// Test-only: poll the auth socket once, as step 3 of the loop does.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn poll_auth_for_test(&mut self) {
         self.poll_auth();
     }
 
     /// Test-only: trigger farm reconnect spawn.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn spawn_farm_reconnect_for_test(&mut self) {
         self.spawn_farm_reconnect();
     }
 
     /// Test-only: poll pending farm reconnect.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn poll_farm_reconnect_for_test(&mut self) {
         self.poll_farm_reconnect();
     }
@@ -2257,38 +2266,45 @@ impl HotLoop {
     }
 
     /// Inject a raw farm message for testing. Processes it through the full decode pipeline.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_farm_message(&mut self, msg: &[u8]) {
         self.farm.process_farm_message(msg, &mut self.farm_conn, &mut self.context, &self.shared, &self.event_tx, &mut self.hb);
     }
 
     /// Inject a raw auth message for testing. Processes execution reports, etc.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_ccp_message(&mut self, msg: &[u8]) {
         self.ccp.process_ccp_message(msg, &mut self.ccp_conn, &mut self.context, &self.shared, &self.event_tx, &mut self.hb, &self.account_id);
     }
 
     /// Inject a raw HMDS message for testing. Processes historical data, news, etc.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_hmds_message(&mut self, msg: &[u8]) {
         self.hmds.process_hmds_message(msg, &mut self.hmds_conn, &self.shared, &self.event_tx, &mut self.hb);
     }
 
     /// Inject a TBT trade for testing. Pushes to SharedState and emits event.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_tbt_trade(&mut self, trade: &TbtTrade) {
         self.shared.market.push_tbt_trade(trade.clone());
         emit(&self.event_tx, Event::TbtTrade(trade.clone()));
     }
 
     /// Inject a TBT quote for testing. Pushes to SharedState.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_tbt_quote(&mut self, quote: &TbtQuote) {
         self.shared.market.push_tbt_quote(quote.clone());
     }
 
     /// Inject a simulated tick for testing.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_tick(&mut self, instrument: InstrumentId) {
         self.shared.market.push_quote(instrument, self.context.quote(instrument));
         emit(&self.event_tx, Event::Tick(instrument));
     }
 
     /// Simulate a fill for testing. Updates position and notifies.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_fill(&mut self, fill: &Fill) {
         let delta = match fill.side {
             crate::types::Side::Buy => fill.qty_fixed,
