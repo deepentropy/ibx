@@ -6,6 +6,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
+use crate::protocol::tick_decoder::rtbar_entries;
 use crate::types::{InstrumentId, ReqId, TbtType, PRICE_SCALE};
 use crossbeam_channel::Sender;
 
@@ -2424,34 +2425,6 @@ impl HmdsState {
             shared.reference.push_historical_error(req_id, code, text);
         }
     }
-}
-
-/// The bars of a 5-second bar frame body, read as the reference reads
-/// them (ibx#454): ticker id, bar time and payload of each.
-fn rtbar_entries(body: &[u8]) -> Vec<(u32, u32, &[u8])> {
-    let mut entries = Vec::new();
-    if body.len() < 2 {
-        return entries;
-    }
-    let mut bits = u16::from_be_bytes([body[0], body[1]]) as usize;
-    let available = (body.len() - 2) * 8;
-    while bits + 65536 <= available {
-        bits += 65536;
-    }
-    let end = (2 + bits.div_ceil(8)).min(body.len());
-    let mut pos = 2;
-    while pos + 9 <= end {
-        let ticker_id = u32::from_be_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
-        let time = u32::from_be_bytes([body[pos + 4], body[pos + 5], body[pos + 6], body[pos + 7]]);
-        let len = body[pos + 8] as usize;
-        let start = pos + 9;
-        if start + len > end {
-            break;
-        }
-        entries.push((ticker_id, time, &body[start..start + len]));
-        pos = start + len;
-    }
-    entries
 }
 
 /// The cancel of a 5-second router: `ticker:{id}` (ibx#429).
