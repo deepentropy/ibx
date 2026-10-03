@@ -105,18 +105,128 @@ fn has_complete_response_frame(buf: &[u8]) -> bool {
     false
 }
 
-/// Compute token short hash for farm logon (FIX tag 8483).
+/// The short hash of the session token: in the farm logon (tag 8483), the
+/// connect request of a reconnect and the port type change (ibx#423).
 ///
-/// Per ib-agent#125: gateway always emits this as **8 hex chars padded with
-/// leading zeros**. `format!("{:x}", n)` is wrong when `hash_int`'s high
-/// nibble is zero — server silently rejects the FIX 35=A logon in that case.
+/// The reference writes it with `Integer.toHexString` (`twslaunch.
+/// jauthentication.x.b(BigInteger)`): lower-case hex with **no** zero
+/// padding: its logins of 26/09, 28/09 and 02/10/2026 sent `b8a6cde`,
+/// `708019c` and `287b51` in the farm logons and the port type change
+/// (and on 28/09 in a reconnect's connect request), and the farms logged
+/// on.
 pub fn token_short_hash(session_token: &BigUint) -> String {
     let token_bytes = session_token.to_bytes_be();
     let stripped = strip_leading_zeros(&token_bytes);
     let digest = Sha1::digest(stripped);
     // Take last 4 bytes as u32 (Java BigInteger.intValue() truncates to low 32 bits)
     let hash_int = u32::from_be_bytes([digest[16], digest[17], digest[18], digest[19]]);
-    format!("{:08x}", hash_int)
+    format!("{:x}", hash_int)
+}
+
+/// A misc URLs list: `{key}={value}` items in their order.
+type MiscUrls = Vec<(String, String)>;
+
+/// The misc URLs list of the reference (ibx#423): the host whose answer
+/// is kept, and the list. None until an answer came.
+static MISC_URLS: std::sync::Mutex<Option<(String, MiscUrls)>> = std::sync::Mutex::new(None);
+
+/// The reference's misc URLs request (`twslaunch.trader.common.url.b`,
+/// thread "MiscUlrsRequester"): its own short connection, not the auth
+/// connection, to `{host}:4000` in clear, `MISC38;528;`, one answer
+/// `MISC38;529;{key}={value}|...;`, then the connection is closed. The
+/// reference sends it, in the background, when it has no list: at its
+/// start before the first login, and again when the main host changes, as
+/// after the redirect of a reconnect (its logs of 25/09 to 02/10/2026: one
+/// request per process, a second on 30/09 at the redirect of a
+/// reconnect, none on a relogin to the same host). Run here at the first
+/// login attempt, at a login attempt while no answer came, and after each
+/// redirect of the auth connection.
+pub(crate) fn misc_urls_before_login(host: &str, redirected: bool) {
+    let known = MISC_URLS.lock().unwrap().as_ref().map(|(h, _)| h.clone());
+    if !misc_urls_wanted(known.as_deref(), host, redirected) {
+        return;
+    }
+    let host = host.to_string();
+    let spawned = std::thread::Builder::new().name("ibx-misc-urls".into()).spawn(move || {
+        match request_misc_urls(&host, misc_port()) {
+            Ok(urls) => {
+                // The reference reads one flag from the list: the auth
+                // connection uses TLS unless `nossl=1` (`trader.common.url.
+                // d.a(Map)`, "sslRequired"). ibx always uses TLS there.
+                if urls.iter().any(|(k, v)| k == "nossl" && v == "1") {
+                    log::warn!("Misc URLs of {}: the server asks for the auth connection without TLS, which ibx does not run", host);
+                }
+                log::info!("Misc URLs of {}: {} entries", host, urls.len());
+                *MISC_URLS.lock().unwrap() = Some((host, urls));
+            }
+            Err(e) => log::warn!("Misc URLs request to {} failed: {}", host, e),
+        }
+    });
+    if let Err(e) = spawned {
+        log::warn!("Misc URLs request not started: {}", e);
+    }
+}
+
+/// Whether a login attempt to `host` asks for the misc URLs: when no
+/// answer came yet, or after a redirect to a host other than the one whose
+/// answer is kept.
+fn misc_urls_wanted(known: Option<&str>, host: &str, redirected: bool) -> bool {
+    match known {
+        None => true,
+        Some(known) => redirected && known != host,
+    }
+}
+
+/// One misc URLs request to `host:port` (see [`misc_urls_before_login`]):
+/// the list of the answer, in its order.
+pub(crate) fn request_misc_urls(host: &str, port: u16) -> io::Result<MiscUrls> {
+    let addr = format!("{}:{}", host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DNS resolution failed"))?;
+    // The reference's connect timeout for this connection is 10 s; it
+    // waits up to 30 s for an answer (its response monitor).
+    let mut tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(30)))?;
+    tcp.write_all(&ns::ns_build(NS_VERSION_MIN, ns::NS_MISC_URLS_REQUEST, &[], "MISC"))?;
+    let (payload, _) = ns::ns_recv(&mut tcp)?;
+    misc_urls_answer(&payload)
+}
+
+/// The list of a misc URLs answer: `{key}={value}` items separated by `|`
+/// (an item with no `=` is left out). Any other message is an error.
+pub(crate) fn misc_urls_answer(payload: &[u8]) -> io::Result<MiscUrls> {
+    let text = String::from_utf8_lossy(payload);
+    let body = text.strip_prefix("MISC").unwrap_or(&text);
+    let mut parts = body.splitn(3, ';');
+    let _version = parts.next();
+    if parts.next().and_then(|t| t.parse::<u32>().ok()) != Some(ns::NS_MISC_URLS_RESPONSE) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a misc URLs answer"));
+    }
+    let list = parts.next().unwrap_or("");
+    let list = list.strip_suffix(';').unwrap_or(list);
+    Ok(list.split('|')
+        .filter_map(|item| item.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect())
+}
+
+/// The port type change, as the reference builds it (`twslaunch.
+/// jauthentication.aI.g()`, filled by `aY.E()`): the connection's version
+/// (the auth start's, `n.i(aD)`), mode 0, then by version an empty field
+/// (27), the token mask (31; 2, the session token), the read-only flag 0
+/// (35) and the short hashes of the tokens (49; the session token's, left
+/// out when there is none). Captured `50;526;0;;2;0;{hash};` (ibx#423).
+pub fn new_comm_port(version: u32, token_hash: &str) -> String {
+    let mut text = format!("{};{};0;", version, ns::NS_NEWCOMMPORTTYPE);
+    if version >= 27 { text.push(';'); }
+    if version >= 31 { text.push_str("2;"); }
+    if version >= 35 { text.push_str("0;"); }
+    if version >= 49 && !token_hash.is_empty() {
+        text.push_str(token_hash);
+        text.push(';');
+    }
+    text
 }
 
 /// Build auth server logon message.
@@ -978,6 +1088,8 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         return Err(io::Error::new(io::ErrorKind::Other, "CCP reconnect: too many redirects"));
     }
     log::info!("CCP reconnect to {}:{} (attempt {})", host, AUTH_PORT, depth + 1);
+    // The misc URLs, on their own connection (ibx#423).
+    misc_urls_before_login(host, depth > 0);
 
     // TLS, with no key exchange: the reference's SSL mode (ibx#423).
     let addr = format!("{}:{}", host, AUTH_PORT)
@@ -1096,7 +1208,7 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         let msg_type: u32 = inner_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
 
         if msg_type == ns::NS_CONNECT_RESPONSE {
-            let newcomm = format!("{};{};0;;2;0;", NS_VERSION_MIN, ns::NS_NEWCOMMPORTTYPE);
+            let newcomm = new_comm_port(auth_start.version, token_hash);
             session::send_plain(&mut tls, newcomm.as_bytes())?;
         } else if msg_type == ns::NS_FIX_START {
             fix_ready = true;
@@ -1309,6 +1421,9 @@ impl Gateway {
             }
         });
 
+        // The misc URLs, on their own connection (ibx#423).
+        misc_urls_before_login(host, redirect_depth > 0);
+
         // --- Phase 1: TLS + auth ---
         log::info!("Connecting to auth server {}:{}", host, AUTH_PORT);
         let addr = format!("{}:{}", host, AUTH_PORT)
@@ -1510,7 +1625,8 @@ impl Gateway {
                 // key, so its text is not logged (ibx#283).
                 log::info!("Post-auth: connect response received");
                 // Send port type change (required before data start)
-                let newcomm = format!("{};{};0;;2;0;", NS_VERSION_MIN, ns::NS_NEWCOMMPORTTYPE);
+                let newcomm = new_comm_port(auth_start.version,
+                    &token_short_hash(soft_token.as_ref().unwrap_or(&session_key)));
                 session::send_plain(&mut tls, newcomm.as_bytes())?;
                 log::info!("Port type change sent");
             } else if msg_type == ns::NS_FIX_START {
@@ -2791,17 +2907,71 @@ mod tests {
     }
 
     #[test]
-    fn token_short_hash_always_8_chars() {
-        // Per ib-agent#125: gateway pads to 8 hex chars. Brute-force search
-        // over small inputs to find one whose SHA1 ends in a high-nibble
-        // zero, then assert padding kicks in.
+    fn token_short_hash_has_no_zero_padding() {
+        // ibx#423: `Integer.toHexString`, as the reference; a value whose
+        // high nibble is zero is shorter than 8 characters.
+        let mut short = 0;
         for n in 0u64..10_000 {
             let token = BigUint::from(n);
             let h = token_short_hash(&token);
-            assert_eq!(h.len(), 8,
-                "token_short_hash must always be 8 chars; n={n} produced {h:?}");
-            assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(!h.starts_with('0') || h == "0", "n={n} produced {h:?}");
+            assert!(h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()));
+            assert_eq!(h, crate::auth::srp::token_short_hash(&token));
+            if h.len() < 8 { short += 1; }
         }
+        assert!(short > 0, "some hashes are shorter than 8 characters");
+    }
+
+    // ibx#423: the misc URLs request as the reference sends it (its log
+    // of 30/09/2026: `#%#%` + length 11 + `MISC38;528;`) on a connection
+    // of its own, and its answer read as a list.
+    #[test]
+    fn misc_urls_request_and_answer() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut request = [0u8; 19];
+            s.read_exact(&mut request).unwrap();
+            let answer = "MISC38;529;acct_mgt=https://a.example/sso|demo=email|ssl=1|additionalDemoUsers=demo_tws=prio:1/name:X|zid=0a1f.17;";
+            let mut frame = b"#%#%".to_vec();
+            frame.extend_from_slice(&(answer.len() as u32).to_be_bytes());
+            frame.extend_from_slice(answer.as_bytes());
+            s.write_all(&frame).unwrap();
+            request
+        });
+        let urls = request_misc_urls("127.0.0.1", port).unwrap();
+        assert_eq!(&server.join().unwrap(), b"#%#%\0\0\0\x0bMISC38;528;");
+        let keys: Vec<&str> = urls.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["acct_mgt", "demo", "ssl", "additionalDemoUsers", "zid"]);
+        assert_eq!(urls[3].1, "demo_tws=prio:1/name:X");
+        assert_eq!(urls[4].1, "0a1f.17");
+        assert!(misc_urls_answer(b"50;520;1;0;;2;").is_err());
+    }
+
+    // ibx#423: asked at the first login attempt, at a login attempt while
+    // no answer came, and after a redirect to another host; not on a
+    // relogin to the same host.
+    #[test]
+    fn misc_urls_are_asked_when_the_reference_asks_them() {
+        assert!(misc_urls_wanted(None, "cdc1.example", false));
+        assert!(misc_urls_wanted(None, "cdc1.example", true));
+        assert!(!misc_urls_wanted(Some("cdc1.example"), "cdc1.example", false));
+        assert!(!misc_urls_wanted(Some("cdc1.example"), "cdc1-hb1.example", false));
+        assert!(misc_urls_wanted(Some("cdc1-hb1.example"), "cdc1.example", true));
+        assert!(!misc_urls_wanted(Some("cdc1.example"), "cdc1.example", true));
+    }
+
+    // ibx#423: the port type change as the reference sent it on its
+    // logins of 30/09 and 02/10/2026; older versions have fewer fields.
+    #[test]
+    fn port_type_change_carries_the_token_hash() {
+        assert_eq!(new_comm_port(50, "f22e2dc4"), "50;526;0;;2;0;f22e2dc4;");
+        assert_eq!(new_comm_port(50, "287b51"), "50;526;0;;2;0;287b51;");
+        assert_eq!(new_comm_port(50, ""), "50;526;0;;2;0;");
+        assert_eq!(new_comm_port(38, "f22e2dc4"), "38;526;0;;2;0;");
+        assert_eq!(new_comm_port(32, "f22e2dc4"), "32;526;0;;2;");
+        assert_eq!(new_comm_port(26, "f22e2dc4"), "26;526;0;");
     }
 
     #[test]
