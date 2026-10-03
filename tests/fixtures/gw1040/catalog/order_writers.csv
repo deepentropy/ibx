@@ -1,0 +1,974 @@
+msg,pos,tag,block,site,when,condition
+D,1,131,,jclient.pe.c@145,never,RFQ order (no ClOrdID then)
+D,2,11,,jclient.pe.c@169,always,not RFQ: ClOrdID {permId}.{version}
+D,3,131,,jclient.pe.c@245,never,RFQ response record present
+D,4,8476,,jclient.pe.c@332,never,second ClOrdID: never set for an API placeOrder
+D,5,44,,jclient.pe.j@178,"flag:lmt_price & type_in:LMT,LOC,LIT,MIDPRICE,REL,RPI,PASSV REL,PEG BEST,PEG MID,PEG MKT,STP LMT,TRAIL LIMIT,TRAIL LIT,REL + LMT,BOX TOP",order type writes a limit price and the API lmtPrice is set
+D,6,6879,,jclient.pe.j@235,flag:leg_prices,"combo per-leg prices (non-guaranteed, LMT or REL + LMT)"
+D,7,44,,jclient.pe.j@508,type_in:VOL,VOL order: market-rule minimum
+D,8,44,,jclient.pe.j@529,type_in:VOL,VOL order: limit price
+D,9,8262,,jclient.pe.j@593,never,hedge child using the parent price
+D,10,8019,,jclient.pe.j@840,never,option-model setting
+D,11,99,,jclient.pe.j@871,"flag:aux_price & type_not_in:VOL,PEG MID,REL","order type is not a vol peg, PEG MID or REL, and the stop / aux value is set"
+D,12,1,,jclient.pe.j@939,always,no FA allocation: account (tag 440 for an institutional session)
+D,13,6700,,jclient.pe.j@981,never,account has a model code
+D,14,8065,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+D,14,6160,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+D,14,6159,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+D,14,6700,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+D,14,6240,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+D,14,6164,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+D,14,8303,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+D,14,6806,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+D,14,6894,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+D,14,6895,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+D,15,6834,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+D,15,6835,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+D,15,6836,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+D,15,6936,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+D,15,6240,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+D,15,8303,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+D,15,6806,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+D,15,6894,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+D,15,6895,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+D,15,8291,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+D,16,126,,jclient.pe.j@1334,flag:gtd_time,GTD with a time
+D,17,432,,jclient.pe.j@1359,flag:gtd_date,GTD with a date only
+D,18,114,,jclient.pe.k@84,flag:short_sale,short sale: slot
+D,19,114,,jclient.pe.k@103,flag:short_sale,short sale: slot
+D,20,5700,,jclient.pe.k@146,flag:short_sale,short sale: location
+D,21,6086,,jclient.pe.k@167,flag:short_sale,short sale
+D,22,1688,,jclient.pe.k@208,flag:short_sale,short sale: exempt code
+D,23,114,,jclient.pe.j@1728,never,"short sale, other account case"
+D,24,5700,,jclient.pe.j@1738,never,"short sale, other account case"
+D,25,6086,,jclient.pe.j@1746,never,"short sale, other account case"
+D,26,97,,jclient.pe.m@5,never,PossResend
+D,27,6257,,jclient.pe.j@1812,flag:adjustable,adjustable stop: adjusted order type set
+D,28,6261,,jclient.pe.j@1826,flag:adjustable,adjustable stop: adjusted order type
+D,29,6258,,jclient.pe.j@1865,other,adjustable stop: trigger price when set
+D,30,6259,,jclient.pe.j@1904,other,adjustable stop: adjusted stop price when set
+D,31,6262,,jclient.pe.j@1943,other,adjustable stop: adjusted stop-limit price when set
+D,32,6260,,jclient.pe.j@1982,other,adjustable stop: adjusted trailing amount when set
+D,33,6117,,jclient.pe.j@2152,"flag:stop_price & type_in:STP,STP LMT,STP PRT,TRAIL,TRAIL LIMIT",stop types: the stop price (trailing types: on a new order or when it changed)
+D,34,12,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,13,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,18,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,22,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,48,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,63,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,66,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,67,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,68,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,77,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,110,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,111,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,152,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,168,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,440,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,583,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,851,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,1028,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,3950,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6010,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6095,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6102,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6115,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6117,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6122,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6133,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6135,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6148,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6149,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6150,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6152,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6153,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6154,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6205,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6207,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6232,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6248,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6268,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6269,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6275,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6279,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6280,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6281,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6282,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6283,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6284,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6285,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6286,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6287,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6289,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6290,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6291,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6365,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6370,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6377,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6390,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6391,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6403,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6405,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6406,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6407,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6408,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6412,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6433,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6434,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6437,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6438,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6441,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6445,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6446,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6447,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6448,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6449,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6450,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6458,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6459,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6460,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6461,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6467,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6468,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6480,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6485,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6486,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6487,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6488,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6489,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6506,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6516,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6519,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6521,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6524,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6526,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6527,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6531,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6532,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6534,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6535,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6547,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6551,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6557,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6559,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6562,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6564,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6570,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6571,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6580,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6590,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6591,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6595,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6596,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6602,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6605,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6609,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6626,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6628,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6636,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6637,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6640,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6641,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6642,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6643,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6644,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6645,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6646,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6649,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6650,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6664,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6665,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6666,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6670,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6671,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6678,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6690,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6703,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6704,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6707,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6708,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6710,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6715,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6722,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6724,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6732,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6733,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6734,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6736,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6737,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6740,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6748,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6750,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6769,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6788,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6789,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6790,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6791,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6792,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6793,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6794,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6795,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6796,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6800,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6809,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6814,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6816,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6817,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6819,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6838,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6851,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6852,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6860,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6861,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6862,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6863,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6866,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6867,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6874,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6876,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6877,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6878,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6880,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6881,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6901,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6936,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6938,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6939,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6941,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6942,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6952,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6965,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6975,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6979,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,6998,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8012,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8015,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8016,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8020,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8021,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8022,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8023,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8024,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8043,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8047,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8048,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8052,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8053,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8059,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8060,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8061,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8062,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8083,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8086,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8089,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8090,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8095,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8111,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8145,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8149,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8153,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8161,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8165,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8191,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8214,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8215,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8218,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8221,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8229,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8231,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8232,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8237,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8243,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8245,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8246,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8248,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8252,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8253,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8254,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8255,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8261,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8262,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8265,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8266,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8267,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8268,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8291,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8294,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8302,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8320,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8326,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8339,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8340,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8341,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8352,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8354,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8355,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8378,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8402,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8403,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8404,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8405,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8409,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8411,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8412,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8415,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8417,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8429,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8452,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8458,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8467,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8468,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8469,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8470,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8471,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8474,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8475,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8479,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8485,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8486,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8487,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8488,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8501,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8506,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8513,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8517,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8534,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8535,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8536,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8571,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8572,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8582,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,8585,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,9801,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,9813,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,9816,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,9822,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,99994,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,34,99995,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+D,35,8294,,jclient.pe.j@2340,never,manual order type
+D,36,847,algo,jclient.pe.j@2422,flag:algo,"algo order: the parameters with a FIX tag in the server's algo definition (849 maxPctVol in the captured definitions), 847 strategy, 5957 count, 5958 / 5960 pairs"
+D,36,849,algo,jclient.pe.j@2422,flag:algo,"algo order: the parameters with a FIX tag in the server's algo definition (849 maxPctVol in the captured definitions), 847 strategy, 5957 count, 5958 / 5960 pairs"
+D,36,5957,algo,jclient.pe.j@2422,flag:algo,"algo order: the parameters with a FIX tag in the server's algo definition (849 maxPctVol in the captured definitions), 847 strategy, 5957 count, 5958 / 5960 pairs"
+D,36,5958,algo,jclient.pe.j@2422,flag:algo,"algo order: the parameters with a FIX tag in the server's algo definition (849 maxPctVol in the captured definitions), 847 strategy, 5957 count, 5958 / 5960 pairs"
+D,36,5960,algo,jclient.pe.j@2422,flag:algo,"algo order: the parameters with a FIX tag in the server's algo definition (849 maxPctVol in the captured definitions), 847 strategy, 5957 count, 5958 / 5960 pairs"
+D,37,9816,,jclient.pe.j@2494,type_in:VOL,VOL order: volatility
+D,38,6516,,jclient.pe.j@2529,never,special flag
+D,39,6858,,jclient.pe.j@2577,never,special security type
+D,40,8425,,jclient.pe.j@2591,never,special security type
+D,41,6450,scale,jclient.pe.c@444,never,scale table set (not set by an API order)
+D,41,6447,scale,jclient.pe.c@444,never,scale table set (not set by an API order)
+D,41,6448,scale,jclient.pe.c@444,never,scale table set (not set by an API order)
+D,42,6270,,jclient.pe.c@523,never,VOL order or a specific attribute
+D,43,6271,,jclient.pe.c@644,never,VOL order or option attribute
+D,44,6661,,jclient.pe.c@727,never,special order flags
+D,45,6121,,jclient.pe.c@763,always,order came from the API (API orderId set)
+D,46,6119,,jclient.pe.c@774,always,order came from the API (API clientId)
+D,47,6981,md_context,jclient.pe.c@782,never,market-data API context (not set by an API placeOrder)
+D,47,6982,md_context,jclient.pe.c@782,never,market-data API context (not set by an API placeOrder)
+D,47,6989,md_context,jclient.pe.c@782,never,market-data API context (not set by an API placeOrder)
+D,48,38,,jclient.pe.l@28,never,fund order quantity
+D,49,38,,jclient.pe.l@52,never,fund order quantity
+D,50,38,,jclient.pe.c@883,other,38=1 for a special size case
+D,51,38,,jclient.pe.c@1044,always,quantity by the contract size rules
+D,52,40,,jclient.pe.o@65,always,order type
+D,53,40,,jclient.pe.o@98,other,order type (branch)
+D,54,40,,jclient.pe.o@117,other,order type (branch)
+D,55,40,,jclient.pe.o@210,other,order type (branch)
+D,56,211,,jclient.pe.o@332,flag:peg_difference,pegged types with an offset
+D,57,18,,jclient.pe.c@1063,flag:exec_inst,ExecInst not empty
+D,58,55,,jclient.pe.c@1144,never,"fund side: symbol,fund"
+D,59,55,,jclient.pe.c@1165,always,symbol
+D,60,200,,jclient.pe.c@1206,flag:option,option or derivative contract: maturity
+D,61,201,,jclient.pe.c@1217,flag:option,option: right
+D,62,202,,jclient.pe.c@1235,flag:option,option: strike
+D,63,200,,jclient.pe.c@1277,never,other derivative: maturity alone
+D,64,167,,jclient.pe.c@1364,always,security type
+D,65,48,,jclient.pe.c@1459,never,security id set
+D,66,22,,jclient.pe.c@1467,never,security id set
+D,67,231,,jclient.pe.c@1485,flag:multiplier,not fund side: contract multiplier (1.00 for a stock)
+D,68,54,,jclient.pe.c@1498,always,side
+D,69,59,,jclient.pe.p@56,always,time in force
+D,70,59,,jclient.pe.p@83,other,time in force (branch)
+D,71,59,,jclient.pe.p@102,other,time in force (branch)
+D,72,6436,,jclient.pe.p@110,flag:tif_flag,"time-in-force flag (DTC, overnight)"
+D,73,47,,jclient.pe.c@1533,never,Rule80A: empty for an API order
+D,74,8032,,jclient.pe.h@91,never,special route
+D,75,6287,,jclient.pe.h@124,never,NotHeld: non-API orders on some routes
+D,76,100,,jclient.pe.h@212,always,exchange (SMART as BEST)
+D,77,6210,,jclient.pe.c@1622,always,contract present: routing destination (SMART as BEST)
+D,78,6008,,jclient.pe.n@45,always,conId of the contract
+D,79,6008,,jclient.pe.n@204,other,conId of the SMART-routed underlying
+D,80,6147,,jclient.pe.n@298,never,fund side
+D,81,6079,,jclient.pe.n@306,never,fund side
+D,82,6080,,jclient.pe.n@317,never,fund side
+D,83,6081,,jclient.pe.n@325,never,fund side
+D,84,6082,,jclient.pe.n@333,never,fund side
+D,85,6080,,jclient.pe.n@363,never,fund side
+D,86,6082,,jclient.pe.n@371,never,fund side
+D,87,6008,,jclient.pe.n@423,other,conId of the order (combos)
+D,88,6209,,jclient.pe.c@1735,flag:oca,OCA group not empty and the OCA group attribute applies
+D,89,231,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6079,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,566,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6080,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6081,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6082,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,8211,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,616,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6087,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6680,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6679,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6705,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6401,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6442,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,8028,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6175,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6134,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,8020,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6147,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6148,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6149,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6150,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6086,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,654,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6215,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6216,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,1689,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,89,6962,combo,jclient.pe.c@1767,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+D,90,6088,,jclient.pe.c@1910,always,originator name (Socket for an API order)
+D,91,6088,,jclient.pe.c@2026,other,originator name (Socket for an API order)
+D,92,6091,,jclient.pe.c@2055,flag:what_if,what-if order
+D,93,6406,,jclient.pe.c@2099,never,special flag when not what-if
+D,94,6107,,jclient.pe.c@2141,flag:parent,parent order set: the parent's current ClOrdID
+D,95,6128,,jclient.pe.c@2180,flag:conditions,conditions set: conditionsCancelOrder 0/1
+D,96,6151,,jclient.pe.c@2194,flag:conditions,conditions set: conditionsIgnoreRth 0/1
+D,97,6136,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6222,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6137,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6126,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6123,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6124,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6127,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6125,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6223,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6245,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6263,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6246,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6947,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,6330,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,97,8569,conditions,jclient.pe.c@2205,flag:conditions,"order conditions: 6136 count, then one group per condition"
+D,98,6156,,jclient.pe.c@2223,never,special flag
+D,99,9823,,jclient.pe.c@2250,never,special flag
+D,100,15,,jclient.pe.c@2285,flag:currency,currency set
+D,101,6211,,jclient.pe.i@33,always,"order reference field, empty when none"
+D,102,6238,,jfix.q.a@24,always,"always, empty when none"
+D,103,6238,,jfix.q.a@35,other,second branch
+D,104,6211,,jclient.pe.i@59,other,order reference field (second branch)
+D,105,6238,,jfix.q.a@24,always,"always, empty when none"
+D,106,6238,,jfix.q.a@35,other,second branch
+D,107,6251,,jclient.pe.c@2326,never,special value set
+D,108,207,,jclient.pe.c@2418,never,destination AVGCOST only
+D,109,6899,,jclient.pe.c@2518,never,inline allocation profile (not set by an API order)
+D,110,6239,,jclient.pe.c@2544,never,inline allocation profile (not set by an API order)
+D,111,6407,,jclient.pe.c@2611,never,special state value
+D,112,6958,,jclient.pe.c@2816,never,routing strategy change
+D,113,8441,,jclient.pe.g@310,never,co-trading
+D,114,8442,,jclient.pe.g@347,never,co-trading
+G,1,11,,jclient.pe.d@18,always,new ClOrdID
+G,2,41,,jclient.pe.d@46,always,previous ClOrdID
+G,3,41,,jclient.pe.d@77,other,previous ClOrdID (branch)
+G,4,8476,,jclient.pe.d@109,never,second ClOrdID from the server's last report
+G,5,44,,jclient.pe.j@178,"flag:lmt_price & type_in:LMT,LOC,LIT,MIDPRICE,REL,RPI,PASSV REL,PEG BEST,PEG MID,PEG MKT,STP LMT,TRAIL LIMIT,TRAIL LIT,REL + LMT,BOX TOP",order type writes a limit price and the API lmtPrice is set
+G,6,6879,,jclient.pe.j@235,flag:leg_prices,"combo per-leg prices (non-guaranteed, LMT or REL + LMT)"
+G,7,44,,jclient.pe.j@508,type_in:VOL,VOL order: market-rule minimum
+G,8,44,,jclient.pe.j@529,type_in:VOL,VOL order: limit price
+G,9,8262,,jclient.pe.j@593,never,hedge child using the parent price
+G,10,8019,,jclient.pe.j@840,never,option-model setting
+G,11,99,,jclient.pe.j@871,"flag:aux_price & type_not_in:VOL,PEG MID,REL","order type is not a vol peg, PEG MID or REL, and the stop / aux value is set"
+G,12,1,,jclient.pe.j@939,always,no FA allocation: account (tag 440 for an institutional session)
+G,13,6700,,jclient.pe.j@981,never,account has a model code
+G,14,8065,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+G,14,6160,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+G,14,6159,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+G,14,6700,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+G,14,6240,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+G,14,6164,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+G,14,8303,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+G,14,6806,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+G,14,6894,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+G,14,6895,allocation,jclient.pe.j@1175,flag:fa_allocation,FA allocation of the order
+G,15,6834,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+G,15,6835,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+G,15,6836,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+G,15,6936,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+G,15,6240,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+G,15,8303,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+G,15,6806,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+G,15,6894,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+G,15,6895,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+G,15,8291,allocation,jclient.pe.j@1277,flag:fa_allocation,FA allocation of the order (Chameleon)
+G,16,126,,jclient.pe.j@1334,flag:gtd_time,GTD with a time
+G,17,432,,jclient.pe.j@1359,flag:gtd_date,GTD with a date only
+G,18,114,,jclient.pe.k@84,flag:short_sale,short sale: slot
+G,19,114,,jclient.pe.k@103,flag:short_sale,short sale: slot
+G,20,5700,,jclient.pe.k@146,flag:short_sale,short sale: location
+G,21,6086,,jclient.pe.k@167,flag:short_sale,short sale
+G,22,1688,,jclient.pe.k@208,flag:short_sale,short sale: exempt code
+G,23,114,,jclient.pe.j@1728,never,"short sale, other account case"
+G,24,5700,,jclient.pe.j@1738,never,"short sale, other account case"
+G,25,6086,,jclient.pe.j@1746,never,"short sale, other account case"
+G,26,97,,jclient.pe.m@5,never,PossResend
+G,27,6257,,jclient.pe.j@1812,flag:adjustable,adjustable stop: adjusted order type set
+G,28,6261,,jclient.pe.j@1826,flag:adjustable,adjustable stop: adjusted order type
+G,29,6258,,jclient.pe.j@1865,other,adjustable stop: trigger price when set
+G,30,6259,,jclient.pe.j@1904,other,adjustable stop: adjusted stop price when set
+G,31,6262,,jclient.pe.j@1943,other,adjustable stop: adjusted stop-limit price when set
+G,32,6260,,jclient.pe.j@1982,other,adjustable stop: adjusted trailing amount when set
+G,33,6117,,jclient.pe.j@2152,"flag:stop_price & type_in:STP,STP LMT,STP PRT,TRAIL,TRAIL LIMIT",stop types: the stop price (trailing types: on a new order or when it changed)
+G,34,12,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,13,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,18,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,22,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,48,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,63,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,66,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,67,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,68,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,77,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,110,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,111,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,152,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,168,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,440,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,583,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,851,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,1028,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,3950,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6010,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6095,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6102,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6115,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6117,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6122,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6133,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6135,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6148,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6149,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6150,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6152,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6153,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6154,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6205,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6207,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6232,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6248,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6268,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6269,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6275,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6279,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6280,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6281,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6282,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6283,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6284,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6285,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6286,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6287,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6289,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6290,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6291,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6365,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6370,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6377,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6390,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6391,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6403,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6405,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6406,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6407,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6408,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6412,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6433,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6434,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6437,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6438,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6441,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6445,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6446,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6447,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6448,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6449,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6450,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6458,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6459,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6460,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6461,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6467,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6468,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6480,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6485,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6486,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6487,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6488,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6489,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6506,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6516,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6519,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6521,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6524,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6526,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6527,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6531,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6532,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6534,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6535,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6547,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6551,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6557,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6559,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6562,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6564,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6570,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6571,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6580,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6590,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6591,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6595,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6596,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6602,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6605,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6609,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6626,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6628,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6636,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6637,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6640,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6641,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6642,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6643,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6644,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6645,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6646,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6649,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6650,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6664,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6665,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6666,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6670,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6671,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6678,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6690,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6703,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6704,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6707,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6708,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6710,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6715,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6722,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6724,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6732,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6733,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6734,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6736,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6737,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6740,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6748,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6750,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6769,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6788,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6789,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6790,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6791,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6792,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6793,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6794,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6795,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6796,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6800,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6809,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6814,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6816,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6817,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6819,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6838,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6851,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6852,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6860,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6861,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6862,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6863,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6866,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6867,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6874,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6876,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6877,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6878,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6880,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6881,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6901,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6936,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6938,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6939,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6941,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6942,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6952,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6965,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6975,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6979,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,6998,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8012,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8015,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8016,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8020,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8021,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8022,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8023,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8024,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8043,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8047,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8048,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8052,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8053,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8059,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8060,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8061,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8062,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8083,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8086,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8089,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8090,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8095,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8111,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8145,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8149,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8153,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8161,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8165,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8191,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8214,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8215,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8218,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8221,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8229,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8231,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8232,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8237,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8243,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8245,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8246,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8248,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8252,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8253,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8254,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8255,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8261,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8262,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8265,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8266,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8267,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8268,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8291,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8294,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8302,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8320,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8326,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8339,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8340,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8341,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8352,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8354,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8355,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8378,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8402,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8403,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8404,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8405,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8409,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8411,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8412,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8415,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8417,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8429,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8452,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8458,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8467,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8468,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8469,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8470,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8471,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8474,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8475,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8479,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8485,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8486,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8487,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8488,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8501,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8506,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8513,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8517,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8534,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8535,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8536,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8571,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8572,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8582,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,8585,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,9801,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,9813,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,9816,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,9822,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,99994,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,34,99995,attributes,jclient.pe.j@2281,attribute,"each order attribute whose rule applies to the order (Attribute.f), in no fixed order (map keyed by class identity); booleans only as =1; the unset value is skipped"
+G,35,8294,,jclient.pe.j@2340,never,manual order type
+G,36,847,algo,jclient.pe.j@2422,flag:algo,"algo order: the parameters with a FIX tag in the server's algo definition (849 maxPctVol in the captured definitions), 847 strategy, 5957 count, 5958 / 5960 pairs"
+G,36,849,algo,jclient.pe.j@2422,flag:algo,"algo order: the parameters with a FIX tag in the server's algo definition (849 maxPctVol in the captured definitions), 847 strategy, 5957 count, 5958 / 5960 pairs"
+G,36,5957,algo,jclient.pe.j@2422,flag:algo,"algo order: the parameters with a FIX tag in the server's algo definition (849 maxPctVol in the captured definitions), 847 strategy, 5957 count, 5958 / 5960 pairs"
+G,36,5958,algo,jclient.pe.j@2422,flag:algo,"algo order: the parameters with a FIX tag in the server's algo definition (849 maxPctVol in the captured definitions), 847 strategy, 5957 count, 5958 / 5960 pairs"
+G,36,5960,algo,jclient.pe.j@2422,flag:algo,"algo order: the parameters with a FIX tag in the server's algo definition (849 maxPctVol in the captured definitions), 847 strategy, 5957 count, 5958 / 5960 pairs"
+G,37,9816,,jclient.pe.j@2494,type_in:VOL,VOL order: volatility
+G,38,6516,,jclient.pe.j@2529,never,special flag
+G,39,6858,,jclient.pe.j@2577,never,special security type
+G,40,8425,,jclient.pe.j@2591,never,special security type
+G,41,6121,,jclient.pe.d@298,flag:no_apibind,API order and the logon feature APIBIND absent
+G,42,6119,,jclient.pe.d@309,flag:no_apibind,API order and the logon feature APIBIND absent
+G,43,6981,md_context,jclient.pe.d@324,never,market-data API context (not set by an API placeOrder)
+G,43,6982,md_context,jclient.pe.d@324,never,market-data API context (not set by an API placeOrder)
+G,43,6989,md_context,jclient.pe.d@324,never,market-data API context (not set by an API placeOrder)
+G,44,38,,jclient.pe.l@28,never,fund order quantity
+G,45,38,,jclient.pe.l@52,never,fund order quantity
+G,46,38,,jclient.pe.d@462,always,total order quantity
+G,47,54,,jclient.pe.d@575,always,side
+G,48,40,,jclient.pe.o@65,always,order type
+G,49,40,,jclient.pe.o@98,other,order type (branch)
+G,50,40,,jclient.pe.o@117,other,order type (branch)
+G,51,40,,jclient.pe.o@210,other,order type (branch)
+G,52,211,,jclient.pe.o@332,flag:peg_difference,pegged types with an offset
+G,53,18,,jclient.pe.d@594,flag:exec_inst,ExecInst not empty
+G,54,55,,jclient.pe.d@672,never,"fund side: symbol,fund"
+G,55,55,,jclient.pe.d@693,always,symbol
+G,56,200,,jclient.pe.d@728,flag:option,option: maturity
+G,57,201,,jclient.pe.d@739,flag:option,option: right
+G,58,202,,jclient.pe.d@750,flag:option,option: strike
+G,59,200,,jclient.pe.d@792,never,other derivative: maturity alone
+G,60,167,,jclient.pe.d@879,always,security type
+G,61,6035,,jclient.pe.d@908,always,contract field (the symbol in the captures)
+G,62,59,,jclient.pe.p@56,always,time in force
+G,63,59,,jclient.pe.p@83,other,time in force (branch)
+G,64,59,,jclient.pe.p@102,other,time in force (branch)
+G,65,6436,,jclient.pe.p@110,flag:tif_flag,"time-in-force flag (DTC, overnight)"
+G,66,6008,,jclient.pe.n@45,always,conId of the contract
+G,67,6008,,jclient.pe.n@204,other,conId of the SMART-routed underlying
+G,68,6147,,jclient.pe.n@298,never,fund side
+G,69,6079,,jclient.pe.n@306,never,fund side
+G,70,6080,,jclient.pe.n@317,never,fund side
+G,71,6081,,jclient.pe.n@325,never,fund side
+G,72,6082,,jclient.pe.n@333,never,fund side
+G,73,6080,,jclient.pe.n@363,never,fund side
+G,74,6082,,jclient.pe.n@371,never,fund side
+G,75,6008,,jclient.pe.n@423,other,conId of the order (combos)
+G,76,6136,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6222,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6137,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6126,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6123,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6124,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6127,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6125,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6223,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6245,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6263,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6246,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6947,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,6330,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,76,8569,conditions,jclient.pe.d@954,flag:conditions,order conditions on a replace
+G,77,231,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6079,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,566,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6080,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6081,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6082,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,8211,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,616,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6087,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6680,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6679,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6705,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6401,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6442,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,8028,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6175,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6134,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,8020,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6147,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6148,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6149,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6150,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6086,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,654,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6215,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6216,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,1689,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,77,6962,combo,jclient.pe.d@1088,flag:combo,"combo (BAG): 231 when the combo has a multiplier, 6079 leg count, per leg 6080 / 6081 / 6082 (and 616, 6087 ... when their rules apply), 6175, 6134, per-leg short sale block"
+G,78,6088,,jclient.pe.d@1119,always,originator name (Socket for an API order)
+G,79,6088,,jclient.pe.d@1168,other,originator name
+G,80,6088,,jclient.pe.d@1291,other,originator name
+G,81,6211,,jclient.pe.i@33,always,"order reference field, empty when none"
+G,82,6238,,jfix.q.a@24,always,"always, empty when none"
+G,83,6238,,jfix.q.a@35,other,second branch
+G,84,6211,,jclient.pe.i@59,other,order reference field (second branch)
+G,85,6238,,jfix.q.a@24,always,"always, empty when none"
+G,86,6238,,jfix.q.a@35,other,second branch
+G,87,566,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,231,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6079,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,566,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6080,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6081,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6082,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,8211,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,616,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6087,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6680,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6679,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6705,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6401,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6442,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,8028,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6175,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6134,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,8020,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6147,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6148,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6149,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6150,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6086,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,654,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6215,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6216,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,1689,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,87,6962,combo_key,jclient.pe.d@1329,never,combo with a combo key value (not set by an API order)
+G,88,8441,,jclient.pe.g@310,never,co-trading
+G,89,8442,,jclient.pe.g@347,never,co-trading
+F,1,11,,jclient.pe.e@18,always,new ClOrdID
+F,2,41,,jclient.pe.e@46,always,previous ClOrdID
+F,3,41,,jclient.pe.e@77,other,previous ClOrdID (branch)
+F,4,8476,,jclient.pe.e@109,never,second ClOrdID from the server's last report
+F,5,38,,jclient.pe.l@28,never,fund order quantity
+F,6,38,,jclient.pe.l@52,never,fund order quantity
+F,7,38,,jclient.pe.e@248,always,order quantity
+F,8,54,,jclient.pe.e@261,always,side
+F,9,1,,jclient.pe.e@291,always,account
+F,10,6700,,jclient.pe.e@333,never,account model code
+F,11,1,,jclient.pe.e@402,other,allocation string when an allocation is set
+F,12,6008,,jclient.pe.e@434,always,"conId, when not 0"
+F,13,6088,,jclient.pe.e@455,always,source (Socket for an API order)
+F,14,97,,jclient.pe.m@5,never,PossResend
+F,15,6516,,jclient.pe.e@539,never,OMS container
+F,16,6901,,jclient.pe.e@572,never,no leg price change
+F,17,6944,,jclient.pe.e@625,always,"cancel tag: SEL for cancelOrder, ALL for a global cancel"
+F,18,8187,,jclient.pe.e@639,never,cancel reason: empty for a cancel
+F,19,,ticket_owner,jclient.pe.e@651,never,ticket ownership (no tag for an API order)
+F,20,8089,cancel_attributes,jclient.pe.e@789,other,"the attributes ExtOperator, ExternalUserId, ManualOrderIndicator of the order"
+F,20,6722,cancel_attributes,jclient.pe.e@789,other,"the attributes ExtOperator, ExternalUserId, ManualOrderIndicator of the order"
+F,20,1028,cancel_attributes,jclient.pe.e@789,other,"the attributes ExtOperator, ExternalUserId, ManualOrderIndicator of the order"

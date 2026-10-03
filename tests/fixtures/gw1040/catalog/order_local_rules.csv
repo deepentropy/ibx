@@ -1,0 +1,169 @@
+id,code,api_code,stage,text,condition
+"110 dx.a(dy,boolean)@1961",110,110,build,The price does not conform to the minimum price variation for this contract.,the absolute price is off the tick of the contract's market rule (server data)
+"145 algo.a.a(pe,OrderCreator)@212",145,145,build,Error in validating entry fields -%s,an algo parameter value is not one of the legal strings of the algo definition (server data); text = the bad value
+343 bH.q@2674,343,343,read,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional. E.g.: 20031126 15:59:00 US/Eastern  Note that there is a space between the date and time, and between the time and time-zone.  If no date is specified, current date is assumed. If no time-zone is specified, local time-zone is assumed(deprecated).  You can also provide yyyymmddd-hh:mm:ss time is in UTC. Note that there is a dash between the date and time in UTC notation.","goodTillDate not empty and not a date and time, or its zone is not UTC, the machine's or the contract's trading-hours zone"
+337 bH.q@2497,337,337,read,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional. E.g.: 20031126 15:59:00 US/Eastern  Note that there is a space between the date and time, and between the time and time-zone.  If no date is specified, current date is assumed. If no time-zone is specified, local time-zone is assumed(deprecated).  You can also provide yyyymmddd-hh:mm:ss time is in UTC. Note that there is a dash between the date and time in UTC notation.",goodAfterTime not a date and time (same pattern as 343)
+387 aN.a@5352,387,387,rules,Unsupported order type for this exchange and security type.,"order type key not in the type list of the contract and exchange (server data); PEG MID needs PEGMID, PEG BEST needs REL2MID"
+"441 algo.a.a(AlgoExchanges,...)@649",441,441,build,Algo attributes validation failed:,algo parameter value refused by the definition (min / max of the server's algo definition)
+"443 algo.a.a(AlgoExchanges,...)@376",443,443,build,Order processing failed. Unknown algo attribute,algo parameter name not in the definition's parameter map
+460 aN.a@13933,460,460,rules,No trading permissions,no trading permission for the account and contract (server data)
+2109 a0.c(pe)@190,2109,2109,rules,Order Event Warning:,"warning, order still sent: outsideRth does not apply to the order type and destination; the attribute is removed"
+"10243 dx.a(dy,boolean)@244",10243,10243,build,Fractional-sized order cannot be placed via API. Please use desktop version to place this order.,"account can trade fractions, STK or WAR, and the quantity is not whole"
+10256 aN.a@12583,10256,10256,rules,The 'Minimum Quantity' order attribute may not be specified for this order.,minQty set and the contract's type list has no PAON
+152 aN.a@12443,152,152,rules,The 'hidden' order attribute may not be specified for this order.,hidden set and the type list has no HID
+10255 aN.a@12513,10255,10255,rules,The 'Display Size' order attribute may not be specified for this order.,display size set and the type list has no ICE
+10257 aN.a@12650,10257,10257,rules,The 'All or None' order attribute may not be specified for this order.,allOrNone set and the type list has no AON
+10266 aN.a@12717,10266,10266,rules,The 'BlockOrder' order attribute may not be specified for this order.,blockOrder set and the type list has no BLOCK
+10267 aN.a@12784,10267,10267,rules,The 'SweepToFill' order attribute may not be specified for this order.,sweepToFill set and the type list has no SWEEP
+10342 aN.a@12851,10342,10342,rules,The 'ImbalanceOnly' order attribute may not be specified for this order.,imbalanceOnly set and the type list has no IMB
+10274 aN.a@12921,10274,10274,rules,The 'PostToATS' order attribute may not be specified for this order or is invalid.,postToAts set and the type list has no POSTATS
+168 bH.q@2411,168,320,read,Error reading request:Discretionary amount does not conform to the minimum price variation for this contract,discretionaryAmt < 0
+313 bH.q@2027,313,320,read,Error reading request:The combo details for leg '%s' are invalid.,exception while reading combo leg i
+409 bH.q@5988,409,320,read,Error reading request:Invalid scale order. You should specify component order size.,message versions 22 to 25 only: old scaleNumComponents > 0
+429 bH.q@8106,429,320,read,Error reading request:Delta neutral orders are only supported for combos (BAG security type),deltaNeutralContract given without combo legs
+10027 bH.q@2254,10027,320,read,"Error reading request:Invalid combo routing tag. Valid tags are LeginPrio, MaxSegSize, DontLeginNext, ChangeToMktTime1, ChangeToMktTime2, ChangeToMktOffset, DiscretionaryPct, NonGuaranteed, CondPriceMin, CondPriceMax, and PriceCondConid.",smartComboRoutingParams tag not allowed
+10057 bH.q@2126,10057,320,read,Error reading request:Mismatch per-leg price number with combo leg specification.,numberOfPerLegPrices not 0 and not the number of legs
+10060 bH.q@5607,10060,320,read,Error reading request:Cannot specify Trailing Amount and Trailing Percent at the same time,trailingPercent and auxPrice both set (for trailing types auxPrice 0 counts as unset)
+10105 bH.q@3586,10105,320,read,Error reading request:Sell Long orders must have short sale slot with value -100,side SELL LONG and shortSaleSlot not -100
+10300 bH.q@10407,10300,320,read,"Error reading request:%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional. E.g.: 20031126 15:59:00 US/Eastern  Note that there is a space between the date and time, and between the time and time-zone.  If no date is specified, current date is assumed. If no time-zone is specified, local time-zone is assumed(deprecated).  You can also provide yyyymmddd-hh:mm:ss time is in UTC. Note that there is a dash between the date and time in UTC notation.",manualOrderTime not parseable
+10314 am.a@103,10314,10314,read,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional. E.g.: 20031126 15:59:00 US/Eastern  Note that there is a space between the date and time, and between the time and time-zone.  If no date is specified, current date is assumed. If no time-zone is specified, local time-zone is assumed(deprecated).  You can also provide yyyymmddd-hh:mm:ss time is in UTC. Note that there is a dash between the date and time in UTC notation.",time condition string not parseable
+10315 bH.q@6652,10315,320,read,"Error reading request:%s: The time entered is invalid. The correct format is hh:mm:ss. E.g.: 15:00:00 in UTC. No date should be specified, current date is assumed.",activeStartTime / activeStopTime format
+10316 bH.q@1493,10316,320,read,Error reading request:Trigger Outside RTH was deprecated. Please upgrade your API Client software to submit order with Outside RTH attribute instead.,message version < 24 with the old outsideRth / trigger flag
+10340 bH.q@10972,10340,320,read,Error reading request:The following order attribute is not supported: %s,externalUserId / manualOrderIndicator from client versions 187 to 189
+321 bH.S@1380,321,321,check,Error validating request.-'bH' : cause - Invalid side field was entered,"side unknown, or SSHORT when the session has neither the institutional flag nor an away clearing"
+452 bH.S@449,452,321,check,Error validating request.-'bH' : cause - Missing order exchange,exchange empty
+10272 bH.S@232,10272,321,check,Error validating request.-'bH' : cause - Duration field is only valid with time-in-force of GTD,duration with TIF not GTD
+10273 bH.S@335,10273,321,check,Error validating request.-'bH' : cause - Expiration date and time and Duration cannot be set on the order at the same time.,GTD with both date and duration
+391 bH.S@411,391,321,check,Error validating request.-'bH' : cause - The time entered is invalid.  The correct format is hh:mm:ss E.g.: 15:59:00  Time zone associated with the financial instrument is assumed.,GTD with neither date nor duration
+10244 bH.S@642,10244,321,check,Error validating request.-'bH' : cause - Cash Quantity cannot be used for this order,CRYPTO cash-quantity rule
+10289 bH.S@746,10289,321,check,Error validating request.-'bH' : cause - You must set Cash Quantity for this order,CRYPTO cash-quantity rule
+10052 bH.S@825,10052,321,check,Error validating request.-'bH' : cause - Invalid time in force,CRYPTO TIF rule
+10040 bH.S@926,10040,321,check,Error validating request.-'bH' : cause - Order cannot be transmitted because not all financial instrument details were available.,the broker's ATS exchange with an unknown secType and no conId
+477 bH.S@1031,477,321,check,Error validating request.-'bH' : cause - Pseudo FX destination is not allowed,CASH pseudo-FX destination not allowed for the account
+498 bH.S@1152,498,321,check,Error validating request.-'bH' : cause - SSHORTX orders are not supported,"side SSHORTX or a short combo leg, feature off"
+160 bH.S@1572,160,321,check,Error validating request.-'bH' : cause - The size value cannot be zero:,"size 0 (not QUOTE, no FA sizing, not hedge child, no cash quantity)"
+355 bH.S@1606,355,321,check,Error validating request.-'bH' : cause - Order size does not conform to market rule.,"quantity out of range (> 999,999,999 or < 0)"
+321 bH.S@1750,321,321,check,Error validating request.-'bH' : cause - Please enter a stop price,"STP, STP LMT, STP PRT, TRAIL LIMIT with the stop price unset (TRAIL LIMIT: trailStopPrice)"
+146 bH.S@2257,146,321,check,Error validating request.-'bH' : cause - Invalid trigger method,"triggerMethod not in 0, 1, 2, 3, 4, 7, 8"
+314 bH.S@2319,314,321,check,Error validating request.-'bH' : cause - Security type 'BAG' requires combo leg details.,BAG without legs
+10011 bH.S@2410,10011,321,check,Error validating request.-'bH' : cause - Currency %s isn't supported for smart combo.,BAG SMART without a smart-combo conId for the currency
+347 bH.S@2548,347,321,check,Error validating request.-'bH' : cause - Short sale slot value must be 1 (broker holds shares) or 2 (delivered from elsewhere),SSHORT without a short sale slot object
+347 bH.S@3088,347,321,check,Error validating request.-'bH' : cause - Short sale slot value must be 1 (broker holds shares) or 2 (delivered from elsewhere),short side with a slot not 1 or 2
+346 bH.S@2702,346,321,check,"Error validating request.-'bH' : cause - Not an institutional account, or an away clearing order",short sale slot on a non-institutional account without away clearing
+393 bH.S@2793,393,321,check,Error validating request.-'bH' : cause - Short sale slot may be specified for delta hedge orders only.,short sale slot on an order that is not a delta hedge
+348 bH.S@2857,348,321,check,Error validating request.-'bH' : cause - Order not a short sale -- type must be SSHORT to specify short sale slot.,short sale slot on an order that is not SSHORT
+494 bH.S@2921,494,321,check,Error validating request.-'bH' : cause - Order not a short sale exempt -- type must be SSHORTX to specify short sale slot.,exempt code on an order that is not SSHORTX
+353 bH.S@3146,353,321,check,Error validating request.-'bH' : cause - Short sale slot value of 1 requires no location be specified.,slot 1 with a location
+352 bH.S@3204,352,321,check,Error validating request.-'bH' : cause - Short sale slot value of 2 (delivered from elsewhere) requires location.,slot 2 without a location
+495 bH.S@3272,495,321,check,Error validating request.-'bH' : cause - Exempt reason specified is not valid for the current order,exempt code not valid
+411 bH.S@3344,411,321,check,"Error validating request.-'bH' : cause - The ""Outside Regular Trading Hours"" flag is not valid for this order.",outsideRth flag not valid for the order
+371 bH.S@3429,371,321,check,Error validating request.-'bH' : cause - VOL order requires non-negative floating point value for volatility.  Do not set it for other order types.,"VOL: volatility missing or negative, or set on a non-VOL order"
+367 bH.S@3638,367,321,check,Error validating request.-'bH' : cause - Volatility Type must be 1 or 2 for VOL orders.  Do not set it for other order types.,VOL: volatility type not 1 or 2
+368 bH.S@4394,368,321,check,Error validating request.-'bH' : cause - Reference Price Type must be 1 or 2 for volatility order management.  Do not set it for non-VOL orders.,VOL: reference price type not 1 or 2
+380 bH.S@3760,380,321,check,Error validating request.-'bH' : cause - Delta hedge order type is not allowed.,delta hedge order type not allowed
+379 bH.S@3894,379,321,check,Error validating request.-'bH' : cause - Delta hedge order type requires that no delta hedge aux price be specified.,delta hedge order type with an aux price
+372 bH.S@4166,372,321,check,Error validating request.-'bH' : cause - Cannot set VOL attribute on non-VOL order.,VOL attribute on a non-VOL order
+373 bH.S@4267,373,321,check,Error validating request.-'bH' : cause - Can only set stock range attribute on VOL or RELATIVE_TO_STOCK order.,stock range on an order that is not VOL or relative to stock
+375 bH.S@4561,375,321,check,Error validating request.-'bH' : cause - Stock range attributes cannot be negative.,negative stock range
+374 bH.S@4681,374,321,check,"Error validating request.-'bH' : cause - If both are set, lower stock range attribute must be less than high stock range attribute.",low stock range not below the high one
+413 bH.S@4745,413,321,check,Error validating request.-'v' : cause - What-If order should have transmit flag set to TRUE.,whatIf true and transmit false
+457 bH.S@5061,457,321,check,Error validating request.-'bH' : cause - Individual account is required,FA / account rule
+10136 bH.S@5127,10136,321,check,Error validating request.-'bH' : cause - Cannot submit trades until the application is finished and approved,account application not approved (non-FA session)
+10132 bH.S@5340,10132,321,check,Error validating request.-'bH' : cause - Cannot place an order using a readonly account,read-only account
+10226 bH.S@5474,10226,321,check,Error validating request.-'bH' : cause - Invalid FA method specified,invalid FA method
+435 bH.S@5567,435,321,check,Error validating request.-'bH' : cause - You must specify an account.,multi-account non-FA session and no account
+10265 bH.S@7758,10265,321,check,Error validating request.-'bH' : cause - Group '%s' cannot be used without method specified. Use Advisor Setup tool to correct its definition,FA group without a method
+10030 bH.S@5718,10030,321,check,Error validating request.-'bH' : cause - Cannot specify both DiscretionaryPct and Discretionary Amt.,discretionary amount and percent both set
+10061 bH.S@5907,10061,321,check,Error validating request.-'bH' : cause - Invalid Trailing Percent value. Valid values are greater than 0 and less than 100.,trailing unit percent and the value < 0 or > 100
+10081 bH.S@5949,10081,321,check,Error validating request.-'bH' : cause - The custom Smart strategy is invalid.,custom SMART strategy invalid
+10087 bH.S@6007,10087,321,check,Error validating request.-'bH' : cause - Manual scale orders are not supported.,manual scale order
+10100 bH.S@6174,10100,321,check,Error validating request.-'bH' : cause - Combo hedging strategy is not supported for non-cleared accounts,"combo hedging strategy, non-cleared account"
+10099 bH.S@6287,10099,321,check,Error validating request.-'bH' : cause - Parent order cannot be hedged using combination order,parent hedged with a combination order
+10131 bH.S@6352,10131,321,check,"Error validating request.-'bH' : cause - The ""Regular Trading Hours only"" and ""Trigger Outside RTH"" flags are not valid for this order.",RTH flag on BAG or PDC
+10075 bH.S@6455,10075,321,check,Error validating request.-'bH' : cause - Missing reference financial instrument,PEG BENCH with referenceContractId <= 0
+362 bH.S@6556,362,321,check,Error validating request.-'bH' : cause - Invalid Adjusted Stop Price,adjusted stop price invalid
+363 bH.S@6626,363,321,check,Error validating request.-'bH' : cause - Invalid Adjusted Stop Limit Price,adjusted stop-limit price invalid
+403 bH.S@6696,403,321,check,Error validating request.-'bH' : cause - Invalid Stop Price,"STP, STP PRT, STP LMT, TRAIL LIMIT with auxPrice invalid"
+361 bH.S@6766,361,321,check,Error validating request.-'bH' : cause - Invalid Trigger Price,"MIT, LIT, TRAIL LIT with auxPrice invalid"
+10028 bH.S@6870,10028,321,check,Error validating request.-'bH' : cause - You must enter a Trailing Amount for %s.,"trailing type, unit amount, trailing amount negative or unset"
+321 bH.S@7210,321,321,check,Error validating request.-'bH' : cause - You must specify one value: limit price or limit price offset value.,"TRAIL LIMIT family: both lmtPrice and lmtPriceOffset set, or neither"
+10210 bH.S@7521,10210,321,check,Error validating request.-'bH' : cause - Midprice orders are not supported outside of regular trading hours.,MIDPRICE with outsideRth true
+10274 bH.S@8292,10274,321,check,Error validating request.-'bH' : cause - The 'PostToATS' order attribute may not be specified for this order or is invalid.,postToAts out of range
+10315 bH.S@8434,10315,321,check,"Error validating request.-'bH' : cause - %s: The time entered is invalid. The correct format is hh:mm:ss. E.g.: 15:00:00 in UTC. No date should be specified, current date is assumed.",time algo parameter bad value
+10341 bH.S@8592,10341,321,check,Error validating request.-'bH' : cause - Parent order id cannot be modified,orderId already live with another parentId
+135 bH.S@8805,135,321,check,Error validating request.-'bH' : cause - Can't find order with id =,parent order id not found
+417 bH.S@5803,417,321,check,Error validating request.-'bH' : cause - Scale order component sizes must be smaller than the Maximum Position.,scale initial component size vs total size
+145 bH.S@8849,145,145,check,Error in validating entry fields -Account config doesn't allow to specify customer account value: %s for account %s,customerAccount set and the account config has no CUSTACCT
+145 bH.S@8892,145,145,check,Error in validating entry fields -Account config doesn't allow to assign 'true' value for ProfessionalCustomer for account %s,professionalCustomer true and the account config has no CUSTACCT
+10007 bH.r@85,10007,321,check,"Error validating request.-'bH' : cause - Invalid hedge type. Valid values are D, B, F, or P.","hedge type not D, B, F or P"
+10006 bH.r@212,10006,321,check,Error validating request.-'bH' : cause - Missing parent order,hedge order without a parent
+10010 bH.r@425,10010,321,check,"Error validating request.-'bH' : cause - Invalid delta hedge order. The parent order has to be option order and hedge order can only be Stock, CFD or (in case of option on Index) Futures order.",invalid delta hedge
+10009 bH.r@523,10009,321,check,Error validating request.-'bH' : cause - Invalid hedge ratio,invalid hedge ratio
+10033 bH.r@630,10033,321,check,Error validating request.-'bH' : cause - Invalid beta hedge order. Both parent and hedge can only be Stock orders.,invalid beta hedge
+10008 bH.r@714,10008,321,check,Error validating request.-'bH' : cause - Invalid beta value.,invalid beta value
+10149 bH.W@44,10149,10149,flow,Invalid order id: %s,orderId 0 or unset
+103 bH.W@222,103,103,flow,Duplicate order id,orderId not in the order table and not above the highest used
+10268 bH.o@67,10268,10268,flow,The 'EtradeOnly' order attribute is not supported.,eTradeOnly set with the feature on
+10269 bH.o@121,10269,10269,flow,The 'FirmQuoteOnly' order attribute is not supported.,firmQuoteOnly set with the feature on
+10270 bH.o@178,10270,10270,flow,The 'NbboPriceCap' order attribute is not supported.,nbboPriceCap set with the feature on
+10348 bH.o@234,10348,10348,flow,The 'OptOutFromSmartRouting' order attribute is not supported.,optOutSmartRouting set with the feature on
+2168 bH.o@75,2168,2168,flow,The 'EtradeOnly' order attribute is not supported.,"warning, order sent: eTradeOnly set, feature off, attribute cleared"
+2169 bH.o@129,2169,2169,flow,The 'FirmQuoteOnly' order attribute is not supported.,"warning, order sent: firmQuoteOnly set, feature off"
+2170 bH.o@186,2170,2170,flow,The 'NbboPriceCap' order attribute is not supported.,"warning, order sent: nbboPriceCap set, feature off"
+2181 bH.o@242,2181,2181,flow,The 'OptOutFromSmartRouting' order attribute is not supported.,"warning, order sent: optOutSmartRouting set, feature off"
+2102 bH.Y@65,2102,2102,flow,Unable to modify this order as its still being processed.,"a new order whose id is still pending: warning code, order not sent"
+2139 bH.Z@21,2139,2139,flow,Real paper-trading has not been acknowledged yet.,"warning, order sent"
+2146 bH.Z@56,2146,2146,flow,"Warning: The order ID %s is too high. Please check your order ID assignment algorithm, or reset the ID sequence by clicking ""Reset API order ID sequence"" in the Global Configuration - API Settings page.","warning, order sent: order id too high"
+"10318 dx.a(dy,boolean)@462",10318,10318,build,This order doesn't support fractional quantity trading,fractional quantity not supported for the contract / order
+"10208 dx.a(dy,boolean)@908",10208,10208,build,For stocks non-zero Order Size cannot contain more than %s decimals.,stock size with more decimals than allowed
+"10286 dx.a(dy,boolean)@1089",10286,10286,build,%s field cannot contain more than %s decimals.,TotalQuantity with too many decimals
+"10292 dx.a(dy,boolean)@361",10292,10292,build,%s %s order is not allowed for this instrument,order not allowed for this instrument
+"464 dx.a(dy,boolean)@1223",464,464,build,Invalid exchange,invalid exchange
+"10080 dx.a(dy,boolean)@1390",10080,10080,build,Custom Smart Strategy is not supported,custom SMART strategy not supported
+"10031 dx.a(dy,boolean)@1764",10031,10031,build,"Specifying limit price for hedge order is not allowed, send zero.",hedge child with a limit price
+"10032 dx.a(dy,boolean)@1803",10032,10032,build,"Specifying size for hedge order is not allowed, send zero.",hedge child with a size
+"10063 dx.a(dy,boolean)@1871",10063,10063,build,Invalid FX hedge order. Hedging contract can only be a currency pair where one of the currencies is the same as in parent order.,invalid FX hedge
+"10195 dx.a(dy,boolean)@2111",10195,10195,build,"Invalid order parameters supplied when trying to set ""Use parent trade price at the time of fill"" on an order",use-parent-price parameters invalid
+"463 dx.a(dy,boolean)@2226",463,463,build,You must enter a valid price.,no valid price
+"388 dx.a(dy,boolean)@2430",388,388,build,Order size %s is smaller than the minimum required size of %s.,size below the minimum size
+"10083 dx.a(dy,boolean)@2532",10083,10083,build,Display size is smaller than the minimum requirement.,display size below the minimum
+"10084 dx.a(dy,boolean)@2595",10084,10084,build,Min. quantity is smaller than the minimum requirement.,min quantity below the minimum
+"10155 dx.a(dy,boolean)@2997",10155,10155,build,Invalid soft dollar tier,invalid soft dollar tier
+"10244 dx.a(dy,boolean)@3153",10244,10244,build,Cash Quantity cannot be used for this order,cash quantity not usable for the order
+"10203 dx.a(dy,boolean)@3466",10203,10203,build,"A buy order for FUND must contain non-zero cashQty, and may not contain non-zero totalQuantity.",FUND buy rule
+"10204 dx.a(dy,boolean)@3864",10204,10204,build,"A sell order for FUND must contain non-zero totalQuantity, and may not contain non-zero cashQty.",FUND sell rule
+"10206 dx.a(dy,boolean)@4216",10206,10206,build,Non-zero cash quantity cannot contain more than 2 decimals.,cash quantity with more than 2 decimals
+"10207 dx.a(dy,boolean)@3956",10207,10207,build,For funds non-zero Order Size cannot contain more than 3 decimals.,FUND size with more than 3 decimals
+"10302 dx.a(OC,dy,...)@312",10302,10302,build,Min trade trade quantity is not allowed for this order,min trade quantity not allowed
+"10303 dx.a(OC,dy,...)@351",10303,10303,build,"<html>Invalid min trade quantity value (%s).<br>It must be a positive integer, not exceeding the total order size.</html>",min trade quantity not a positive integer
+"439 algo.a.a(AlgoExchanges,...)@36",439,439,build,Order processing failed. Algorithm definition not found,no algo definition with this name for the exchanges
+"442 algo.a.a(AlgoExchanges,...)@150",442,442,build,Specified algorithm is not allowed for this order.,algo not allowed for the order
+"10314 algo.a.a(AlgoExchanges,...)@596",10314,10314,build,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional. E.g.: 20031126 15:59:00 US/Eastern  Note that there is a space between the date and time, and between the time and time-zone.  If no date is specified, current date is assumed. If no time-zone is specified, local time-zone is assumed(deprecated).  You can also provide yyyymmddd-hh:mm:ss time is in UTC. Note that there is a dash between the date and time in UTC notation.",algo time parameter not parseable
+10235 aN.i(pe)@216,10235,10235,rules,The Decision Maker field is required and not set for this order. You can set default value for the Decision Maker in MiFIR settings of desktop %TM% 969.1 or newer. [Learn more about MiFIR](%s),MiFID account and no Decision Maker
+402 aN.a@10570,402,402,rules,Conditions are not allowed for this financial instrument,conditions not allowed for the instrument
+148 aN.a@10652,148,148,rules,"Conditional submission of orders is supported for Limit, Market, MidPrice, Relative and Snap order types only.  Conditional cancellation of orders is supported for Limit, MidPrice, IBAlgo - Limit order types only.","conditions on an order type other than LMT, MKT, MIDPRICE, REL, SNAP"
+148 aN.a@10734,148,148,rules,"Conditional submission of orders is supported for Limit, Market, MidPrice, Relative and Snap order types only.  Conditional cancellation of orders is supported for Limit, MidPrice, IBAlgo - Limit order types only.",conditionsCancelOrder on an order type other than LMT or MIDPRICE
+398 aN.a@10801,398,398,rules,Condition trigger error: %s,"condition trigger error (time condition without time, ...)"
+10051 aN.a@2901,10051,10051,rules,Invalid order type,unknown order type
+10052 aN.a@2961,10052,10052,rules,Invalid time in force,TIF not valid
+10070 aN.a@3067,10070,10070,rules,Order Type %s is invalid for this order. Please adjust Order Type and try again.,order type not in the type list (server data)
+464 aN.a@3478,464,464,rules,Invalid exchange,invalid exchange
+10166 aN.a@3468,10166,10166,rules,No valid auto-routing destination was found for this ticket.,no auto-routing destination
+412 aN.a@4375,412,412,rules,Contract is not available for trading,contract not tradable
+154 aN.a@9411,154,154,rules,Orders cannot be transmitted for a halted security.,halted security
+107 aN.a@9434,107,107,rules,Cannot transmit incomplete order,incomplete order
+328 aN.a@9339,328,328,rules,Trailing stop orders can be attached to limit or stop-limit orders only.,trailing child on a parent that is not LMT or STP LMT
+401 aN.a@12279,401,401,rules,n/a,OCA name over 64 characters
+461 aN.a,461,461,rules,Order size is not correct; it must be a multiple of the lot size.,size not a multiple of the lot
+10098 aN.p(pe)@115,10098,10098,rules,Negative offset amount is not allowed for SNAP orders.,SNAP order with a negative offset
+2137 OrderChecker$16@186,2137,2137,rules,n/a,"closing order larger than the position: warning code, order refused"
+10132 aN.a@2163,10132,10132,rules,Cannot place an order using a readonly account,read-only account
+104 bH.d(pe)@121,104,104,modify,Cannot modify a filled order.,"modify of an order that is filled, cancelled or with a cancel pending"
+105 bH.d(pe)@165,105,105,modify,Order being modified does not match original order,modified order does not match the original
+329 aj.e(pe)@52,329,329,modify,Order modify failed. Cannot change to the new order type,modify to another order type
+462 aj.f(pe)@62,462,462,modify,Order modify failed. Cannot change to the new Time in Force,modify to another time in force
+10326 bH.d(pe)@836,10326,10326,modify,OCA group revision is not allowed,OCA group changed
+10327 bH.d(pe)@905,10327,10327,modify,OCA group type revision is not allowed,OCA type changed
+"10059 bH.c(pe,dl)@1067",10059,10059,modify,Mismatch leg contract.,combo modify with a leg the working order does not have
+10147 bw.a(pe)@179,10147,10147,cancel,OrderId %s that needs to be cancelled is not found.,cancel of an order id that is not found
+10148 bw.a(pe)@543,10148,10148,cancel,"OrderId %s that needs to be cancelled cannot be cancelled, state: %s.",cancel of an order in a state that cannot be cancelled
