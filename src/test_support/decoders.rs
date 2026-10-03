@@ -62,6 +62,7 @@ pub fn fix(b: &[u8]) {
     let _ = fix::is_signed(b);
     let _ = fix::fix_unsign(b, &[7u8; 20], &[3u8; 16]);
     let _ = fix::fix_read(&mut std::io::Cursor::new(b));
+    let _ = fix::fix_read_deadline(&mut std::io::Cursor::new(b), std::time::Instant::now());
     let _ = fix::fmt_pipe(b);
     let _ = crate::engine::hot_loop::fast_extract_msg_type(b);
     let _ = crate::engine::hot_loop::extract_raw_tag(b, 96);
@@ -91,6 +92,7 @@ pub fn ticks(b: &[u8]) {
     let body = crate::engine::hot_loop::find_body_after_tag(b, b"35=P\x01").unwrap_or(b);
     let mut ticks = Vec::new();
     let _ = tick_decoder::decode_ticks_35p_into(body, &mut ticks);
+    let _ = tick_decoder::decode_ticks_35p(b);
     let mut market = crate::engine::market_state::MarketState::new();
     let id = market.try_register(1).unwrap();
     for t in &ticks {

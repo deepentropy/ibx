@@ -12,6 +12,8 @@
 //!   (`tests/fixtures/gw1040/catalog/order_local_rules.csv`, ibx#485);
 //! - `attribute`: an order attribute of the gateway catalog
 //!   (`order_attributes.csv`, ibx#485).
+//! - `decoder`: a decoder of network input, with its property test
+//!   (ibx#488): every decoder of src/protocol has one.
 //!
 //! The `test` column holds up to three `<path>::<test fn>` joined by ` ; `
 //! (an ignored live test marked `live:`), `no test`, or `open #N` for a
@@ -28,7 +30,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-const KINDS: &[&str] = &["rule", "error", "writer", "order_request", "eclient", "local_rule", "attribute"];
+const KINDS: &[&str] = &["rule", "error", "writer", "order_request", "eclient", "local_rule", "attribute", "decoder"];
 
 /// The fields of one CSV line (quotes and doubled quotes handled).
 fn csv_fields(line: &str) -> Vec<String> {
@@ -219,4 +221,58 @@ fn every_catalog_row_has_a_row() {
     missing.sort();
     missing.dedup();
     assert!(missing.is_empty(), "catalog rows with no row in matrix.csv: {missing:?}");
+}
+
+/// The public functions of src/protocol that are no decoder of network
+/// input: builders, signing, and the plumbing of a link.
+const NOT_DECODERS: &[&str] = &[
+    "connection::new", "connection::new_raw", "connection::new_mem", "connection::set_mem_read_timeout",
+    "connection::set_keys", "connection::seed_buffer", "connection::has_buffered_data", "connection::try_recv",
+    "connection::shutdown", "connection::set_queued_writes", "connection::has_queued_output",
+    "connection::write_error", "connection::flush_queued", "connection::send_fix", "connection::send_fix_unsequenced",
+    "connection::send_fixcomp", "connection::send_raw", "connection::buffered", "connection::inject_buf",
+    "connection::mem_pair", "connection::set_read_timeout", "connection::set_nonblocking",
+    "connection::set_write_capacity", "connection::unread_output",
+    "depth_decoder::api", "depth_decoder::book_side",
+    "fix::fmt_pipe", "fix::fix_checksum", "fix::fix_build", "fix::xor_fold", "fix::fix_sign",
+    "fixcomp::fixcomp_build",
+    "ns::ns_build", "ns::ns_build_heart_beat",
+    "tick_decoder::new", "tick_decoder::remaining", "tick_decoder::tbt_field_count",
+    "xyz::xyz_build", "xyz::xyz_wrap", "xyz::xyz_build_srp_v20", "xyz::xyz_build_soft_token",
+    "xyz::xyz_build_swcr_token_init", "xyz::xyz_build_swcr_token_code_submission", "xyz::xyz_write_string",
+];
+
+/// Every public function of src/protocol is a decoder with its row (and so
+/// its property test, ibx#488) or one of [`NOT_DECODERS`].
+#[test]
+fn every_protocol_decoder_has_a_property_test() {
+    let rows = matrix_ids("decoder");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/protocol");
+    let mut missing = Vec::new();
+    let mut count = 0;
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        let module = path.file_stem().unwrap().to_string_lossy().to_string();
+        if module == "mod" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        // A Windows checkout has CRLF line ends; the tests end the code.
+        let text = text.replace("\r\n", "\n");
+        let code = text.split("#[cfg(test)]\nmod tests").next().unwrap();
+        for line in code.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("pub fn ") else { continue };
+            let name = rest.split(['(', '<']).next().unwrap();
+            let key = format!("{module}::{name}");
+            if NOT_DECODERS.contains(&key.as_str()) {
+                continue;
+            }
+            count += 1;
+            if !rows.iter().any(|r| r.starts_with("protocol::") && r.ends_with(&format!("::{name}")) && r.contains(&format!("::{module}::"))) {
+                missing.push(key);
+            }
+        }
+    }
+    assert!(count > 20, "decoders found: {count}");
+    assert!(missing.is_empty(), "src/protocol decoders with no decoder row in matrix.csv: {missing:?}");
 }

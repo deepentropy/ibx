@@ -2085,3 +2085,43 @@ eclient,set_server_log_level,,no test
 eclient,req_user_info,,live:tests/rust_api_gt.rs::api_gt_suite
 eclient,req_wsh_meta_data,,no test
 eclient,req_wsh_event_data,,no test
+decoder,protocol::ns::ns_recv,NS frame: header and length,src/robustness/decoders.rs::ns_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::ns::ns_parse,NS payload fields,src/robustness/decoders.rs::ns_frames ; src/robustness/decoders.rs::ns_payloads ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::ns::parse_test_request_timestamp,NS test request,src/robustness/decoders.rs::ns_payloads ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::ns::is_ns_text,NS text or XYZ binary,src/robustness/decoders.rs::ns_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::xyz::xyz_parse_response,XYZ login message,src/robustness/decoders.rs::xyz_messages ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::xyz::parse_swcr_token_challenge,XYZ second factor challenge,src/robustness/decoders.rs::xyz_messages ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::fix::fix_parse,FIX tags,src/robustness/decoders.rs::fix_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::fix::is_signed,FIX signature trailer,src/robustness/decoders.rs::fix_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::fix::fix_unsign,FIX signature check,src/robustness/decoders.rs::fix_frames ; src/robustness/decoders.rs::connection_framing ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::fix::fix_read,FIX frame read,src/robustness/decoders.rs::fix_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::fix::fix_read_deadline,FIX frame read with a deadline,src/robustness/decoders.rs::fix_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::fixcomp::fixcomp_decompress,compressed frame: inflate and split,src/robustness/decoders.rs::fixcomp_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::fixcomp::fixcomp_length,compressed frame length,src/robustness/decoders.rs::fixcomp_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::connection::Connection::extract_frames,frame splitter of a link,src/robustness/decoders.rs::connection_framing ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::connection::Connection::unsign,signature check of a link,src/robustness/decoders.rs::connection_framing ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::tick_decoder::decode_ticks_35p,35=P ticks,src/robustness/decoders.rs::tick_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::tick_decoder::decode_ticks_35p_into,35=P ticks,src/robustness/decoders.rs::tick_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::tick_decoder::read_unsigned,35=P bit reader,src/robustness/decoders.rs::tick_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::tick_decoder::decode_tbt_frame,35=E tick-by-tick,src/robustness/decoders.rs::tick_by_tick_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::tick_decoder::read_vlq,35=E numbers,src/robustness/decoders.rs::tick_by_tick_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::tick_decoder::read_vlq_bounded,35=E numbers,src/robustness/decoders.rs::tick_by_tick_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::tick_decoder::vlq_signed,35=E signed numbers,src/robustness/decoders.rs::tick_by_tick_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::tick_decoder::read_hibit_str,35=E texts,src/robustness/decoders.rs::tick_by_tick_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::tick_decoder::rtbar_entries,35=G 5-second bars,src/robustness/decoders.rs::generic_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::tick_decoder::decode_bar_payload,35=G 5-second bar,src/robustness/decoders.rs::generic_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::depth_decoder::decode_depth,35=Y / 35=Z depth,src/robustness/decoders.rs::depth_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,protocol::depth_decoder::depth_body,35=Y / 35=Z body,src/robustness/decoders.rs::depth_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,engine::hot_loop::farm::decode_news,35=G news headlines,src/robustness/decoders.rs::generic_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,engine::hot_loop::farm::parse_exchange_map,35=G exchange map,src/robustness/decoders.rs::generic_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,engine::routing::RoutingTable::parse,35=T routing table,src/robustness/decoders.rs::farm_text_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,control::historical (XML replies),"historical bars, ticks, head timestamps, schedules",src/robustness/decoders.rs::hmds_xml_replies ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,control::histogram / scanner / fundamental / optcalc (XML replies),"histograms, scanner results, fundamentals, option model inputs",src/robustness/decoders.rs::hmds_xml_replies ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,control::news (payloads),news results and articles,src/robustness/decoders.rs::hmds_binary_payloads ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,control::contracts::parse_secdef_records,35=d contract replies,src/robustness/decoders.rs::contract_replies ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,control::contracts::parse_schedule_response,6040=107 schedules,src/robustness/decoders.rs::contract_replies ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,control::contracts::parse_matching_symbols_response,6040=186 matching symbols,src/robustness/decoders.rs::auth_replies ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,control::optparams (answers),6040=5 / 6040=139 option chain answers,src/robustness/decoders.rs::auth_replies ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,gateway::LogonValues::read,logon reply,src/robustness/decoders.rs::logon_replies ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,auth::dh::SecureChannel (server hello and sealed frames),key exchange,src/robustness/decoders.rs::key_exchange_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
+decoder,engine::hot_loop (message handlers),"farm, auth and historical handlers on any message",src/robustness/mutation.rs::recorded_frames_mutated_through_the_engine ; src/robustness/mutation.rs::replays_run_on_with_bad_frames_in_between
