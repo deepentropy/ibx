@@ -1246,3 +1246,93 @@ pub(super) fn phase_concurrent_subscribe_stress(conns: Conns) -> Conns {
     pass!("  PASS\n");
     conns
 }
+
+// ─── Tick-by-tick streams shared between requests, midpoints, past ticks,
+// shared real-time bar routers (ibx#404, ibx#454, ibx#455) ───
+
+/// Needs regular trading hours (SPY quotes and trades). Requests 1 and 2
+/// share one BidAsk stream and must get the same ticks; request 3 gets
+/// midpoints; request 4 (Last, 10 past ticks) gets historical ticks ending
+/// with `done`, then live trades; real-time bar requests 11 and 12 share
+/// one router and must get the same bars.
+pub(super) fn phase_tbt_shared_streams(conns: Conns) -> Conns {
+    phase!("--- Phase: Tick-by-tick shared streams, midpoints, past ticks, shared bar router (SPY) ---");
+
+    let account_id = conns.account_id;
+    let shared = Arc::new(SharedState::new());
+    let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+    let (hot_loop, control_tx) = HotLoop::with_connections(
+        shared.clone(),
+        Some(event_tx),
+        account_id.clone(),
+        conns.farm,
+        conns.ccp,
+        conns.hmds,
+        None,
+    );
+    let tbt = |req_id, tbt_type, number_of_ticks| ControlCommand::SubscribeTbt {
+        req_id, con_id: 756733, symbol: "SPY".into(), exchange: "SMART".into(), sec_type: "STK".into(),
+        tbt_type, number_of_ticks, ignore_size: false, reply_tx: None,
+    };
+    for cmd in [tbt(1, TbtType::BidAsk, 0), tbt(2, TbtType::BidAsk, 0), tbt(3, TbtType::MidPoint, 0), tbt(4, TbtType::Last, 10)] {
+        control_tx.send(cmd).unwrap();
+    }
+    for req_id in [11, 12] {
+        control_tx.send(ControlCommand::SubscribeRealTimeBar {
+            req_id, con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+            what_to_show: "TRADES".into(), use_rth: true,
+        }).unwrap();
+    }
+    let join = run_hot_loop(hot_loop);
+
+    let count = |m: &mut std::collections::HashMap<i64, u32>, r: i64| *m.entry(r).or_default() += 1;
+    let (mut quotes, mut mids, mut trades, mut bars) = Default::default();
+    let mut bad_quotes = 0u32;
+    let mut history: Vec<(usize, bool)> = Vec::new();
+    let mut errors = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        for q in shared.market.drain_tbt_quotes() {
+            count(&mut quotes, q.req_id);
+            if q.bid <= 0 || q.ask < q.bid {
+                bad_quotes += 1;
+            }
+        }
+        for m in shared.market.drain_tbt_mid_points() {
+            count(&mut mids, m.req_id);
+        }
+        for t in shared.market.drain_tbt_trades() {
+            count(&mut trades, t.req_id);
+        }
+        for (req_id, _) in shared.market.drain_real_time_bars() {
+            count(&mut bars, req_id);
+        }
+        for (req_id, data, _, done) in shared.reference.drain_historical_ticks() {
+            if req_id == 4 {
+                let n = match &data {
+                    HistoricalTickData::Last(t) => t.len(),
+                    HistoricalTickData::BidAsk(t) => t.len(),
+                    HistoricalTickData::Midpoint(t) => t.len(),
+                };
+                history.push((n, done));
+            }
+        }
+        errors.extend(shared.market.drain_tbt_errors());
+        errors.extend(shared.reference.drain_historical_errors());
+    }
+    let conns = shutdown_and_reclaim(&control_tx, join, account_id);
+    let get = |m: &std::collections::HashMap<i64, u32>, r: i64| m.get(&r).copied().unwrap_or(0);
+    println!("  quotes 1/2: {}/{} (bad {}), midpoints 3: {}, trades 4: {}, past ticks 4: {:?}, bars 11/12: {}/{}, errors: {:?}",
+        get(&quotes, 1), get(&quotes, 2), bad_quotes, get(&mids, 3), get(&trades, 4), history, get(&bars, 11), get(&bars, 12), errors);
+    check!(errors.is_empty(), "errors: {:?}", errors);
+    check!(get(&quotes, 1) > 0, "no BidAsk tick: market closed?");
+    check_eq!(get(&quotes, 1), get(&quotes, 2), "requests on one stream get the same ticks");
+    check_eq!(bad_quotes, 0, "bid/ask layout: every bid above 0 and below the ask");
+    check!(get(&mids, 3) > 0, "no midpoint");
+    check!(history.last().is_some_and(|h| h.1), "past ticks end with done: {:?}", history);
+    check!(get(&bars, 11) > 0, "no 5-second bar");
+    check_eq!(get(&bars, 11), get(&bars, 12), "requests on one router get the same bars");
+    pass!("  PASS\n");
+    conns
+}
