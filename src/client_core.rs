@@ -2690,8 +2690,8 @@ impl ClientCore {
     /// Set what the fill report says about this execution (ibx#474): the
     /// server's execution id, the time as the reference writes it, tag 100 /
     /// 207 as exchange, the placing client (this client when the report has
-    /// none), modelCode, and the orderRef of the report or of the tracked
-    /// order. Fields the report did not carry keep their value.
+    /// none), modelCode, lastLiquidity, and the orderRef of the report or of
+    /// the tracked order. Fields the report did not carry keep their value.
     pub fn apply_fill_exec(&self, ex: &mut ApiExecution, fe: &crate::bridge::FillExec, order_id: OrderId) {
         if !fe.exec_id.is_empty() {
             ex.exec_id = fe.exec_id.clone();
@@ -2705,6 +2705,12 @@ impl ClientCore {
         ex.client_id = if fe.client_id != 0 { fe.client_id } else { self.client_id.load(Ordering::Relaxed) };
         if !fe.model_code.is_empty() {
             ex.model_code = fe.model_code.clone();
+        }
+        // The report's own: a combo leg's report says how the leg filled,
+        // not the combo's report (captured 30/09/2026, i105_combo_fill:
+        // 851=1 on the combo, 851=2 on each leg, execDetails 2 for the legs).
+        if fe.last_liquidity != 0 {
+            ex.last_liquidity = fe.last_liquidity;
         }
         ex.order_ref = if !fe.order_ref.is_empty() {
             fe.order_ref.clone()
@@ -2824,6 +2830,20 @@ impl ClientCore {
     /// `status`: the tracked order as the caller placed it when this client
     /// placed it, else the order the server reports; the order state of the
     /// latest report (ibx#473). `None` for an order known to neither.
+    /// The view of a filled order no longer tracked shows the placing
+    /// client of the fill's report (6119), as the reference (captured
+    /// 30/09/2026, i105_combo_fill: the leg fills after the combo's Filled
+    /// report, openOrder and orderStatus with clientId 198).
+    pub fn report_client(view: &mut Option<OrderView>, fe: &crate::bridge::FillExec) {
+        if let Some(v) = view.as_mut()
+            && v.client_id == 0
+            && fe.client_id != 0
+        {
+            v.client_id = fe.client_id;
+            v.order.client_id = fe.client_id as i32;
+        }
+    }
+
     pub fn order_view(&self, order_id: OrderId, shared: &SharedState, status: &str) -> Option<OrderView> {
         let tracked = self.open_orders.lock().unwrap().get(&order_id).cloned();
         let info = shared.orders.get_order_info(order_id);

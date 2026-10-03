@@ -326,7 +326,7 @@ impl EClient {
                 avg_price: api_exec.avg_price,
                 order_ref: api_exec.order_ref.clone(),
                 model_code: api_exec.model_code.clone(),
-                last_liquidity: 0,
+                last_liquidity: api_exec.last_liquidity,
                 pending_price_revision: false,
                 ..Default::default()
             };
@@ -346,7 +346,8 @@ impl EClient {
             // The execution first, then openOrder and orderStatus for every
             // report of a known order, as the reference (ibx#473; captured
             // 30/09/2026 on a stock and a combo fill).
-            let view = self.core.order_view(fill.order_id, shared, status);
+            let mut view = self.core.order_view(fill.order_id, shared, status);
+            crate::client_core::ClientCore::report_client(&mut view, &fill_exec);
             let client_id = match &view {
                 Some(view) => {
                     self.send_open_order(py, fill.order_id, view)?;
