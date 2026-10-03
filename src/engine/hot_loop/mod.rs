@@ -715,7 +715,9 @@ impl HotLoop {
         if num_rows <= 0 {
             return refuse(&self.shared, 321, invalid("Market depth rows requested must be greater than zero."));
         }
-        if self.farm.has_depth_req(req_id, is_smart_depth) {
+        if self.farm.has_depth_req(req_id, is_smart_depth)
+            || (is_smart_depth && self.context.depth_gathers.iter().any(|g| g.req_id == req_id))
+        {
             return refuse(&self.shared, 322, "Error processing request.-'bR' : cause - Duplicate ticker id".into());
         }
         let contracts = self.farm.depth_contracts();
@@ -734,38 +736,146 @@ impl HotLoop {
                 return;
             }
         }
-        // Its sizes count in its round lot when the session does, as its
-        // top of book (#451).
-        let lot = if self.context.scale_us_lots { self.context.round_lots.get(&con_id).copied().unwrap_or(1) } else { 1 };
-        let mut l2 = false;
-        let mut entries: Vec<(pool::FarmId, String, bool)> = Vec::new();
         if self.farm.routing.is_none() {
             // No routing table: the book of the exchange on the primary farm.
-            entries.push((PRIMARY_MD, farm::routing_exchange(&exchange, &st).to_string(), true));
-        } else {
-            let components = self.context.smart_components.get(&con_id).cloned().unwrap_or_default();
-            if is_smart_depth && !components.is_empty() && st == "STK" {
-                for exch in components {
-                    if let Some(farm_id) = self.depth_route(con_id, &exch, &st) {
-                        entries.push((farm_id, exch, true));
-                    } else if let Some(route) = self.farm.routing.as_ref()
-                        .and_then(|t| t.lookup(&exch, -1, &st, crate::engine::routing::DataType::Top, "*")).cloned()
-                    {
-                        let farm_id = self.md_farm_of(&route);
-                        entries.push((farm_id, exch, false));
-                    }
-                }
-            } else if let Some(farm_id) = self.depth_route(con_id, &exchange, &st) {
-                let book_exchange = farm::routing_exchange(&exchange, &st).to_string();
-                // A book with the market-maker service is written with
-                // updateMktDepthL2, as the reference (#451).
-                l2 = self.has_deep2(con_id, &book_exchange, &st);
-                entries.push((farm_id, book_exchange, true));
-            } else {
-                return refuse(&self.shared, 10092, "Deep market data is not supported for this combination of security type/exchange".into());
-            }
+            let spec = farm::DepthSpec::Book { farm: PRIMARY_MD, exchange: farm::routing_exchange(&exchange, &st).to_string() };
+            let lot = self.depth_lot(con_id);
+            let msgs = self.farm.start_depth(req_id, con_id, &st, is_smart_depth, num_rows, lot, false, vec![spec], None, &self.shared);
+            return self.send_farm_messages(msgs);
         }
-        let msgs = self.farm.start_depth(req_id, con_id, &st, is_smart_depth, num_rows, lot, l2, entries);
+        let valid = self.context.valid_exchanges.get(&con_id).cloned().unwrap_or_default();
+        if is_smart_depth && !valid.is_empty() && st == "STK" {
+            return self.gather_depth_components(req_id, con_id, st, num_rows, valid);
+        }
+        let Some(farm_id) = self.depth_route(con_id, &exchange, &st) else {
+            return refuse(&self.shared, 10092, "Deep market data is not supported for this combination of security type/exchange".into());
+        };
+        if is_smart_depth {
+            // SmartDepth that the contract does not allow: the reference
+            // hands the book to its single-exchange requests, where this
+            // request is not (`jextend.dA.c(dy)` -> `jextend.dK.a(int,dy,false)`
+            // finds no entry in its single map): the request stays, with
+            // nothing on the wire and no error.
+            log::warn!("SmartDepth req {}: not allowed for this contract; nothing is sent, as the reference", req_id);
+            let msgs = self.farm.start_depth(req_id, con_id, &st, true, num_rows, 1, false, Vec::new(), None, &self.shared);
+            return self.send_farm_messages(msgs);
+        }
+        let book_exchange = farm::routing_exchange(&exchange, &st).to_string();
+        // A book with the market-maker service is written with
+        // updateMktDepthL2, as the reference (#451).
+        let l2 = self.has_deep2(con_id, &book_exchange, &st);
+        let lot = self.depth_lot(con_id);
+        let description = self.context.depth_descriptions.get(&con_id).cloned();
+        let spec = farm::DepthSpec::Book { farm: farm_id, exchange: book_exchange };
+        let msgs = self.farm.start_depth(req_id, con_id, &st, is_smart_depth, num_rows, lot, l2, vec![spec],
+            description.as_deref(), &self.shared);
+        self.send_farm_messages(msgs);
+    }
+
+    /// The round lot of a contract's depth sizes: its round lot when the
+    /// session counts in round lots, as its top of book (#451).
+    fn depth_lot(&self, con_id: i64) -> i64 {
+        if self.context.scale_us_lots { self.context.round_lots.get(&con_id).copied().unwrap_or(1) } else { 1 }
+    }
+
+    /// The farm of the top-of-book route of a contract on an exchange
+    /// (#452).
+    fn top_route_farm(&mut self, con_id: i64, exchange: &str, sec_type: &str) -> Option<pool::FarmId> {
+        let route_exchange = farm::routing_exchange(exchange, sec_type);
+        let group = self.agg_group_for(con_id, route_exchange);
+        let route = self.farm.routing.as_ref()?
+            .lookup(route_exchange, group, sec_type, crate::engine::routing::DataType::Top, "*")?
+            .clone();
+        Some(self.md_farm_of(&route))
+    }
+
+    /// SmartDepth (#452): the contract is looked up on each of its valid
+    /// exchanges first, as the reference does (`jextend.d0.c(dy)`); its
+    /// books and tops go out once every lookup answered, or after 10 s
+    /// (`start_gathered_depth`).
+    fn gather_depth_components(&mut self, req_id: ReqId, con_id: i64, sec_type: String, num_rows: i32, exchanges: Vec<String>) {
+        let ts = chrono_free_timestamp();
+        let con = con_id.to_string();
+        let mut components = Vec::with_capacity(exchanges.len());
+        for exchange in exchanges {
+            let lookup = self.context.combos.next_req("SecDefReqMsgReqByConid");
+            let wire = farm::routing_exchange(&exchange, &sec_type).to_string();
+            if let Some(conn) = self.ccp_conn.as_mut().filter(|_| !self.ccp.disconnected) {
+                let _ = conn.send_fix(&[
+                    (fix::TAG_MSG_TYPE, "c"),
+                    (fix::TAG_SENDING_TIME, &ts),
+                    (320, &lookup),
+                    (321, "2"),
+                    (146, "1"),
+                    (6008, &con),
+                    (6004, &wire),
+                ]);
+                self.hb.last_ccp_sent = Instant::now();
+            }
+            components.push(farm::DepthComponent { exchange, lookup, definition: farm::ComponentDefinition::Waiting });
+        }
+        log::info!("SmartDepth req {}: {} component definitions asked", req_id, components.len());
+        self.context.depth_gathers.push(farm::DepthGather {
+            req_id, con_id, sec_type, num_rows, components, deadline: Instant::now() + farm::DEPTH_GATHER_WAIT,
+        });
+    }
+
+    /// SmartDepth requests whose component lookups all answered, or whose
+    /// wait is over (#452), go out.
+    fn start_gathered_depth(&mut self) {
+        if self.context.depth_gathers.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.context.depth_gathers).into_iter()
+            .partition(|g| g.deadline <= now || g.components.iter().all(|c| c.definition != farm::ComponentDefinition::Waiting));
+        self.context.depth_gathers = waiting;
+        for g in ready {
+            self.start_smart_depth(g);
+        }
+    }
+
+    /// The books and tops of a SmartDepth request, as the reference sorts
+    /// its components (`jextend.d1.process`, `jextend.d0.b(dy)`): a
+    /// component found with a depth route gets a book; else one with a top
+    /// route gets a top of book, unless it is the smart-routing name or its
+    /// order types hold NOT2D; the others nothing. The LAST entry of a top
+    /// of book goes to BEST when SMART is a valid exchange (else to the
+    /// listing exchange), except on an overnight venue, which keeps its own
+    /// (`jclient.is.a(pa,List,List,..)@531-738`, `jmdclient.aP.a(dy,TopQuote,..)`;
+    /// captured 28/09/2026: `207=ISE|264=442` with `207=BEST|264=443`,
+    /// `207=IBEOS|264=442` with `207=IBEOS|264=443`).
+    fn start_smart_depth(&mut self, g: farm::DepthGather) {
+        let st = g.sec_type.as_str();
+        let has_smart = g.components.iter().any(|c| c.exchange == "SMART");
+        let listing = self.context.listing_exchanges.get(&g.con_id).cloned();
+        let last_default = if has_smart {
+            self.top_route_farm(g.con_id, "SMART", st).map(|f| (f, "BEST".to_string()))
+        } else {
+            listing.and_then(|l| self.top_route_farm(g.con_id, &l, st).map(|f| (f, l)))
+        };
+        let mut specs = Vec::new();
+        let mut tops = Vec::new();
+        for c in &g.components {
+            let farm::ComponentDefinition::Found { not2d } = c.definition else { continue };
+            if let Some(farm_id) = self.depth_route(g.con_id, &c.exchange, st) {
+                specs.push(farm::DepthSpec::Book { farm: farm_id, exchange: farm::routing_exchange(&c.exchange, st).to_string() });
+                continue;
+            }
+            if not2d || c.exchange == "SMART" {
+                continue;
+            }
+            let Some(farm_id) = self.top_route_farm(g.con_id, &c.exchange, st) else { continue };
+            let last = if farm::overnight_venue(&c.exchange) {
+                Some((farm_id, c.exchange.clone()))
+            } else {
+                last_default.clone()
+            };
+            tops.push(farm::DepthSpec::Top { farm: farm_id, exchange: c.exchange.clone(), last });
+        }
+        specs.extend(tops);
+        let lot = self.depth_lot(g.con_id);
+        let msgs = self.farm.start_depth(g.req_id, g.con_id, st, true, g.num_rows, lot, false, specs, None, &self.shared);
         self.send_farm_messages(msgs);
     }
 
@@ -800,6 +910,8 @@ impl HotLoop {
         self.send_md_resolved();
         farm::sweep_round_lot_lookups(&mut self.context);
         self.send_lot_ready();
+        // SmartDepth requests whose components answered (#452).
+        self.start_gathered_depth();
         // Depth books asked again after a reset (#451).
         let msgs = self.farm.sweep_depth(&self.shared);
         if !msgs.is_empty() {
@@ -1500,6 +1612,13 @@ impl HotLoop {
                     self.route_depth_subscribe(req_id, con_id, exchange, sec_type, num_rows, is_smart_depth);
                 }
                 ControlCommand::UnsubscribeDepth { req_id } => {
+                    // A SmartDepth request still waiting for its
+                    // components' definitions has nothing on the wire.
+                    if let Some(pos) = self.context.depth_gathers.iter().position(|g| g.req_id == req_id) {
+                        self.context.depth_gathers.remove(pos);
+                        self.shared.market.purge_depth_updates(req_id);
+                        continue;
+                    }
                     match self.farm.stop_depth(req_id) {
                         // An unknown request id: 310, as the reference.
                         None => self.shared.orders.push_order_error(i64::from(req_id), 310,
@@ -5365,6 +5484,9 @@ mod depth_tests {
         IEX,STK,Top|Deep,-1,*,cdc1.example,4000,usfarm;\
         MEMX,STK,Top,-1,*,cdc1.example,4000,usfarm;\
         BEST,STK,Top,1,*,cdc1.example,4000,usfarm;\
+        PSX,STK,Top,-1,*,cdc1.example,4000,usfarm;\
+        TPLUS0,STK,Top,-1,*,ndc1.example,4000,usfarm.nj;\
+        IBEOS,STK,Top,-1,*,ndc1.example,4000,usfarm.nj;\
         CME,FUT,Top|Deep,-1,*,cdc1.example,4000,usfuture";
 
     fn loopback() -> (Connection, std::net::TcpStream) {
@@ -5412,7 +5534,8 @@ mod depth_tests {
         for con_id in [265598, 272093, 4391, 9999, 815824267] {
             engine.context.agg_groups.insert(con_id, if con_id == 815824267 { -1 } else { 1 });
         }
-        engine.context.smart_components.insert(265598, vec!["NASDAQ".into(), "MEMX".into(), "IEX".into(), "ZZZ".into()]);
+        engine.context.valid_exchanges.insert(265598, ["SMART", "NASDAQ", "MEMX", "IEX", "ZZZ", "TPLUS0", "PSX", "IBEOS"]
+            .into_iter().map(String::from).collect());
         let (tx, rx) = crossbeam_channel::bounded(16);
         engine.set_control_rx(rx);
         (engine, shared, side, tx)
@@ -5476,33 +5599,394 @@ mod depth_tests {
         tx.send(ControlCommand::UnsubscribeDepth { req_id: 10 }).unwrap();
         engine.poll_once();
         assert_eq!(errors(&shared), [
-            "10:354:Requested market data is not subscribed.".to_string(),
+            "10:354:Requested market data is not subscribed. Check API status by selecting the Account menu then under \
+                Management choose Market Data Subscription Manager and/or availability of delayed data.".to_string(),
             "10:310:Can't find the subscribed market depth with tickerId:10".to_string(),
         ]);
     }
 
-    // #452: SmartDepth takes the contract's SMART component exchanges: a
-    // book where a depth route exists, the top of book where only a top
-    // route exists, nothing for the others. The depth acknowledgement of a
-    // component maps its tag to the client's request.
+    // #452: SmartDepth takes the contract's valid exchanges: each is looked
+    // up first (by conId and exchange, the reference's lookup names); then
+    // a book where a depth route exists, the top of book where only a top
+    // route exists (not when its order types hold NOT2D, not for SMART),
+    // nothing for the others. A top of book's LAST entry goes to BEST,
+    // once per request (the others take a farm id only); an overnight
+    // venue keeps its own. The depth acknowledgement of a component maps
+    // its tag to the client's request.
     #[test]
     fn smart_depth_from_the_components() {
         let (mut engine, _shared, mut side, tx) = engine();
+        let (ccp, mut ccp_side) = loopback();
+        engine.ccp_conn = Some(ccp);
+        let nj = nj_farm(&mut engine);
         tx.send(depth(11, 265598, "SMART", "STK", 5, true)).unwrap();
         engine.poll_once();
+        assert!(sent(&mut side).is_empty(), "nothing before the definitions");
+        let lookups = ccp_lookups(&mut ccp_side);
+        assert_eq!(lookups.iter().map(|(_, e)| e.as_str()).collect::<Vec<_>>(),
+            ["BEST", "NASDAQ", "MEMX", "IEX", "ZZZ", "TPLUS0", "PSX", "IBEOS"]);
+        assert!(lookups.iter().all(|(n, _)| n.starts_with("SecDefReqMsgReqByConid")));
+        for (name, exch) in &lookups {
+            let types = if exch == "TPLUS0" { "LMT/3,NOT2D/5" } else { "LMT/3" };
+            let msg = if exch == "ZZZ" {
+                format!("8=FIX.4.1\x0135=d\x01320={name}\x01322=*\x01323=4\x01146=0\x01")
+            } else {
+                format!("8=FIX.4.1\x0135=d\x01320={name}\x01322=*\x01323=4\x0155=AAPL\x01167=STK\x01207={exch}\x016008=265598\x01\
+                    146=0\x016344=1\x016008=265598\x016432=1\x016430=1/STK\x016431={types}\x01")
+            };
+            engine.inject_ccp_message(msg.as_bytes());
+        }
+        engine.start_gathered_depth();
         let msgs = sent(&mut side);
-        assert_eq!(msgs.len(), 1, "{msgs:?}");
-        let m = &msgs[0];
-        assert!(m.contains("|146=4|"), "{m}");
-        assert!(m.contains("|207=NASDAQ|167=CS|264=0|9830=1|"), "{m}");
-        assert!(m.contains("|207=IEX|167=CS|264=0|9830=1|"), "{m}");
-        assert!(m.contains("|207=MEMX|167=CS|264=442|6088=Socket|9830=1|") && m.contains("|207=MEMX|167=CS|264=443|"), "{m}");
-        assert!(!m.contains("ZZZ"), "{m}");
-        let first: u32 = m.split("|262=").nth(1).unwrap().split('|').next().unwrap().parse().unwrap();
+        assert_eq!(msgs.len(), 3, "{msgs:?}");
+        assert!(msgs[0].contains("|146=1|") && msgs[0].contains("|207=NASDAQ|167=CS|264=0|9830=1|"), "{}", msgs[0]);
+        assert!(msgs[1].contains("|146=1|") && msgs[1].contains("|207=IEX|167=CS|264=0|9830=1|"), "{}", msgs[1]);
+        let tops = &msgs[2];
+        assert!(tops.contains("|146=3|"), "{tops}");
+        assert!(tops.contains("|207=MEMX|167=CS|264=442|6088=Socket|9830=1|") && tops.contains("|207=BEST|167=CS|264=443|6088=Socket|9830=1|")
+            && tops.contains("|207=PSX|167=CS|264=442|6088=Socket|9830=1|"), "{tops}");
+        assert!(!tops.contains("ZZZ") && !tops.contains("TPLUS0") && !tops.contains("207=IBEOS"), "{tops}");
+        // The ids: MEMX, BEST, then PSX after the one its LAST took.
+        let ids: Vec<u32> = tops.split("|262=").skip(1).map(|p| p.split('|').next().unwrap().parse().unwrap()).collect();
+        assert_eq!((ids[1] - ids[0], ids[2] - ids[1]), (1, 1), "{tops}");
+        // The overnight venue on its own farm, both entries on the venue,
+        // after the id PSX's LAST took.
+        let req = engine.farm.depth_reqs.iter().find(|r| r.req_id == 11).unwrap();
+        let on_nj: Vec<(&str, &str, u32)> = req.entries.iter().filter(|e| e.farm == nj)
+            .map(|e| (e.exchange.as_str(), e.req_type, e.farm_req)).collect();
+        assert_eq!(on_nj, [("IBEOS", "442", ids[2] + 2), ("IBEOS", "443", ids[2] + 3)]);
+        let first: u32 = msgs[0].split("|262=").nth(1).unwrap().split('|').next().unwrap().parse().unwrap();
         engine.inject_farm_message(format!("8=O\x0135=Q\x01777,{first},0.01,0,0").as_bytes());
         let req = engine.farm.depth_reqs.iter().find(|r| r.req_id == 11).unwrap();
         assert!(req.smart && req.entries.iter().any(|e| e.server_tag == Some(777) && e.farm_req == first && e.farm == pool::PRIMARY_MD));
     }
+
+    // #452: a cancel while the components are looked up sends nothing; a
+    // lookup with no answer in 10 s is left out.
+    #[test]
+    fn smart_depth_cancel_while_looking_up() {
+        let (mut engine, shared, mut side, tx) = engine();
+        let (ccp, mut ccp_side) = loopback();
+        engine.ccp_conn = Some(ccp);
+        tx.send(depth(12, 265598, "SMART", "STK", 5, true)).unwrap();
+        engine.poll_once();
+        assert_eq!(ccp_lookups(&mut ccp_side).len(), 8);
+        tx.send(depth(12, 265598, "SMART", "STK", 5, true)).unwrap();
+        tx.send(ControlCommand::UnsubscribeDepth { req_id: 12 }).unwrap();
+        engine.poll_once();
+        assert_eq!(errors(&shared), ["12:322:Error processing request.-'bR' : cause - Duplicate ticker id"]);
+        assert!(engine.context.depth_gathers.is_empty() && sent(&mut side).is_empty());
+
+        tx.send(depth(13, 265598, "SMART", "STK", 5, true)).unwrap();
+        engine.poll_once();
+        let lookups = ccp_lookups(&mut ccp_side);
+        let (name, _) = lookups.iter().find(|(_, e)| e == "IEX").unwrap();
+        engine.inject_ccp_message(format!("8=FIX.4.1\x0135=d\x01320={name}\x01322=*\x01323=4\x0155=AAPL\x01167=STK\x01\
+            207=IEX\x016008=265598\x01146=0\x01").as_bytes());
+        engine.start_gathered_depth();
+        assert!(sent(&mut side).is_empty(), "waits for the other lookups");
+        engine.context.depth_gathers[0].deadline = Instant::now();
+        engine.start_gathered_depth();
+        let msgs = sent(&mut side);
+        assert!(msgs.len() == 1 && msgs[0].contains("|146=1|") && msgs[0].contains("|207=IEX|167=CS|264=0|"), "{msgs:?}");
+    }
+
+    // #452: a second request on a book already on the wire shares it, as
+    // the reference shares its book: no new entry; the book the farm sent
+    // is given at once; one cancel leaves the book to the other request,
+    // the last one cancels it. A book the farm refused ends a new single
+    // request at once, with the contract in the text.
+    #[test]
+    fn requests_share_a_book() {
+        let (mut engine, shared, mut side, tx) = engine();
+        engine.context.depth_descriptions.insert(265598, "AAPL NASDAQ.NMS".into());
+        tx.send(depth(20, 265598, "IEX", "STK", 5, false)).unwrap();
+        engine.poll_once();
+        assert_eq!(sent(&mut side).len(), 1);
+        let id = engine.farm.next_md_req_id - 1;
+        engine.inject_farm_message(format!("8=O\x0135=Q\x01900,{id},0.01,0,0").as_bytes());
+        // Insert at 0: bid price 10.00, bid size 3.
+        engine.inject_farm_message(&depth_msg(900, &[0x00, 0x00, 0x05, 0x03, 0xE8, 0x80, 0x03]));
+        assert_eq!(shared.market.drain_depth_updates().len(), 1);
+        tx.send(depth(21, 265598, "IEX", "STK", 5, false)).unwrap();
+        engine.poll_once();
+        assert!(sent(&mut side).is_empty(), "no new entry");
+        let rows = shared.market.drain_depth_updates();
+        assert_eq!(rows.iter().map(|u| (u.req_id, u.position, u.operation, u.side, u.price)).collect::<Vec<_>>(), [(21, 0, 0, 1, 10.0)]);
+        // Insert at 0: bid price 11.00: both requests.
+        engine.inject_farm_message(&depth_msg(900, &[0x00, 0x00, 0x05, 0x04, 0x4C, 0x80, 0x03]));
+        let mut ids: Vec<i64> = shared.market.drain_depth_updates().iter().map(|u| u.req_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids, [20, 21]);
+        tx.send(ControlCommand::UnsubscribeDepth { req_id: 20 }).unwrap();
+        engine.poll_once();
+        assert!(sent(&mut side).is_empty(), "the other request has the book");
+        tx.send(ControlCommand::UnsubscribeDepth { req_id: 21 }).unwrap();
+        engine.poll_once();
+        let msgs = sent(&mut side);
+        assert!(msgs.len() == 1 && msgs[0].contains(&format!("|263=2|146=1|262={id}|6008=265598|207=IEX|")), "{msgs:?}");
+
+        // A SmartDepth request keeps a component book the farm refused; a
+        // new single request on it ends at once.
+        let msgs = engine.farm.start_depth(22, 265598, "STK", true, 5, 1, false,
+            vec![farm::DepthSpec::Book { farm: pool::PRIMARY_MD, exchange: "IEX".into() }], None, &shared);
+        engine.send_farm_messages(msgs);
+        assert_eq!(sent(&mut side).len(), 1);
+        let id = engine.farm.next_md_req_id - 1;
+        engine.inject_farm_message(&fix::fix_build(&[(35, "3"), (262, &id.to_string()), (58, "Error&IEX/STK/Deep"), (6763, "114,210")], 1));
+        assert!(sent(&mut side).is_empty(), "a refused component stays");
+        assert_eq!(errors(&shared), ["22:2152:Need additional market data permissions - Depth: IEX; "]);
+        tx.send(depth(23, 265598, "IEX", "STK", 5, false)).unwrap();
+        engine.poll_once();
+        assert!(sent(&mut side).is_empty(), "the SmartDepth request has the book");
+        assert_eq!(errors(&shared), ["23:10089:Requested market data requires additional subscription for API. See link in \
+            'Market Data Connections' dialog for more details.AAPL NASDAQ.NMS/DEEP"]);
+        tx.send(ControlCommand::UnsubscribeDepth { req_id: 22 }).unwrap();
+        engine.poll_once();
+        let msgs = sent(&mut side);
+        assert!(msgs.len() == 1 && msgs[0].contains(&format!("|263=2|146=1|262={id}|")), "{msgs:?}");
+    }
+
+    // #452: SmartDepth that the contract does not allow (here a future):
+    // the reference keeps the request but sends nothing and gives no error
+    // (its single-exchange path does not find the request).
+    #[test]
+    fn smart_depth_not_allowed_sends_nothing() {
+        let (mut engine, shared, mut side, tx) = engine();
+        tx.send(depth(30, 815824267, "CME", "FUT", 5, true)).unwrap();
+        tx.send(depth(30, 815824267, "CME", "FUT", 5, true)).unwrap();
+        engine.poll_once();
+        assert!(sent(&mut side).is_empty());
+        assert_eq!(errors(&shared), ["30:322:Error processing request.-'bR' : cause - Duplicate ticker id"]);
+        tx.send(ControlCommand::UnsubscribeDepth { req_id: 30 }).unwrap();
+        engine.poll_once();
+        assert!(sent(&mut side).is_empty() && errors(&shared).is_empty());
+    }
+
+    /// The farm of the overnight venues, opened on demand, with a link.
+    fn nj_farm(engine: &mut HotLoop) -> pool::FarmId {
+        let nj = engine.pool.ensure("usfarm.nj", "ndc1.example", FarmKind::MarketData, Instant::now());
+        let (conn, peer) = loopback();
+        engine.pool.get_mut(nj).unwrap().conn = Some(conn);
+        std::mem::forget(peer);
+        nj
+    }
+
+    /// The definition lookups sent on the CCP link: (name, exchange).
+    fn ccp_lookups(server: &mut std::net::TcpStream) -> Vec<(String, String)> {
+        use std::io::Read;
+        server.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = server.read(&mut chunk) {
+            if n == 0 { break; }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let text = String::from_utf8_lossy(&buf).to_string();
+        let mut out = Vec::new();
+        let mut name = None;
+        for field in text.split('\x01') {
+            if let Some(v) = field.strip_prefix("320=") {
+                name = Some(v.to_string());
+            } else if let (Some(v), Some(n)) = (field.strip_prefix("6004="), name.as_ref()) {
+                out.push((n.clone(), v.to_string()));
+                name = None;
+            }
+        }
+        out
+    }
+
+    // #452: the reference's SmartDepth requests replayed from the frames it
+    // sent and received (AAPL then AXTI, 28/09/2026, paper): the component
+    // lookups answered with the reference's definitions, the farm's
+    // acknowledgements and refusals of the engine's entries in the
+    // reference's order; the engine sends the reference's books and tops
+    // and gives the warning 2152 the reference gave, word for word. AAPL's
+    // BEST LAST entry was held by another client of the reference, so the
+    // reference did not send it; the engine does.
+    #[test]
+    fn smart_depth_status_as_the_reference() {
+        use base64::Engine as _;
+        let b64 = |v: &serde_json::Value| base64::engine::general_purpose::STANDARD.decode(v.as_str().unwrap()).unwrap();
+        let path = format!("{}/tests/fixtures/gw1040/scenarios/20260928/depth_smart_status.jsonl", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(path).unwrap();
+        let recs: Vec<serde_json::Value> = text.lines().skip(1).map(|l| serde_json::from_str(l).unwrap()).collect();
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.set_farm_name("usfarm".into());
+        engine.set_user_book(true);
+        let (farm, mut side) = loopback();
+        engine.farm_conn = Some(farm);
+        let (ccp, mut ccp_side) = loopback();
+        engine.ccp_conn = Some(ccp);
+        engine.set_routing_table(TableKind::MarketData, CAPTURED_US_TABLE);
+        let nj = engine.pool.ensure("usfarm.nj", "ndc1.ibllc.com", FarmKind::MarketData, Instant::now());
+        let (nj_conn, mut nj_side) = loopback();
+        engine.pool.get_mut(nj).unwrap().conn = Some(nj_conn);
+        let (tx, rx) = crossbeam_channel::bounded(16);
+        engine.set_control_rx(rx);
+        let fields = |r: &serde_json::Value| -> Vec<(String, String)> {
+            let raw = b64(&r["raw_b64"]);
+            String::from_utf8_lossy(&raw).split('\x01').filter_map(|f| f.split_once('=')).map(|(t, v)| (t.to_string(), v.to_string())).collect()
+        };
+        let get = |f: &[(String, String)], tag: &str| f.iter().find(|(t, _)| t == tag).map(|(_, v)| v.clone()).unwrap_or_default();
+        // The entries of each farm message: (exchange, request type).
+        let entries_of = |msg: &str| -> Vec<(String, String)> {
+            let mut out = Vec::new();
+            let mut exch = String::new();
+            for f in msg.split('|') {
+                if let Some(v) = f.strip_prefix("207=") { exch = v.to_string(); }
+                if let Some(v) = f.strip_prefix("264=") { out.push((exch.clone(), v.to_string())); }
+            }
+            out
+        };
+        let mut ours_2152: Vec<String> = Vec::new();
+        let mut theirs_2152: Vec<String> = Vec::new();
+        // Recorded (conn, farm id) -> (exchange, request type).
+        let mut recorded: std::collections::HashMap<(String, String), (String, String)> = std::collections::HashMap::new();
+        for r in &recs {
+            if r["leg"] == "fix_out" && r["msg_type"] == "V" {
+                let f = fields(r);
+                let mut id = String::new();
+                let mut exch = String::new();
+                for (t, v) in &f {
+                    match t.as_str() {
+                        "262" => id = v.clone(),
+                        "207" => exch = v.clone(),
+                        "264" => { recorded.insert((r["conn"].as_str().unwrap().to_string(), id.clone()), (exch.clone(), v.clone())); }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut k = 0;
+        while k < recs.len() {
+            let r = &recs[k];
+            let (leg, conn, name) = (r["leg"].as_str().unwrap(), r["conn"].as_str().unwrap_or(""), r["msg_name"].as_str().unwrap_or(""));
+            if leg == "api_out" && name == "REQ_MKT_DEPTH" {
+                let f = proto_fields(&b64(&r["body_b64"]));
+                let req_id = f.iter().find(|x| x.0 == 1).unwrap().1 as ReqId;
+                let num_rows = f.iter().find(|x| x.0 == 3).map_or(100, |x| x.1 as i32);
+                // The contract: the conId of the reference's lookups that follow.
+                let first = recs[k..].iter().find(|x| x["leg"] == "fix_in" && x["msg_type"] == "d").unwrap();
+                let con_id: i64 = get(&fields(first), "6008").parse().unwrap();
+                // The engine knows the contract from its definition.
+                let best = recs[k..].iter().find(|x| x["leg"] == "fix_in" && x["msg_type"] == "d" && get(&fields(x), "207") == "BEST").unwrap();
+                farm::note_definition(&mut engine.context, con_id, &b64(&best["raw_b64"]));
+                // As a refusal names it (captured 25/09/2026: "...AAPL NASDAQ.NMS/DEEP").
+                if con_id == 265598 {
+                    assert_eq!(engine.context.depth_descriptions[&con_id], "AAPL NASDAQ.NMS");
+                }
+                tx.send(depth(req_id, con_id, "SMART", "STK", num_rows, true)).unwrap();
+                engine.poll_once();
+                let ours: std::collections::HashMap<String, String> = ccp_lookups(&mut ccp_side).into_iter().map(|(n, e)| (e, n)).collect();
+                assert_eq!(ours.len(), 27, "one lookup per valid exchange");
+                // The reference's definitions, under the engine's names.
+                let mut j = k + 1;
+                while j < recs.len() && recs[j]["msg_name"] != "REQ_MKT_DEPTH" {
+                    let x = &recs[j];
+                    if x["leg"] == "fix_in" && x["msg_type"] == "d" {
+                        let raw = String::from_utf8_lossy(&b64(&x["raw_b64"])).to_string();
+                        let theirs = get(&fields(x), "320");
+                        let ours_name = &ours[&get(&fields(x), "207")];
+                        engine.inject_ccp_message(raw.replace(&format!("320={theirs}\x01"), &format!("320={ours_name}\x01")).as_bytes());
+                    }
+                    j += 1;
+                }
+                engine.start_gathered_depth();
+                // The engine's books and tops, as the reference's.
+                let mut ours_sent: Vec<(String, String)> = sent(&mut side).iter().chain(sent(&mut nj_side).iter()).flat_map(|m| entries_of(m)).collect();
+                let mut theirs_sent: Vec<(String, String)> = recs[k..j].iter()
+                    .filter(|x| x["leg"] == "fix_out" && x["msg_type"] == "V" && get(&fields(x), "263") == "1")
+                    .flat_map(|x| entries_of(&String::from_utf8_lossy(&b64(&x["raw_b64"])).replace('\x01', "|")))
+                    .collect();
+                if !theirs_sent.iter().any(|(e, t)| e == "BEST" && t == "443") {
+                    theirs_sent.push(("BEST".into(), "443".into()));
+                }
+                ours_sent.sort();
+                theirs_sent.sort();
+                assert_eq!(ours_sent, theirs_sent, "request {req_id}");
+                k += 1;
+                continue;
+            }
+            if leg == "api_out" && name == "CANCEL_MKT_DEPTH" {
+                let f = proto_fields(&b64(&r["body_b64"]));
+                tx.send(ControlCommand::UnsubscribeDepth { req_id: f.iter().find(|x| x.0 == 1).unwrap().1 as ReqId }).unwrap();
+                engine.poll_once();
+                let mut ours_sent: Vec<(String, String)> = sent(&mut side).iter().chain(sent(&mut nj_side).iter())
+                    .flat_map(|m| entries_of(m)).collect();
+                ours_sent.sort();
+                ours_sent.dedup();
+                assert_eq!(ours_sent.len(), 6 + 15 + 3, "every book, top and LAST entry cancelled: {ours_sent:?}");
+            } else if leg == "api_in" && name == "ERR_MSG" {
+                let f = proto_fields(&b64(&r["body_b64"]));
+                if f.iter().any(|x| x.0 == 3 && x.1 == 2152) {
+                    theirs_2152.push(String::from_utf8(f.iter().find(|x| x.0 == 4).unwrap().2.clone()).unwrap());
+                }
+            } else if leg == "fix_in" && (conn == "usfarm" || conn == "usfarm.nj") && (r["msg_type"] == "Q" || r["msg_type"] == "3") {
+                engine.farm.rx_farm = if conn == "usfarm" { pool::PRIMARY_MD } else { nj };
+                let f = fields(r);
+                let raw = String::from_utf8_lossy(&b64(&r["raw_b64"])).to_string();
+                let theirs_id = if r["msg_type"] == "3" {
+                    get(&f, "262")
+                } else {
+                    raw.split("35=Q\x01").nth(1).unwrap().split(',').nth(1).unwrap().to_string()
+                };
+                // The engine's entry of the reference's id.
+                let Some((exch, kind)) = recorded.get(&(conn.to_string(), theirs_id.clone())) else { k += 1; continue };
+                let ours_id = engine.farm.depth_reqs.iter().flat_map(|q| q.entries.iter())
+                    .find(|e| e.live && &e.exchange == exch && e.req_type == kind.as_str())
+                    .map(|e| e.farm_req.to_string());
+                if let Some(id) = ours_id {
+                    if r["msg_type"] == "3" {
+                        engine.inject_farm_message(&fix::fix_build(&[(35, "3"), (262, &id), (58, &get(&f, "58")), (6763, &get(&f, "6763"))], 1));
+                    } else {
+                        let body = raw.split("35=Q\x01").nth(1).unwrap().split("\x018349=").next().unwrap().to_string();
+                        let mut parts: Vec<String> = body.split(',').map(String::from).collect();
+                        parts[1] = id;
+                        engine.inject_farm_message(format!("8=O\x0135=Q\x01{}\x01", parts.join(",")).as_bytes());
+                    }
+                }
+                engine.farm.rx_farm = pool::PRIMARY_MD;
+            }
+            for (_, code, text) in shared.orders.drain_order_errors() {
+                if code == 2152 { ours_2152.push(text); }
+            }
+            k += 1;
+        }
+        assert_eq!(theirs_2152.len(), 2);
+        assert_eq!(ours_2152, theirs_2152);
+    }
+
+    /// The US stock rows of the market data routing table of the session
+    /// of 28/09/2026 (the exchanges of AAPL's and AXTI's valid exchanges).
+    const CAPTURED_US_TABLE: &str = "AMEX,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        ARCA,STK,Top|Deep,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        BATS,STK,Top|Deep,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        BEST,STK,AggDeep,1,OTCBB,cdc1.ibllc.com,4000,usfarm;\
+        BEST,STK,AggDeep,1,PINK,cdc1.ibllc.com,4000,usfarm;\
+        BEST,STK,Top,1,*,cdc1.ibllc.com,4000,usfarm;\
+        BEX,STK,Top|Deep,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        BYX,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        CHX,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        DRCTEDGE,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        EDGEA,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        IBEOS,STK,Top,-1,*,ndc1.ibllc.com,4000,usfarm.nj;\
+        IEX,STK,Top|Deep,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        ISE,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        ISLAND,STK,Top|Deep2|Deep,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        LTSE,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        MEMX,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        NASDAQ,STK,Top|Deep2|Deep,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        NYSE,STK,Top|Deep,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        NYSENAT,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        OVERNIGHT,STK,Top,-1,*,ndc1.ibllc.com,4000,usfarm.nj;\
+        PEARL,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        PSX,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        T24X,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm;\
+        TPLUS0,STK,Top,-1,*,ndc1.ibllc.com,4000,usfarm.nj;\
+        TXSE,STK,Top,-1,*,cdc1.ibllc.com,4000,usfarm";
 
     /// A depth message of one group: `entries` as raw bytes after the tag.
     fn depth_msg(tag: u32, entries: &[u8]) -> Vec<u8> {
@@ -5655,7 +6139,7 @@ mod depth_tests {
                 let num_rows = f.iter().find(|x| x.0 == 3).map_or(100, |x| x.1 as i32);
                 let smart = f.iter().any(|x| x.0 == 4 && x.1 == 1);
                 // The entries the reference sent for this request, up to its cancel.
-                let mut entries: Vec<(pool::FarmId, String, bool)> = Vec::new();
+                let mut entries: Vec<(pool::FarmId, String, &str)> = Vec::new();
                 let mut con_id = 0;
                 for later in &recs[k + 1..] {
                     if later["msg_name"] == "CANCEL_MKT_DEPTH" { break; }
@@ -5674,8 +6158,9 @@ mod depth_tests {
                                 sent.insert((lconn.to_string(), id.clone()), (exch.clone(), v.clone()));
                                 let farm = farm_of(lconn);
                                 match v.as_str() {
-                                    "0" => entries.push((farm, exch.clone(), true)),
-                                    "442" => entries.push((farm, exch.clone(), false)),
+                                    "0" => entries.push((farm, exch.clone(), "0")),
+                                    "442" => entries.push((farm, exch.clone(), "442")),
+                                    "443" => entries.push((farm, exch.clone(), "443")),
                                     _ => {}
                                 }
                             }
@@ -5683,8 +6168,19 @@ mod depth_tests {
                         }
                     }
                 }
+                // A top of book's LAST entry: on its own exchange when the
+                // reference sent one there, else on BEST.
+                let specs: Vec<farm::DepthSpec> = entries.iter().filter_map(|(farm, exch, kind)| match *kind {
+                    "0" => Some(farm::DepthSpec::Book { farm: *farm, exchange: exch.clone() }),
+                    "442" => {
+                        let own = entries.iter().any(|(_, e, k)| *k == "443" && e == exch);
+                        let last = if own { (*farm, exch.clone()) } else { (pool::PRIMARY_MD, "BEST".to_string()) };
+                        Some(farm::DepthSpec::Top { farm: *farm, exchange: exch.clone(), last: Some(last) })
+                    }
+                    _ => None,
+                }).collect();
                 let lot = lots.get(&con_id).copied().unwrap_or(1);
-                engine.farm.start_depth(req_id, con_id, "STK", smart, num_rows, lot, false, entries);
+                engine.farm.start_depth(req_id, con_id, "STK", smart, num_rows, lot, false, specs, None, &shared);
             } else if leg == "api_out" && name == "CANCEL_MKT_DEPTH" {
                 let f = proto_fields(&b64(&r["body_b64"]));
                 engine.farm.stop_depth(f.iter().find(|x| x.0 == 1).unwrap().1 as ReqId);

@@ -150,6 +150,14 @@ pub struct Context {
     /// SMART component exchanges by conId, once its definition was read
     /// (#452).
     pub(crate) smart_components: HashMap<i64, Vec<String>>,
+    /// Valid exchanges by conId (tag 6046, BEST as SMART), once its
+    /// definition was read: the components of its SmartDepth (#452).
+    pub(crate) valid_exchanges: HashMap<i64, Vec<String>>,
+    /// The contract as a depth refusal names it, by conId (#452).
+    pub(crate) depth_descriptions: HashMap<i64, String>,
+    /// SmartDepth requests waiting for their components' definitions
+    /// (#452).
+    pub(crate) depth_gathers: Vec<crate::engine::hot_loop::farm::DepthGather>,
     /// Definition lookups in flight for a round lot: (request id, conId,
     /// deadline).
     pub(crate) lot_lookups: Vec<(String, i64, std::time::Instant)>,
@@ -215,6 +223,9 @@ impl Context {
             def_parked: Vec::new(),
             def_ready: Vec::new(),
             smart_components: HashMap::new(),
+            valid_exchanges: HashMap::new(),
+            depth_descriptions: HashMap::new(),
+            depth_gathers: Vec::new(),
             lot_lookups: Vec::new(),
             lot_parked: Vec::new(),
             lot_ready: Vec::new(),

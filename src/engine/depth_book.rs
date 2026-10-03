@@ -12,6 +12,8 @@
 //! - `SmartMerge`: SmartDepth: the rows of all component books and tops of
 //!   book, sorted, and the first rows compared before and after each
 //!   change: deletes and inserts at the tail, updates in place.
+//! - `SmartStatus`: SmartDepth: what the farm said of each component, and
+//!   the one warning 2152 that names them (#452).
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -521,6 +523,147 @@ impl SmartMerge {
     }
 }
 
+/// What the farm said of the components of a SmartDepth request, for the
+/// reference's warning 2152 (#452, `jextend.d0`): once every component
+/// book and top of book was accepted or refused, or 10 s after they were
+/// asked, one warning names the exchanges of each group.
+#[derive(Debug, Clone)]
+pub(crate) struct SmartStatus {
+    books: Vec<Arc<str>>,
+    tops: Vec<Arc<str>>,
+    /// The answers, in the order they came.
+    books_ok: Vec<Arc<str>>,
+    tops_ok: Vec<Arc<str>>,
+    books_refused: Vec<Arc<str>>,
+    tops_refused: Vec<Arc<str>>,
+    sent: bool,
+    pub(crate) deadline: std::time::Instant,
+}
+
+/// How long the reference waits for the components' answers.
+pub(crate) const SMART_STATUS_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl SmartStatus {
+    pub(crate) fn new(books: Vec<Arc<str>>, tops: Vec<Arc<str>>, deadline: std::time::Instant) -> Self {
+        Self {
+            books, tops, books_ok: Vec::new(), tops_ok: Vec::new(), books_refused: Vec::new(), tops_refused: Vec::new(),
+            sent: false, deadline,
+        }
+    }
+
+    /// A component's book (`book`) or top of book was accepted or
+    /// refused. The warning's text when this was the last answer.
+    pub(crate) fn answer(&mut self, exchange: &Arc<str>, book: bool, accepted: bool) -> Option<String> {
+        if self.sent {
+            return None;
+        }
+        let list = match (book, accepted) {
+            (true, true) => &mut self.books_ok,
+            (true, false) => &mut self.books_refused,
+            (false, true) => &mut self.tops_ok,
+            (false, false) => &mut self.tops_refused,
+        };
+        if !list.iter().any(|e| **e == **exchange) {
+            list.push(exchange.clone());
+        }
+        let answered = |all: &[Arc<str>], ok: &[Arc<str>], refused: &[Arc<str>]| {
+            all.iter().all(|e| ok.iter().chain(refused).any(|a| **a == **e))
+        };
+        if !answered(&self.books, &self.books_ok, &self.books_refused)
+            || !answered(&self.tops, &self.tops_ok, &self.tops_refused)
+        {
+            return None;
+        }
+        self.sent = true;
+        Some(self.text(false)).filter(|t| !t.is_empty())
+    }
+
+    /// The warning at the deadline, when it was not sent: the components
+    /// with no answer are named as unknown.
+    pub(crate) fn expire(&mut self, now: std::time::Instant) -> Option<String> {
+        if self.sent || now < self.deadline {
+            return None;
+        }
+        self.sent = true;
+        Some(self.text(true)).filter(|t| !t.is_empty())
+    }
+
+    /// The reference's text (`jextend.d0.b(boolean)`): each group as
+    /// "{label} - Depth: A; B; Top: C; ", the exchanges of a group in the
+    /// order the reference's sets give them.
+    fn text(&self, timed_out: bool) -> String {
+        fn group(out: &mut String, label: &str, books: &[&Arc<str>], tops: &[&Arc<str>]) {
+            if books.is_empty() && tops.is_empty() {
+                return;
+            }
+            out.push_str(label);
+            out.push_str(" - ");
+            for (name, list) in [("Depth", books), ("Top", tops)] {
+                if list.is_empty() {
+                    continue;
+                }
+                out.push_str(name);
+                out.push_str(": ");
+                for e in list {
+                    out.push_str(e);
+                    out.push_str("; ");
+                }
+            }
+        }
+        let mut out = String::new();
+        // The answered sets are copied before they are read.
+        fn copied(v: &[Arc<str>]) -> Vec<&Arc<str>> {
+            java_set_order(v, java_copy_capacity(v.len()))
+        }
+        group(&mut out, "Exchanges", &copied(&self.books_ok), &copied(&self.tops_ok));
+        group(&mut out, "Need additional market data permissions", &copied(&self.books_refused), &copied(&self.tops_refused));
+        if timed_out {
+            let unknown = |all: &[Arc<str>], ok: &[Arc<str>], refused: &[Arc<str>]| -> Vec<Arc<str>> {
+                all.iter().filter(|e| !ok.iter().chain(refused).any(|a| **a == ***e)).cloned().collect()
+            };
+            let books = unknown(&self.books, &self.books_ok, &self.books_refused);
+            let tops = unknown(&self.tops, &self.tops_ok, &self.tops_refused);
+            // These sets are filled one by one.
+            group(&mut out, "Unknown market data permissions",
+                &java_set_order(&books, java_grown_capacity(books.len())),
+                &java_set_order(&tops, java_grown_capacity(tops.len())));
+        }
+        out
+    }
+}
+
+/// `String.hashCode()` of the reference's runtime.
+fn java_hash(s: &str) -> i32 {
+    s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)))
+}
+
+/// The items of a hash set of strings in its iteration order: by slot of
+/// the spread hash in a table of `capacity` slots, items of one slot in
+/// the order they were added (`items` is that order).
+fn java_set_order(items: &[Arc<str>], capacity: usize) -> Vec<&Arc<str>> {
+    let slot = |s: &str| {
+        let h = java_hash(s);
+        ((h ^ ((h as u32) >> 16) as i32) as u32 as usize) & (capacity - 1)
+    };
+    let mut out: Vec<(usize, &Arc<str>)> = items.iter().map(|e| (slot(e), e)).collect();
+    out.sort_by_key(|(s, _)| *s);
+    out.into_iter().map(|(_, e)| e).collect()
+}
+
+/// Table size of a hash set made as a copy of `n` items.
+fn java_copy_capacity(n: usize) -> usize {
+    (((n as f32 / 0.75f32) as usize) + 1).max(16).next_power_of_two()
+}
+
+/// Table size of a hash set that `n` items were added to one by one.
+fn java_grown_capacity(n: usize) -> usize {
+    let mut c = 16;
+    while n > c * 3 / 4 {
+        c *= 2;
+    }
+    c
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,5 +771,75 @@ mod tests {
         assert_eq!(s.book_key(34165), 34165.0 * 0.01);
         assert_eq!(s.size(3), 120.0);
         assert_eq!(Scale::new(0.005, 1.0).written(3), 0.015);
+    }
+
+    fn names(list: &[&str]) -> Vec<Arc<str>> {
+        list.iter().map(|e| Arc::from(*e)).collect()
+    }
+
+    const BOOKS: [&str; 6] = ["ARCA", "NASDAQ", "BATS", "IEX", "BEX", "NYSE"];
+    const TOPS: [&str; 15] = ["NYSENAT", "DRCTEDGE", "MEMX", "TXSE", "ISE", "EDGEA", "BYX", "CHX", "IBEOS", "OVERNIGHT",
+        "PEARL", "PSX", "T24X", "LTSE", "AMEX"];
+
+    /// The answers of a SmartDepth status, (exchange, book, accepted), in
+    /// order; the texts given.
+    fn answers(status: &mut SmartStatus, list: &[(&str, bool, bool)]) -> Vec<String> {
+        list.iter().filter_map(|(e, book, ok)| status.answer(&Arc::from(*e), *book, *ok)).collect()
+    }
+
+    // #452: AAPL SmartDepth on paper (captured 28/09/2026, scenario
+    // i192_e4_depth_deletes, request 9460): the answers in the order the
+    // farm gave them, then the one warning, its exchanges in the order of
+    // the reference's sets (a tie keeps the order of the answers).
+    #[test]
+    fn smart_status_text_as_captured() {
+        let mut s = SmartStatus::new(names(&BOOKS), names(&TOPS), std::time::Instant::now() + SMART_STATUS_WAIT);
+        let order: Vec<(&str, bool, bool)> = vec![
+            ("NYSENAT", false, true), ("ARCA", true, false), ("NASDAQ", true, false), ("BATS", true, false),
+            ("IEX", true, true), ("BEX", true, false), ("NYSE", true, false), ("DRCTEDGE", false, true),
+            ("MEMX", false, true), ("TXSE", false, true), ("ISE", false, true), ("EDGEA", false, true),
+            ("BYX", false, true), ("CHX", false, true), ("PEARL", false, true), ("PSX", false, true),
+            ("T24X", false, true), ("LTSE", false, true), ("AMEX", false, true), ("IBEOS", false, true),
+            ("OVERNIGHT", false, true),
+        ];
+        assert_eq!(answers(&mut s, &order), ["Exchanges - Depth: IEX; Top: BYX; PEARL; AMEX; T24X; MEMX; EDGEA; OVERNIGHT; \
+            TXSE; CHX; NYSENAT; IBEOS; PSX; LTSE; ISE; DRCTEDGE; Need additional market data permissions - Depth: NASDAQ; \
+            BATS; ARCA; BEX; NYSE; "]);
+        // Sent once.
+        assert_eq!(s.answer(&Arc::from("IEX"), true, true), None);
+        assert_eq!(s.expire(std::time::Instant::now() + SMART_STATUS_WAIT * 2), None);
+
+        // AXTI (request 9461): OVERNIGHT before EDGEA and IBEOS before
+        // NYSENAT came first: they share a slot, so they swap.
+        let mut s = SmartStatus::new(names(&BOOKS), names(&TOPS), std::time::Instant::now() + SMART_STATUS_WAIT);
+        let mut order = order;
+        order.retain(|a| !matches!(a.0, "OVERNIGHT" | "IBEOS"));
+        order.insert(0, ("IBEOS", false, true));
+        order.insert(0, ("OVERNIGHT", false, true));
+        assert_eq!(answers(&mut s, &order), ["Exchanges - Depth: IEX; Top: BYX; PEARL; AMEX; T24X; MEMX; OVERNIGHT; EDGEA; \
+            TXSE; CHX; IBEOS; NYSENAT; PSX; LTSE; ISE; DRCTEDGE; Need additional market data permissions - Depth: NASDAQ; \
+            BATS; ARCA; BEX; NYSE; "]);
+    }
+
+    // #452: 10 s after the components were asked, the warning goes with
+    // the components the farm did not answer named as unknown.
+    #[test]
+    fn smart_status_unknown_after_the_wait() {
+        let now = std::time::Instant::now();
+        let mut s = SmartStatus::new(names(&["IEX", "NASDAQ"]), names(&["MEMX", "BYX"]), now + SMART_STATUS_WAIT);
+        assert_eq!(answers(&mut s, &[("IEX", true, true), ("BYX", false, false)]), Vec::<String>::new());
+        assert_eq!(s.expire(now), None, "not before the deadline");
+        assert_eq!(s.expire(now + SMART_STATUS_WAIT).as_deref(), Some("Exchanges - Depth: IEX; \
+            Need additional market data permissions - Top: BYX; Unknown market data permissions - Depth: NASDAQ; Top: MEMX; "));
+        // Nothing answered and nothing asked: no warning.
+        let mut s = SmartStatus::new(Vec::new(), Vec::new(), now);
+        assert_eq!(s.expire(now), None);
+    }
+
+    #[test]
+    fn java_set_tables() {
+        assert_eq!((java_copy_capacity(5), java_copy_capacity(11), java_copy_capacity(12), java_copy_capacity(24)), (16, 16, 32, 64));
+        assert_eq!((java_grown_capacity(12), java_grown_capacity(13), java_grown_capacity(25)), (16, 32, 64));
+        assert_eq!(java_hash("AAPL"), 2_001_436);
     }
 }
