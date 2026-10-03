@@ -400,6 +400,9 @@ impl EClient {
             for command in commands {
                 let _ = send_cmd(py, &tx, command);
             }
+            // Requests that waited for a market data line (101) take the
+            // lines set free (ibx#444).
+            py.detach(|| self.core.promote_waiting_md(shared, &tx));
         }
 
         // Regulatory snapshots that ended (ibx#446).

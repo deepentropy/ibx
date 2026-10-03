@@ -6360,3 +6360,97 @@ fn a_valid_generic_tick_list_goes_on() {
     let seen = engine.join().unwrap();
     assert_eq!(seen, ["subscribe:756733:false", "subscribe:12087792:true"]);
 }
+
+// An engine that gives each new subscription its own slot (10, 11, ...)
+// and notes each subscribe with its mode.
+fn line_engine(rx: crossbeam_channel::Receiver<ControlCommand>) -> std::thread::JoinHandle<Vec<String>> {
+    std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        let mut next = 10;
+        while let Ok(cmd) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            match cmd {
+                ControlCommand::Subscribe { reply_tx: Some(tx), con_id, mode_9887, .. } => {
+                    let _ = tx.send(Ok(next));
+                    next += 1;
+                    seen.push(format!("subscribe:{con_id}:{mode_9887}"));
+                }
+                ControlCommand::Unsubscribe { instrument } => seen.push(format!("unsubscribe:{instrument}")),
+                _ => {}
+            }
+        }
+        seen
+    })
+}
+
+// ibx#444 (`jextend.s.a(dy,ec,Set)@104-191`): after a 354 with delayed data
+// available, the contract's record keeps that state. A new request of a
+// client without delayed data gets 10168 at once, nothing sent; with
+// delayed data enabled it goes delayed at once: marketDataType 3, no
+// 10167, the delayed entries. When that delayed subscription ends, the
+// mark goes and the next request asks for live data again.
+#[test]
+fn a_contract_known_delayed_available_gives_10168_or_goes_delayed() {
+    let (client, rx, shared) = test_client();
+    let engine = line_engine(rx);
+    client.req_mkt_data(1, &aapl_stk(), "", false, false).unwrap();
+    shared.market.push_md_reject(crate::bridge::MdReject::NotSubscribed {
+        instrument: 10, delayed_available: true, needs_api_subscription: false,
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["error:1:354:Requested market data is not subscribed.Delayed market data is available."]);
+
+    let mut w = RecordingWrapper::default();
+    client.req_mkt_data(2, &aapl_stk(), "", false, false).unwrap();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["error:2:10168:Requested market data is not subscribed. Delayed market data is not enabled"]);
+    assert!(client.core.req_to_instrument.lock().unwrap().get(&2).is_none(), "the request is gone");
+
+    client.req_market_data_type(3);
+    let mut w = RecordingWrapper::default();
+    client.req_mkt_data(3, &aapl_stk(), "", false, false).unwrap();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["market_data_type:3:3"]);
+    assert!(client.core.delayed_reqs.lock().unwrap().contains(&3));
+
+    client.cancel_mkt_data(3).unwrap();
+    client.req_market_data_type(1);
+    client.req_mkt_data(4, &aapl_stk(), "", false, false).unwrap();
+    let seen = engine.join().unwrap();
+    assert_eq!(seen, ["subscribe:265598:0", "unsubscribe:10", "subscribe:265598:1", "unsubscribe:11", "subscribe:265598:0"]);
+}
+
+// ibx#444 (`jclient.k_.a(boolean)`, `jextend.a4.a(jclient.record.dU)@136`):
+// with every API line taken, a stream on a new contract gets 101 and waits;
+// a snapshot and a stream joining a running contract take no line. When a
+// line is set free the waiting request is subscribed, with no second 101.
+// A waiting request is cancelled with nothing sent and no 300.
+#[test]
+fn past_the_ticker_limit_a_stream_gets_101_and_waits_for_a_line() {
+    let (client, rx, shared) = test_client();
+    shared.reference.set_snapshot_rate_limit(1);
+    let engine = line_engine(rx);
+    client.req_mkt_data(1, &aapl_stk(), "", false, false).unwrap();
+    client.req_mkt_data(2, &spy_stk(), "", false, false).unwrap();
+    client.req_mkt_data(3, &aapl_stk(), "", false, false).unwrap();
+    client.req_mkt_data(4, &eur_usd(), "", false, false).unwrap();
+    let mut w = RecordingWrapper::default();
+    client.req_mkt_data(4, &eur_usd(), "", false, false).unwrap();
+    client.process_msgs(&mut w);
+    let errors: Vec<&String> = w.events.iter().filter(|e| e.starts_with("error:")).collect();
+    assert_eq!(errors, [
+        "error:2:101:Max number of tickers has been reached",
+        "error:4:101:Max number of tickers has been reached",
+        "error:4:322:Error processing request.-'bQ' : cause - Duplicate ticker id",
+    ]);
+
+    client.cancel_mkt_data(4).unwrap();
+    client.cancel_mkt_data(1).unwrap();
+    client.cancel_mkt_data(3).unwrap();
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(!w.events.iter().any(|e| e.starts_with("error:")), "{:?}", w.events);
+    assert_eq!(client.core.md_lines_in_use(), 1);
+    let seen = engine.join().unwrap();
+    assert_eq!(seen, ["subscribe:265598:0", "unsubscribe:10", "subscribe:756733:0"]);
+}

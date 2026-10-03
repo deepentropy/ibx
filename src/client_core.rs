@@ -793,6 +793,8 @@ pub enum MdCancel {
     /// Other requests still use the instrument: only this request's share
     /// of its news entry goes, when it had the news tick.
     Shared { instrument: InstrumentId, news: Option<String> },
+    /// A request waiting for a market data line (101): nothing was sent.
+    Waiting,
 }
 
 impl MdCancel {
@@ -801,9 +803,29 @@ impl MdCancel {
         match self {
             MdCancel::Instrument(instrument) => Some(ControlCommand::Unsubscribe { instrument }),
             MdCancel::Shared { instrument, news } => news.map(|providers| ControlCommand::UnsubscribeNews { instrument, providers }),
+            MdCancel::Waiting => None,
         }
     }
 }
+
+/// A streaming market data request past the API ticker limit (101): it
+/// waits for a line, as the reference's subscriber stays on a record the
+/// line manager leaves unsubscribed (ibx#444).
+#[derive(Debug, Clone)]
+pub struct MdWaiting {
+    pub req_id: i64,
+    pub con_id: i64,
+    pub symbol: String,
+    pub exchange: String,
+    pub sec_type: String,
+    pub currency: String,
+    pub filters: crate::types::SecDefFilters,
+    pub generic_tick_list: String,
+    pub mode_9887: i32,
+}
+
+/// Error 101 of the reference (`jextend.d7.e`).
+pub const MD_MAX_TICKERS: (i64, &str) = (101, "Max number of tickers has been reached");
 
 /// A callback for a market data request beside its ticks (ibx#444).
 #[derive(Debug, Clone, PartialEq)]
@@ -938,6 +960,14 @@ pub struct ClientCore {
     /// The market data requests whose generic tick list has `mdoff`: no
     /// top of book ticks (ibx#444).
     pub md_top_off: Mutex<HashSet<i64>>,
+    /// Streaming requests that got 101 and wait for a line, oldest first
+    /// (ibx#444).
+    pub md_waiting: Mutex<Vec<MdWaiting>>,
+    /// Contracts the server refused with "delayed market data available"
+    /// (354): the reference's record keeps "not subscribed, delayed
+    /// available", so a new request gets 10168 or goes delayed at once
+    /// (ibx#444).
+    pub md_delayed_known: Mutex<HashSet<i64>>,
     /// The last request parameters of each instrument (minimum tick, BBO
     /// exchange, snapshot permissions): a request that joins gets them at
     /// once (ibx#444).
@@ -1227,6 +1257,8 @@ impl ClientCore {
             last_quotes: Mutex::new(HashMap::new()),
             md_news: Mutex::new(HashMap::new()),
             md_top_off: Mutex::new(HashSet::new()),
+            md_waiting: Mutex::new(Vec::new()),
+            md_delayed_known: Mutex::new(HashSet::new()),
             instrument_params: Mutex::new(HashMap::new()),
             instrument_news: Mutex::new(HashMap::new()),
             md_joins: Mutex::new(Vec::new()),
@@ -1409,7 +1441,7 @@ impl ClientCore {
         snapshot: bool,
         generic_tick_list: &str,
         mode_9887: i32,
-    ) -> Result<InstrumentId, String> {
+    ) -> Result<Option<InstrumentId>, String> {
         let (last_trade_date, strike, right, multiplier) = (
             filters.last_trade_date_or_contract_month.as_str(), filters.strike,
             filters.right.as_str(), filters.multiplier.as_str(),
@@ -1441,7 +1473,7 @@ impl ClientCore {
             if self.attach_md_request(shared, req_id, instrument, snapshot, sec_type, exchange, news_key.clone(), had_data, top_off) {
                 send_news(instrument);
             }
-            Ok(instrument)
+            Ok(Some(instrument))
         };
 
         // A quote ibx subscribed to for the P&L becomes the caller's
@@ -1471,6 +1503,17 @@ impl ClientCore {
             return attach(instrument_id, false);
         }
 
+        // A contract the server refused with delayed data available: the
+        // reference's new subscriber on that record gets 10168 when its
+        // client has not enabled delayed data, and is removed; else it
+        // observes delayed data at once (marketDataType 3, no 10167), with
+        // delayed entries (`jextend.s.a(dy,ec,Set)@104-191`, ibx#444).
+        let delayed_known = self.md_delayed_known.lock().unwrap().contains(&con_id);
+        if delayed_known && !self.md_modes.lock().unwrap().delayed {
+            shared.orders.push_order_error(req_id, MD_DELAYED_NOT_ENABLED.0, MD_DELAYED_NOT_ENABLED.1.to_string());
+            return Ok(None);
+        }
+
         // A contract this client already streams: the request joins at
         // once. A stream asked where only snapshots run goes to the engine,
         // which adds the streaming entries; so does a request with a mode
@@ -1485,6 +1528,22 @@ impl ClientCore {
         });
         if let Some(instrument_id) = running {
             return attach(instrument_id, false);
+        }
+        let mode_9887 = if delayed_known { crate::types::MarketDataModes::entry_mode(false, true) } else { mode_9887 };
+
+        // The API ticker limit: a stream that needs a contract no stream
+        // uses yet, with every line taken, gets 101 and waits for a line,
+        // as the reference's line manager (`jclient.k_.a(boolean)`, maxApi
+        // = the logon's API max tickers; error from
+        // `jextend.a4.a(jclient.record.dU)@136`). Snapshots take no line.
+        if !snapshot && self.md_lines_in_use() >= shared.reference.snapshot_rate_limit() as usize {
+            shared.orders.push_order_error(req_id, MD_MAX_TICKERS.0, MD_MAX_TICKERS.1.to_string());
+            self.md_waiting.lock().unwrap().push(MdWaiting {
+                req_id, con_id, symbol: symbol.to_string(), exchange: exchange.to_string(),
+                sec_type: sec_type.to_string(), currency: currency.to_string(), filters: filters.clone(),
+                generic_tick_list: generic_tick_list.to_string(), mode_9887,
+            });
+            return Ok(None);
         }
 
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
@@ -1508,7 +1567,41 @@ impl ClientCore {
 
         let instrument_id = Self::recv_registration(reply_rx)?;
         self.con_id_to_instrument.lock().unwrap().insert(con_id, instrument_id);
-        attach(instrument_id, false)
+        let attached = attach(instrument_id, false);
+        if delayed_known && self.req_to_instrument.lock().unwrap().contains_key(&req_id) {
+            self.set_delayed(req_id);
+            self.md_joins.lock().unwrap().push((req_id, true));
+        }
+        attached
+    }
+
+    /// The market data lines in use: the contracts with a streaming
+    /// request (ibx#444).
+    pub fn md_lines_in_use(&self) -> usize {
+        let observers = self.instrument_to_req.lock().unwrap();
+        let snaps = self.snapshot_reqs.lock().unwrap();
+        observers.values().filter(|reqs| reqs.iter().any(|r| !snaps.contains_key(r))).count()
+    }
+
+    /// The requests waiting for a line (101) that a free line lets through,
+    /// oldest first, as the reference's line manager subscribes the
+    /// records it kept waiting once the count is under the limit
+    /// (ibx#444). They get no second 101.
+    pub fn promote_waiting_md(&self, shared: &SharedState, control_tx: &Sender<ControlCommand>) {
+        loop {
+            if self.md_waiting.lock().unwrap().is_empty()
+                || self.md_lines_in_use() >= shared.reference.snapshot_rate_limit() as usize
+            {
+                return;
+            }
+            let w = self.md_waiting.lock().unwrap().remove(0);
+            if let Err(e) = self.register_mkt_data(
+                shared, control_tx, w.req_id, w.con_id, &w.symbol, &w.exchange, &w.sec_type, &w.currency,
+                &w.filters, false, &w.generic_tick_list, w.mode_9887,
+            ) {
+                log::warn!("Market data request {} waiting for a line: {}", w.req_id, e);
+            }
+        }
     }
 
     /// Add a new market data request to the requests of an instrument
@@ -1762,6 +1855,13 @@ impl ClientCore {
     /// request; before that, only the request's share of the news entry
     /// goes.
     pub fn unregister_mkt_data(&self, req_id: i64) -> Option<MdCancel> {
+        {
+            let mut waiting = self.md_waiting.lock().unwrap();
+            if let Some(i) = waiting.iter().position(|w| w.req_id == req_id) {
+                waiting.remove(i);
+                return Some(MdCancel::Waiting);
+            }
+        }
         let instrument = self.req_to_instrument.lock().unwrap().remove(&req_id)?;
         let last = {
             let mut observers = self.instrument_to_req.lock().unwrap();
@@ -1779,7 +1879,7 @@ impl ClientCore {
         };
         self.last_quotes.lock().unwrap().remove(&req_id);
         self.mdt_sent.lock().unwrap().remove(&req_id);
-        self.delayed_reqs.lock().unwrap().remove(&req_id);
+        let delayed = self.delayed_reqs.lock().unwrap().remove(&req_id);
         self.tick_req_params_sent.lock().unwrap().remove(&req_id);
         self.farm_auto_reqs.lock().unwrap().remove(&req_id);
         self.md_joins.lock().unwrap().retain(|(r, _)| *r != req_id);
@@ -1791,6 +1891,15 @@ impl ClientCore {
         }
         self.instrument_params.lock().unwrap().remove(&instrument);
         self.instrument_news.lock().unwrap().remove(&instrument);
+        // A delayed record that is let go loses its "delayed available"
+        // mark, as the reference's (`jclient.is` cancel of a delayed
+        // record, `pa.l(false)`): the next request asks for live data again.
+        if delayed {
+            let con_ids: Vec<i64> = self.con_id_to_instrument.lock().unwrap().iter()
+                .filter(|(_, iid)| **iid == instrument).map(|(c, _)| *c).collect();
+            let mut known = self.md_delayed_known.lock().unwrap();
+            for c in con_ids { known.remove(&c); }
+        }
         // The slot stays while tick-by-tick data uses it.
         if !self.tbt_reqs.lock().unwrap().values().any(|(i, ..)| *i == instrument) {
             self.forget_instrument(instrument);
@@ -1830,6 +1939,15 @@ impl ClientCore {
         }
         for reject in shared.market.drain_md_rejects() {
             let (code, text, gone) = Self::md_reject_error(&reject);
+            // The record keeps "not subscribed, delayed available" (ibx#444).
+            if let crate::bridge::MdReject::NotSubscribed { instrument, delayed_available, .. } = &reject {
+                let con_ids: Vec<i64> = self.con_id_to_instrument.lock().unwrap().iter()
+                    .filter(|(_, iid)| **iid == *instrument).map(|(c, _)| *c).collect();
+                let mut known = self.md_delayed_known.lock().unwrap();
+                for c in con_ids {
+                    if *delayed_available { known.insert(c); } else { known.remove(&c); }
+                }
+            }
             let keeps_news = matches!(reject, crate::bridge::MdReject::NotSubscribed { .. });
             for req_id in self.md_requests_of(reject.instrument()) {
                 if !gone {
@@ -2424,6 +2542,7 @@ impl ClientCore {
     /// reference (the key is the request id only; ibx#444).
     pub fn duplicate_ticker_refusal(&self, req_id: i64) -> Option<(i64, String)> {
         (self.req_to_instrument.lock().unwrap().contains_key(&req_id)
+            || self.md_waiting.lock().unwrap().iter().any(|w| w.req_id == req_id)
             || self.tbt_reqs.lock().unwrap().contains_key(&req_id)
             || self.reg_snapshots.lock().unwrap().iter().any(|f| f.req_id == req_id))
             .then(|| (322, "Error processing request.-'bQ' : cause - Duplicate ticker id".to_string()))
