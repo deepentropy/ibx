@@ -853,98 +853,18 @@ pub(crate) fn drain_and_send_orders(
                     (15, currency.as_str()),
                 ])
             }
+            // The engine's own Adaptive and algo requests: a limit order
+            // with the algo, through the one encoder of every order type
+            // (ibx#263).
             OrderRequest::SubmitAdaptive { order_id, instrument, side, qty, price, priority, tif, attrs } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, b'2', tif, 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp().to_string();
-                // Per ib-agent#136 capture: Adaptive needs 18=e (ExecInst =
-                // Adaptive algo wrapper). Without it, gateway rejects with
-                // "Invalid value in field # 18".
-                let mut fields: Vec<(u32, String)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
-                    (fix::TAG_SENDING_TIME, now.clone()),
-                    (11, format!("{}.{}", order_id, ver)),
-                    (1, account_id.to_string()),
-                    (55, symbol),
-                    (54, fix_side(side).to_string()),
-                    (38, format_uint(qty as u64).to_string()),
-                    (40, "2".to_string()),              // OrdType = Limit
-                    (44, format_price(price).to_string()),
-                    (18, "e".to_string()),              // ExecInst = algo
-                    (59, tif_str(tif)),
-                    (167, sec_type_str),
-                    (100, destination.clone()),
-                    (6210, destination),
-                    (15, currency.clone()),
-                ];
-                push_dtc_flag(&mut fields, tif);
-                push_bracket_key(&mut fields, context, order_id, &attrs);
-                // Parent link, OCA group and the other attributes (ibx#318).
-                push_extended_attrs(&mut fields, context, &attrs, true);
-                fields.push((847, "Adaptive".to_string()));      // AlgoStrategy
-                fields.push((5957, "1".to_string()));            // AlgoParamCount
-                fields.push((5958, "adaptivePriority".to_string())); // AlgoParamTag
-                fields.push((5960, priority.as_str().to_string()));  // AlgoParamValue
-                let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
-                send_new_order(conn, context, instrument, &refs)
+                let attrs = crate::types::OrderAttrs { algo: Some(crate::types::OrderAlgo::Adaptive(priority)), ..attrs };
+                send_order_ex(conn, context, account_id, order_id, instrument, side, qty,
+                    crate::types::OrderKind::Limit { price }, tif, &attrs)
             }
             OrderRequest::SubmitAlgo { order_id, instrument, side, qty, price, algo, tif, attrs } => {
-                context.insert_order(crate::types::Order::new(
-                    order_id, instrument, side, qty, price, b'2', tif, 0,
-                ));
-                let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
-                let now = chrono_free_timestamp().to_string();
-                // Every algo type rides the same algo instruction as Adaptive:
-                // the reference sends 18=e on all six (ib-agent#192 B9, ibx#405).
-                let mut fields: Vec<(u32, String)> = vec![
-                    (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
-                    (fix::TAG_SENDING_TIME, now.clone()),
-                    (11, format!("{}.{}", order_id, ver)),
-                    (1, account_id.to_string()),
-                    (55, symbol),
-                    (54, fix_side(side).to_string()),
-                    (38, format_uint(qty as u64).to_string()),
-                    (40, "2".to_string()),              // OrdType = Limit
-                    (44, format_price(price).to_string()),
-                    (18, "e".to_string()),              // ExecInst = algo
-                    (59, tif_str(tif)),
-                    (167, sec_type_str),
-                    (100, destination.clone()),
-                    (6210, destination),
-                    (15, currency.clone()),
-                ];
-                push_dtc_flag(&mut fields, tif);
-                push_bracket_key(&mut fields, context, order_id, &attrs);
-                // Parent link, OCA group and the other attributes (ibx#318).
-                push_extended_attrs(&mut fields, context, &attrs, true);
-                let (algo_name, param_strs) = build_algo_tags(&algo);
-                fields.push((847, algo_name.to_string()));
-                // Tag 849 (maxPctVol) for algos that use it
-                match &algo {
-                    AlgoParams::Vwap { max_pct_vol, .. }
-                    | AlgoParams::ArrivalPx { max_pct_vol, .. }
-                    | AlgoParams::ClosePx { max_pct_vol, .. } => fields.push((849, format!("{}", max_pct_vol))),
-                    _ => {}
-                }
-                // Only parameters that have a value: the reference leaves out
-                // one that was not given (an unset start/end time), and the
-                // server refuses an empty one with "Invalid value in field
-                // # 5957" (ib-agent#192 B9, ibx#405).
-                let pairs: Vec<&[String]> = param_strs.chunks(2).filter(|p| !p[1].is_empty()).collect();
-                fields.push((5957, pairs.len().to_string()));
-                // Emit key/value pairs: 5958=key, 5960=value (repeated)
-                for pair in pairs {
-                    fields.push((5958, pair[0].clone()));
-                    fields.push((5960, pair[1].clone()));
-                }
-                let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
-                send_new_order(conn, context, instrument, &refs)
+                let attrs = crate::types::OrderAttrs { algo: Some(crate::types::OrderAlgo::Params(algo)), ..attrs };
+                send_order_ex(conn, context, account_id, order_id, instrument, side, qty,
+                    crate::types::OrderKind::Limit { price }, tif, &attrs)
             }
             OrderRequest::SubmitPegBench { order_id, instrument, side, qty, price,
                 ref_con_id, is_peg_decrease, pegged_change_amount, ref_change_amount,
@@ -2382,14 +2302,12 @@ fn push_dtc_flag(fields: &mut Vec<(u32, String)>, tif: u8) {
 /// The extended-attribute block (display size, outside-RTH, hidden, good-after,
 /// good-till, OCA group, parent link, conditions, ...), shared by every order
 /// path that carries attributes so the emission cannot drift between order
-/// types (ibx#224, ibx#318). `has_base_exec_inst` is true when the order type
-/// already rides the instruction field, which then cannot also carry
-/// all-or-none.
+/// types (ibx#224, ibx#318). All-or-none rides the instruction field
+/// (`exec_inst`).
 fn push_extended_attrs(
     fields: &mut Vec<(u32, String)>,
     context: &Context,
     attrs: &crate::types::OrderAttrs,
-    has_base_exec_inst: bool,
 ) {
     if !attrs.order_ref.is_empty() {
         fields.push((6010, attrs.order_ref.clone()));
@@ -2460,9 +2378,6 @@ fn push_extended_attrs(
     }
     if attrs.sweep_to_fill {
         fields.push((6102, "1".to_string()));
-    }
-    if attrs.all_or_none && !has_base_exec_inst {
-        fields.push((18, "G".to_string()));
     }
     if attrs.trigger_method > 0 {
         fields.push((6115, attrs.trigger_method.to_string()));
@@ -2549,13 +2464,6 @@ fn send_order_ex(
         (38, format_uint(qty as u64).to_string()),
     ];
 
-    // Order type (40) plus its price tags and type-specific companions —
-    // identical values to the corresponding plain variants. Kinds that put
-    // an instruction in tag 18 (TrailingStop/TrailPct = a, Rel = R) cannot
-    // also carry all_or_none (18=G); validate_order rejects that
-    // combination up front, and the emission below skips 18=G as a second
-    // line of defense.
-    let mut has_base_exec_inst = false;
     match kind {
         K::Market => fields.push((40, "1".to_string())),
         K::Limit { price } => {
@@ -2582,10 +2490,8 @@ fn send_order_ex(
             fields.push((40, "P".to_string()));
             fields.push((99, t.clone()));
             fields.push((211, t));
-            fields.push((18, "a".to_string()));
             // Optional initial stop trigger (tag 6117), only when set (ib-agent#173).
             if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
-            has_base_exec_inst = true;
         }
         K::TrailingStopLimit { lmt_offset, lmt_price, trail_amt, trail_stop_price } => {
             // Per ib-agent#136 capture: TRAIL LIMIT uses OrdType=TSL, no
@@ -2608,10 +2514,8 @@ fn send_order_ex(
             fields.push((40, "P".to_string()));
             fields.push((99, pct_decimal.clone()));
             fields.push((211, pct_decimal));
-            fields.push((18, "a".to_string()));
             fields.push((6268, "100".to_string()));
             if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
-            has_base_exec_inst = true;
         }
         K::Moc => fields.push((40, "5".to_string())),
         K::Loc { price } => {
@@ -2653,17 +2557,14 @@ fn send_order_ex(
             // As the reference (ibx#414): the pegged order type with the
             // peg instruction, no mid-offset fields.
             let (prices, types) = pegged_tags(matches!(kind, K::PegMid { .. }), price, offset);
-            fields.extend(types);
+            fields.extend(types.into_iter().filter(|(t, _)| *t != 18));
             fields.extend(prices);
-            has_base_exec_inst = true;
         }
         K::Rel { offset } => {
             // Per ib-agent#138 capture: Relative shares OrdType=P and is
             // disambiguated by 18=R; peg offset on 211, no tag 44.
             fields.push((40, "P".to_string()));
             fields.push((211, format_price(offset).to_string()));
-            fields.push((18, "R".to_string()));
-            has_base_exec_inst = true;
         }
         // The adjustable tags themselves follow the common block below.
         K::AdjustableStop { stop_price, .. } => {
@@ -2676,8 +2577,6 @@ fn send_order_ex(
         K::PegBench { starting_price, .. } => {
             fields.push((40, "PB".to_string()));
             if starting_price > 0 { fields.push((99, format_price_ref(starting_price).to_string())); }
-            fields.push((18, "R".to_string()));
-            has_base_exec_inst = true;
         }
     }
 
@@ -2711,10 +2610,78 @@ fn send_order_ex(
     push_bracket_key(&mut fields, context, order_id, attrs);
     // Extended attributes — same tag order as the historical SubmitLimitEx
     // block.
-    push_extended_attrs(&mut fields, context, attrs, has_base_exec_inst);
+    push_extended_attrs(&mut fields, context, attrs);
+    let exec_inst = exec_inst(&kind, attrs.all_or_none, attrs.algo.is_some());
+    if !exec_inst.is_empty() {
+        fields.push((18, exec_inst));
+    }
+    if let Some(algo) = &attrs.algo {
+        fields.extend(algo_fields(algo));
+    }
 
     let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
     send_new_order(conn, context, instrument, &refs)
+}
+
+/// Tag 18 as the reference builds it (`jclient.pe.gI()`): the letter of a
+/// pegged or trailing type (a trailing stop, R relative, P pegged to
+/// market, M pegged to midpoint), G for all-or-none, e for an algo order
+/// whatever its type (ib-agent#192 B9, ibx#405, ibx#263), R for pegged to
+/// benchmark, in this order, separated by a space. Empty: not written.
+fn exec_inst(kind: &crate::types::OrderKind, all_or_none: bool, algo: bool) -> String {
+    use crate::types::OrderKind as K;
+    let mut parts: Vec<&str> = Vec::with_capacity(3);
+    match kind {
+        K::TrailingStop { .. } | K::TrailPct { .. } => parts.push("a"),
+        K::Rel { .. } => parts.push("R"),
+        K::PegMkt { .. } => parts.push("P"),
+        K::PegMid { .. } => parts.push("M"),
+        _ => {}
+    }
+    if all_or_none { parts.push("G"); }
+    if algo { parts.push("e"); }
+    if matches!(kind, K::PegBench { .. }) { parts.push("R"); }
+    parts.join(" ")
+}
+
+/// The algo block, as the reference writes it after the order attributes
+/// (`jattrib.algo.AlgoAttributeMap.a`): the strategy (847, after 849 when
+/// the algo has a maximum percentage of volume), then the parameter count
+/// and its pairs.
+fn algo_fields(algo: &crate::types::OrderAlgo) -> Fields {
+    use crate::types::OrderAlgo;
+    let mut fields: Fields = Vec::with_capacity(12);
+    match algo {
+        OrderAlgo::Adaptive(priority) => {
+            fields.push((847, "Adaptive".to_string()));
+            fields.push((5957, "1".to_string()));
+            fields.push((5958, "adaptivePriority".to_string()));
+            fields.push((5960, priority.as_str().to_string()));
+        }
+        OrderAlgo::Params(params) => {
+            let (algo_name, param_strs) = build_algo_tags(params);
+            // Tag 849 (maxPctVol) for algos that use it
+            match params {
+                AlgoParams::Vwap { max_pct_vol, .. }
+                | AlgoParams::ArrivalPx { max_pct_vol, .. }
+                | AlgoParams::ClosePx { max_pct_vol, .. } => fields.push((849, format!("{}", max_pct_vol))),
+                _ => {}
+            }
+            fields.push((847, algo_name.to_string()));
+            // Only parameters that have a value: the reference leaves out
+            // one that was not given (an unset start/end time), and the
+            // server refuses an empty one with "Invalid value in field
+            // # 5957" (ib-agent#192 B9, ibx#405).
+            let pairs: Vec<&[String]> = param_strs.chunks(2).filter(|p| !p[1].is_empty()).collect();
+            fields.push((5957, pairs.len().to_string()));
+            // Emit key/value pairs: 5958=key, 5960=value (repeated)
+            for pair in pairs {
+                fields.push((5958, pair[0].clone()));
+                fields.push((5960, pair[1].clone()));
+            }
+        }
+    }
+    fields
 }
 
 fn build_algo_tags(algo: &AlgoParams) -> (&'static str, Vec<String>) {
@@ -4620,6 +4587,95 @@ mod tests {
         let mut want = parse_frame(LMT);
         want.retain(|(t, _)| *t != 35);
         assert_eq!(ours, want);
+    }
+
+    // ibx#263 (captured 02/10/2026, paper, AAPL, account masked,
+    // ib-agent captures/four-leg/20261002-b1 b1_263_algo_refusals, held
+    // PreSubmitted by the server): an Adaptive STP goes out as a stop, its
+    // stop price in the stop price field and the stop trigger, with the
+    // Adaptive block and the algo instruction; no limit price. The
+    // reference's ClOrdID is its own (1288736453.0 for API order 81) and
+    // it writes the default trigger method 6115=0 on the stop, which ibx
+    // does not write on any stop: both left out of the comparison.
+    #[test]
+    fn adaptive_stop_is_the_captured_frame() {
+        const STP: &str = "35=D|11=1288736453.0|99=495.48|1=DUXXXXXXX|6117=495.48|6115=0|6122=c|6010=fourleg|847=Adaptive|5957=1|5958=adaptivePriority|5960=Normal|6121=81|6119=198|38=1|40=3|18=e|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        use crate::api::types::{Order as ApiOrder, TagValue};
+        let order = ApiOrder {
+            action: "BUY".into(), total_quantity: 1.0, order_type: "STP".into(), aux_price: 495.48,
+            algo_strategy: "Adaptive".into(), order_ref: "fourleg".into(),
+            algo_params: vec![TagValue { tag: "adaptivePriority".into(), value: "Normal".into() }],
+            ..Default::default()
+        };
+        let Ok(crate::types::ControlCommand::Order(req)) = crate::client_core::ClientCore::build_order_request(&order, 81, 0) else {
+            panic!("not an order");
+        };
+        assert!(matches!(req, OrderRequest::SubmitEx { kind: crate::types::OrderKind::Stop { .. }, .. }), "{req:?}");
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.set_symbol(0, "AAPL".to_string());
+        context.market.set_min_tick(0, 0.01);
+        context.pending_orders.push(req);
+        let shared = Arc::new(SharedState::new());
+        shared.reference.set_api_client_id(198);
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        let mut buf = vec![0u8; 8192];
+        let n = server.read(&mut buf).unwrap();
+        let mut ours: Vec<(u32, String)> = order_body(buf[..n].split(|&b| b == fix::SOH)
+            .filter_map(|f| {
+                let (t, v) = std::str::from_utf8(f).ok()?.split_once('=')?;
+                Some((t.parse().ok()?, v.to_string()))
+            })
+            .collect());
+        ours.retain(|(t, _)| !matches!(t, 35 | 11));
+        let mut want = parse_frame(STP);
+        want.retain(|(t, _)| !matches!(t, 35 | 11 | 6115));
+        for (t, v) in want.iter_mut() {
+            if *t == 1 { *v = "DU1".into(); }
+        }
+        let (mine, theirs) = common_order(&ours, STP);
+        assert_eq!(mine, theirs, "field order");
+        let sorted = |mut v: Vec<(u32, String)>| { v.sort(); v };
+        assert_eq!(sorted(ours), sorted(want));
+    }
+
+    // ibx#263: every algo keeps the order's own type, its fields and its
+    // instruction letter, the algo letter after it (`jclient.pe.gI()`).
+    #[test]
+    fn algo_orders_keep_their_order_type() {
+        use crate::types::{AdaptivePriority, OrderAlgo, OrderAttrs, OrderKind as K};
+        let adaptive = || OrderAttrs { algo: Some(OrderAlgo::Adaptive(AdaptivePriority::Urgent)), ..Default::default() };
+        let ex = |kind: K, attrs: OrderAttrs| OrderRequest::SubmitEx {
+            order_id: 5, instrument: 0, side: Side::Sell, qty: 1, kind, tif: b'0', attrs };
+        let stop_limit = wire_tags(ex(K::StopLimit { price: px(99.5), stop_price: px(100.0) }, adaptive()));
+        assert_eq!((tag(&stop_limit, 40), tag(&stop_limit, 44), tag(&stop_limit, 99), tag(&stop_limit, 6117)),
+            (Some("4"), Some("99.5"), Some("100"), Some("100")));
+        assert_eq!((tag(&stop_limit, 18), tag(&stop_limit, 847), tag(&stop_limit, 5960)), (Some("e"), Some("Adaptive"), Some("Urgent")));
+        let market = wire_tags(ex(K::Market, adaptive()));
+        assert_eq!((tag(&market, 40), tag(&market, 44), tag(&market, 18)), (Some("1"), None, Some("e")));
+        let trail = wire_tags(ex(K::TrailingStop { trail_amt: px(1.0), trail_stop_price: 0 }, adaptive()));
+        assert_eq!((tag(&trail, 40), tag(&trail, 211), tag(&trail, 18)), (Some("P"), Some("1"), Some("a e")));
+        let rel = wire_tags(ex(K::Rel { offset: px(0.05) }, OrderAttrs { all_or_none: true, ..adaptive() }));
+        assert_eq!((tag(&rel, 40), tag(&rel, 18)), (Some("P"), Some("R G e")));
+        let bench = wire_tags(ex(K::PegBench { starting_price: px(100.0), stock_ref_price: 0, ref_con_id: 1,
+            is_peg_decrease: false, pegged_change_amount: px(0.1), ref_change_amount: px(0.1) }, adaptive()));
+        assert_eq!((tag(&bench, 40), tag(&bench, 18)), (Some("PB"), Some("e R")));
+        // All-or-none on a limit, with and without an algo.
+        let aon = |algo| wire_tags(ex(K::Limit { price: px(100.0) }, OrderAttrs { all_or_none: true, algo, ..Default::default() }));
+        assert_eq!(tag(&aon(None), 18), Some("G"));
+        assert_eq!(tag(&aon(Some(OrderAlgo::Adaptive(AdaptivePriority::Normal))), 18), Some("G e"));
+        // One instruction field, never two.
+        assert_eq!(rel.iter().filter(|(t, _)| *t == 18).count(), 1);
+        // A trailing stop with an algo is still a trailing stop for the
+        // price management flag.
+        let trail: Vec<(u32, &str)> = trail.iter().map(|(t, v)| (*t, v.as_str())).collect();
+        assert!(crate::engine::price_mgmt::excluded_frame(&trail));
     }
 
     // ibx#466: the API order id is an int; a larger order id is not sent.

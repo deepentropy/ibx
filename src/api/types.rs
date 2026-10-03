@@ -486,6 +486,8 @@ impl Order {
                 exempt_code: self.exempt_code,
             },
             use_price_mgmt_algo: self.price_mgmt_algo(),
+            // Set where a new order is built (ibx#263).
+            algo: None,
         }
     }
 

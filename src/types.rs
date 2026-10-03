@@ -577,6 +577,17 @@ pub struct OrderAttrs {
     pub short_sale: ShortSale,
     /// The API usePriceMgmtAlgo: None when unset (ibx#492).
     pub use_price_mgmt_algo: Option<bool>,
+    /// The order's algo, None for none. The reference writes it on top of
+    /// the order's own type and price fields, whatever the type (ibx#263).
+    pub algo: Option<OrderAlgo>,
+}
+
+/// An algo on an order (ibx#263): the Adaptive priority, or the
+/// parameters of another algo.
+#[derive(Debug, Clone)]
+pub enum OrderAlgo {
+    Adaptive(AdaptivePriority),
+    Params(AlgoParams),
 }
 
 /// The short-sale instructions of an order (ibx#417): the API

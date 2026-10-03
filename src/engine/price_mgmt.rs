@@ -25,12 +25,12 @@ pub(crate) fn excluded_kind(kind: &OrderKind) -> bool {
 }
 
 /// The same rule read on a new order as written: its order type and
-/// instruction.
+/// instruction, whose first letter is the trailing one (ibx#263).
 pub(crate) fn excluded_frame(fields: &[(u32, &str)]) -> bool {
     let get = |tag: u32| fields.iter().find(|&&(t, _)| t == tag).map(|&(_, v)| v);
     match get(40) {
         Some("1" | "3" | "J") => true,
-        Some("P") => get(18) == Some("a"),
+        Some("P") => get(18).is_some_and(|v| v.split(' ').next() == Some("a")),
         _ => false,
     }
 }

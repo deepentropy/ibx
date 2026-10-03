@@ -1413,7 +1413,8 @@ fn place_order_algo_vwap() {
     client.place_order(1, &spy(), &order).unwrap();
 
     let cmd = rx.try_recv().unwrap();
-    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitAlgo { .. })));
+    assert!(matches!(cmd, ControlCommand::Order(OrderRequest::SubmitLimitEx {
+        attrs: crate::types::OrderAttrs { algo: Some(crate::types::OrderAlgo::Params(crate::types::AlgoParams::Vwap { .. })), .. }, .. })), "{cmd:?}");
 }
 
 // ibx#318: an algo bracket child keeps its parent link, OCA group and GTC.
@@ -1430,21 +1431,23 @@ fn place_order_algo_bracket_child_keeps_parent_oca_and_tif() {
     };
     client.place_order(101, &spy(), &order).unwrap();
     match rx.try_recv().unwrap() {
-        ControlCommand::Order(OrderRequest::SubmitAlgo { tif, attrs, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitLimitEx { tif, attrs, .. }) => {
             assert_eq!(tif, b'1');
             assert_eq!(attrs.parent_id, 100);
             assert_eq!(attrs.oca_group_str, "BR1");
+            assert!(matches!(attrs.algo, Some(crate::types::OrderAlgo::Params(crate::types::AlgoParams::Twap { .. }))));
         }
-        cmd => panic!("expected SubmitAlgo, got {:?}", cmd),
+        cmd => panic!("expected a limit order with its algo, got {:?}", cmd),
     }
     let adaptive = Order { algo_strategy: "Adaptive".into(), algo_params: vec![], ..order.clone() };
     client.place_order(102, &spy(), &adaptive).unwrap();
     match rx.try_recv().unwrap() {
-        ControlCommand::Order(OrderRequest::SubmitAdaptive { tif, attrs, .. }) => {
+        ControlCommand::Order(OrderRequest::SubmitLimitEx { tif, attrs, .. }) => {
             assert_eq!(tif, b'1');
             assert_eq!(attrs.parent_id, 100);
+            assert!(matches!(attrs.algo, Some(crate::types::OrderAlgo::Adaptive(crate::types::AdaptivePriority::Normal))));
         }
-        cmd => panic!("expected SubmitAdaptive, got {:?}", cmd),
+        cmd => panic!("expected a limit order with its algo, got {:?}", cmd),
     }
 }
 
@@ -1611,7 +1614,7 @@ fn algo_what_if_is_a_preview() {
         client.place_order(74, &spy(), &order).unwrap();
         let cmd = rx.try_recv().unwrap();
         assert!(matches!(&cmd, ControlCommand::Order(OrderRequest::SubmitWhatIf { request })
-            if matches!(**request, OrderRequest::SubmitAdaptive { .. } | OrderRequest::SubmitAlgo { .. })), "{algo}: {cmd:?}");
+            if matches!(&**request, OrderRequest::SubmitLimitEx { attrs, .. } if attrs.algo.is_some())), "{algo}: {cmd:?}");
         assert!(client.core.tracked_order(74).is_none(), "{algo}: not an open order");
     }
 }
@@ -3973,7 +3976,7 @@ fn valid_algo_parameter_values_are_sent() {
         ..Default::default()
     };
     client.place_order(110, &spy(), &order).unwrap();
-    assert!(matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitAlgo { .. }))));
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::SubmitLimitEx { attrs, .. })) if attrs.algo.is_some()));
 }
 
 #[test]

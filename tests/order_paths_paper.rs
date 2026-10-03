@@ -1,7 +1,7 @@
 //! Order-path tests against the real server on the paper account, through `EClient`.
 //!
 //! Covers the order paths fixed in ibx#240 ibx#225 ibx#247 ibx#324 ibx#334
-//! ibx#339 ibx#349 ibx#313 ibx#318 ibx#405 ibx#325 ibx#327 ibx#250 ibx#328. Each case checks
+//! ibx#339 ibx#349 ibx#313 ibx#318 ibx#405 ibx#325 ibx#327 ibx#250 ibx#328 ibx#263. Each case checks
 //! the server's own reply (captured from the engine's wire trace), not only
 //! that `place_order` returned: the replace confirmation must carry the new
 //! values, a bracket child must be cancelled by the server with its parent
@@ -418,6 +418,29 @@ fn algos(paper: &mut Paper, base: i64) {
     paper.place(id, &vwap);
     let up = paper.wait_working(&[id]);
     paper.check(up, "standalone VWAP accepted");
+
+    // ibx#263: an Adaptive stop goes out as a stop with its stop price
+    // and the Adaptive block, as the reference sends it, and the server
+    // keeps it as a stop (PreSubmitted outside the market hours).
+    let id = base + 21;
+    println!("  Adaptive STP (order {})", id);
+    let adaptive_stop = Order {
+        action: "BUY".into(), order_type: "STP".into(), total_quantity: 1.0, aux_price: 5000.0,
+        algo_strategy: "Adaptive".into(),
+        algo_params: vec![TagValue { tag: "adaptivePriority".into(), value: "Normal".into() }],
+        ..Default::default()
+    };
+    paper.place(id, &adaptive_stop);
+    let up = paper.wait_working(&[id]);
+    paper.check(up, "Adaptive STP accepted");
+    let clord = format!("{}.0", id);
+    let sent = frames(true, "D", &clord).into_iter().next();
+    paper.check(sent.as_ref().is_some_and(|f| field(f, 40) == Some("3") && same_number(field(f, 99), 5000.0)
+        && field(f, 44).is_none() && field(f, 18) == Some("e") && field(f, 847) == Some("Adaptive")),
+        "Adaptive STP sent as a stop with its stop price and the Adaptive block");
+    let ack = reply(&clord, &["0", "A"]);
+    paper.check(ack.as_ref().is_some_and(|f| field(f, 40) == Some("3") && same_number(field(f, 99), 5000.0)),
+        "server holds the Adaptive STP as a stop at its stop price");
 }
 
 /// ibx#325 ibx#327: an order whose only extra is a condition keeps it, with

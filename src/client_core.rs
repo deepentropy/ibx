@@ -3542,9 +3542,7 @@ impl ClientCore {
 
         // An algorithm name is checked against the server's definitions
         // (439, ibx#263); one ibx cannot send fails when the order is built.
-        if !order.algo_strategy.is_empty() {
-            return Ok(());
-        }
+        // An algo order is checked as the order type it rides (ibx#263).
         // A what-if is checked as the order it previews (ibx#462).
         match order_type.as_str() {
             "MKT" | "LMT" | "STP" | "STP LMT" | "TRAIL" | "TRAIL LIMIT"
@@ -4346,6 +4344,28 @@ impl ClientCore {
         })))
     }
 
+    /// The order's algo, None when it has none: the Adaptive priority
+    /// (Normal when not given), or the parameters of another algo.
+    fn order_algo(order: &ApiOrder) -> Result<Option<crate::types::OrderAlgo>, String> {
+        use crate::types::OrderAlgo;
+        if order.algo_strategy.is_empty() {
+            return Ok(None);
+        }
+        if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
+            let priority = match order.algo_params.iter()
+                .find(|tv| tv.tag == "adaptivePriority")
+                .map(|tv| tv.value.as_str())
+            {
+                Some("Patient") => AdaptivePriority::Patient,
+                Some("Urgent") => AdaptivePriority::Urgent,
+                _ => AdaptivePriority::Normal,
+            };
+            return Ok(Some(OrderAlgo::Adaptive(priority)));
+        }
+        crate::api::client::parse_algo_params(&order.algo_strategy, &order.algo_params)
+            .map(|params| Some(OrderAlgo::Params(params)))
+    }
+
     /// Build an `OrderRequest` from an API `Order`, handling all order types.
     /// This is the shared order-type match block used by both Rust and Python.
     pub fn build_order_request(
@@ -4367,45 +4387,25 @@ impl ClientCore {
         let qty = order.total_quantity as u32;
         let order_type = order.order_type.to_uppercase();
 
-        // Adaptive orders (special-cased before generic algo)
-        if order.algo_strategy.eq_ignore_ascii_case("Adaptive") {
-            let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-            let priority_str = order.algo_params.iter()
-                .find(|tv| tv.tag == "adaptivePriority")
-                .map(|tv| tv.value.as_str())
-                .unwrap_or("Normal");
-            let priority = match priority_str {
-                "Patient" => AdaptivePriority::Patient,
-                "Urgent" => AdaptivePriority::Urgent,
-                _ => AdaptivePriority::Normal,
-            };
-            return Ok(ControlCommand::Order(OrderRequest::SubmitAdaptive {
-                order_id, instrument, side, qty, price, priority,
-                tif: order.tif_byte(), attrs: order.attrs(),
-            }));
-        }
-
-        // Algo orders
-        if !order.algo_strategy.is_empty() {
-            let algo = crate::api::client::parse_algo_params(&order.algo_strategy, &order.algo_params)?;
-            let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-            return Ok(ControlCommand::Order(OrderRequest::SubmitAlgo {
-                order_id, instrument, side, qty, price, algo,
-                tif: order.tif_byte(), attrs: order.attrs(),
-            }));
-        }
+        // An algo rides the order's own type and price fields, as the
+        // reference writes it (ibx#263: an Adaptive STP goes out as a stop
+        // with its stop price and the Adaptive block); it takes the
+        // extended path, which writes the algo block.
+        let algo = Self::order_algo(order)?;
 
         // Every order type must carry extended attributes and a non-DAY tif
         // when the caller sets them — dropping them silently produced
         // unlinked, immediate-DAY bracket children (ibx#224). An empty tif
         // is treated as DAY, matching the official API default.
         let extended = order.has_extended_attrs()
-            || !matches!(order.tif.as_str(), "" | "DAY");
+            || !matches!(order.tif.as_str(), "" | "DAY")
+            || algo.is_some();
+        let attrs = || crate::types::OrderAttrs { algo: algo.clone(), ..order.attrs() };
         let ex = |kind: OrderKind| OrderRequest::SubmitEx {
             order_id, instrument, side, qty,
             kind,
             tif: order.tif_byte(),
-            attrs: order.attrs(),
+            attrs: attrs(),
         };
 
         // Adjustable stop: a base STP that converts to another order type when
@@ -4464,7 +4464,7 @@ impl ClientCore {
                     OrderRequest::SubmitLimitEx {
                         order_id, instrument, side, qty, price,
                         tif: order.tif_byte(),
-                        attrs: order.attrs(),
+                        attrs: attrs(),
                     }
                 } else {
                     OrderRequest::SubmitLimit { order_id, instrument, side, qty, price }
@@ -4490,7 +4490,7 @@ impl ClientCore {
                         OrderRequest::SubmitTrailingStopPctEx {
                             order_id, instrument, side, qty, trail_pct: pct,
                             tif: order.tif_byte(),
-                            attrs: order.attrs(),
+                            attrs: attrs(),
                             trail_stop_price: trail_stop,
                         }
                     } else {
