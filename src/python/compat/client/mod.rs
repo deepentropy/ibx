@@ -7,6 +7,8 @@ mod reference;
 mod dispatch;
 mod stubs;
 mod test_helpers;
+#[cfg(feature = "test-support")]
+mod scenario;
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
