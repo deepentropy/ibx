@@ -2382,6 +2382,68 @@ fn api_depth_books_live() {
     assert!(w.errors.iter().all(|e| e.1 != 317), "a book was reset: {:?}", w.errors);
 }
 
+/// AAPL SmartDepth (10 rows), then AAPL on IEX alone (shares the IEX book
+/// of the SmartDepth request), then AAPL on ISLAND alone, in regular
+/// hours, as the reference gives them on paper (captured 28/09/2026 and
+/// 25/09/2026): one warning 2152 for the SmartDepth request, "Exchanges -
+/// Depth: IEX; Top: ..." then "Need additional market data permissions -
+/// Depth: ..." with NASDAQ, BATS, ARCA, BEX and NYSE; the IEX request gets
+/// rows within a second; the ISLAND request ends with 10089 (or 354) and
+/// the contract "AAPL NASDAQ.NMS/DEEP" at the end of the text.
+/// Run with: cargo test --test rust_api_gt api_depth_status_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_depth_status_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = DepthWrapper::default();
+    let pump = |w: &mut DepthWrapper, secs: u64| {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(secs) {
+            client.process_msgs(w);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    pump(&mut w, 3);
+    w.errors.clear();
+    client.req_mkt_depth(831, &aapl(), 10, true).unwrap();
+    pump(&mut w, 15);
+    let iex = Contract { exchange: "IEX".into(), ..aapl() };
+    client.req_mkt_depth(832, &iex, 5, false).unwrap();
+    pump(&mut w, 1);
+    let iex_rows = w.rows.iter().filter(|r| r.0 == 832).count();
+    let island = Contract { exchange: "ISLAND".into(), ..aapl() };
+    client.req_mkt_depth(833, &island, 5, false).unwrap();
+    pump(&mut w, 10);
+    client.cancel_mkt_depth(832).unwrap();
+    client.cancel_mkt_depth(831).unwrap();
+    pump(&mut w, 1);
+    client.disconnect();
+    for e in &w.errors {
+        println!("  error {e:?}");
+    }
+    let status: Vec<_> = w.errors.iter().filter(|e| e.0 == 831 && e.1 == 2152).collect();
+    assert_eq!(status.len(), 1, "one 2152 for the SmartDepth request: {:?}", w.errors);
+    let text = &status[0].2;
+    assert!(text.starts_with("Exchanges - Depth: IEX; Top: "), "{text}");
+    let need = text.split("Need additional market data permissions - Depth: ").nth(1).expect("the refused books");
+    for ex in ["NASDAQ", "BATS", "ARCA", "BEX", "NYSE"] {
+        assert!(need.contains(&format!("{ex}; ")), "{text}");
+    }
+    assert!(iex_rows > 0, "the IEX request got no row within a second");
+    let refusal = w.errors.iter().find(|e| e.0 == 833).expect("the ISLAND request is refused");
+    assert!(matches!(refusal.1, 10089 | 354) && refusal.2.ends_with("AAPL NASDAQ.NMS/DEEP"), "{refusal:?}");
+    assert!(w.errors.iter().all(|e| e.1 != 317 && e.1 != 310), "{:?}", w.errors);
+}
+
 // ── Several requests on one contract (ibx#444) and the generic tick list (ibx#450), focused ──
 
 /// Two request ids on AAPL with the same news tick, a third without, two
