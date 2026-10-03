@@ -350,8 +350,10 @@ impl EClient {
         let shared = self.shared_state()?;
         let ps = PRICE_SCALE as f64;
         shared.market.push_tbt_trade(TbtTrade {
-            instrument, price: (price * ps) as i64, size,
+            instrument, req_id: self.core.req_id_for_instrument(instrument), tbt_type: TbtType::Last,
+            price: (price * ps) as i64, size,
             exchange: exchange.to_string(), conditions: String::new(), timestamp: 12345,
+            past_limit: false, unreported: false,
         });
         Ok(())
     }
@@ -364,9 +366,10 @@ impl EClient {
         let shared = self.shared_state()?;
         let ps = PRICE_SCALE as f64;
         shared.market.push_tbt_quote(TbtQuote {
-            instrument,
+            instrument, req_id: self.core.req_id_for_instrument(instrument),
             bid: (bid * ps) as i64, ask: (ask * ps) as i64,
             bid_size, ask_size, timestamp: 12345,
+            bid_past_low: false, ask_past_high: false,
         });
         Ok(())
     }

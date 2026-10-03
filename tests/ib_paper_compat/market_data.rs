@@ -358,6 +358,7 @@ pub(super) fn phase_tbt_subscribe(conns: Conns) -> Conns {
     );
     control_tx
         .send(ControlCommand::SubscribeTbt {
+            req_id: 1,
             con_id: 756733,
             symbol: "SPY".into(),
             exchange: "SMART".into(),
@@ -963,6 +964,7 @@ pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
 
     control_tx
         .send(ControlCommand::SubscribeTbt {
+            req_id: 1,
             con_id: 756733,
             symbol: "SPY".into(),
             exchange: "SMART".into(),
@@ -1010,9 +1012,9 @@ pub(super) fn phase_tbt_unsubscribe(conns: Conns) -> Conns {
     }
     println!("  Step 1b: {} TBT events already delivered when the unsubscribe is sent", tbt_queued);
 
-    // Step 2: Unsubscribe — instrument 0 is the first registered (SPY)
+    // Step 2: Unsubscribe request 1 (SPY)
     control_tx
-        .send(ControlCommand::UnsubscribeTbt { instrument: 0 })
+        .send(ControlCommand::UnsubscribeTbt { req_id: 1 })
         .unwrap();
     std::thread::sleep(Duration::from_secs(3));
 
@@ -1070,6 +1072,7 @@ pub(super) fn phase_tbt_and_quotes_dual_stream(conns: Conns) -> Conns {
         .unwrap();
     control_tx
         .send(ControlCommand::SubscribeTbt {
+            req_id: 1,
             con_id: 756733,
             symbol: "SPY".into(),
             exchange: "SMART".into(),

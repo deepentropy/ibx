@@ -682,10 +682,10 @@ fn shared_state_all_drains_empty_after_first_call() {
         status: OrderStatus::Filled, filled_qty_fixed: (1) as i64 * ibx::types::QTY_SCALE, remaining_qty_fixed: (0) as i64 * ibx::types::QTY_SCALE, perm_id: 0, parent_id: 0, timestamp_ns: 0 });
     ss.orders.push_cancel_reject(CancelReject { order_id: 1, instrument: 0,
         reject_type: 1, reason_code: 0, timestamp_ns: 0 });
-    ss.market.push_tbt_trade(TbtTrade { instrument: 0, price: PRICE_SCALE,
-        size: 1, timestamp: 0, exchange: String::new(), conditions: String::new() });
-    ss.market.push_tbt_quote(TbtQuote { instrument: 0, bid: PRICE_SCALE, ask: PRICE_SCALE,
-        bid_size: 1, ask_size: 1, timestamp: 0 });
+    ss.market.push_tbt_trade(TbtTrade { instrument: 0, req_id: 1, tbt_type: TbtType::AllLast, price: PRICE_SCALE,
+        size: 1, timestamp: 0, exchange: String::new(), conditions: String::new(), past_limit: false, unreported: false });
+    ss.market.push_tbt_quote(TbtQuote { instrument: 0, req_id: 1, bid: PRICE_SCALE, ask: PRICE_SCALE,
+        bid_size: 1, ask_size: 1, timestamp: 0, bid_past_low: false, ask_past_high: false });
 
     // First drain
     assert_eq!(ss.orders.drain_fills().len(), 1);

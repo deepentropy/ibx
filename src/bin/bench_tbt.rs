@@ -47,7 +47,7 @@ fn main() {
         "[{:.3}s] Subscribing to TBT Last trades...",
         start.elapsed().as_secs_f64(),
     );
-    session.subscribe_tbt(config.con_id, config.symbol, TbtType::AllLast);
+    session.subscribe_tbt(1, config.con_id, config.symbol, TbtType::AllLast);
 
     let trade_stats = collect_tbt_trades(
         &session.event_rx,
@@ -57,7 +57,7 @@ fn main() {
     );
 
     // Unsubscribe TBT Last — need instrument ID. Use 0 as first instrument.
-    session.unsubscribe_tbt(0);
+    session.unsubscribe_tbt(1);
     std::thread::sleep(Duration::from_millis(500));
     while session.event_rx.try_recv().is_ok() {}
 
@@ -66,7 +66,7 @@ fn main() {
         "[{:.3}s] Subscribing to TBT BidAsk quotes...",
         start.elapsed().as_secs_f64(),
     );
-    session.subscribe_tbt(config.con_id, config.symbol, TbtType::BidAsk);
+    session.subscribe_tbt(2, config.con_id, config.symbol, TbtType::BidAsk);
 
     let quote_stats = collect_tbt_quotes(
         &session.event_rx,

@@ -272,25 +272,19 @@ impl EClient {
             let _ = self.cancel_mkt_data(req_id);
         }
 
-        // Tick-by-tick requests the server refused: 10189 with its text,
-        // and the request ends (ibx#455).
-        for (instrument, tbt_type, text) in self.shared.market.drain_tbt_errors() {
-            if let Some(req_id) = self.core.tbt_req_of_type(instrument, tbt_type) {
-                wrapper.error(req_id, 10189, &format!("Failed to request tick-by-tick data.{}", text), "");
-                if let Some(instrument) = self.core.unregister_tbt(req_id) {
-                    let _ = self.control_tx.send(ControlCommand::UnsubscribeTbt { instrument });
-                }
-            }
+        // Tick-by-tick requests that ended with an error (10189, 10190):
+        // the engine already let them go (ibx#455).
+        for (req_id, code, text) in self.shared.market.drain_tbt_errors() {
+            wrapper.error(req_id, code as i64, &text, "");
+            self.core.unregister_tbt(req_id);
         }
 
         // TBT trades → tick_by_tick_all_last, tickType 1 for Last and 2 for
-        // AllLast (ibx#455)
+        // AllLast, with the entry's attributes (ibx#404, ibx#455)
         for trade in self.shared.market.drain_tbt_trades() {
-            let (req_id, tick_type) = self.core.tbt_req_for(trade.instrument, true)
-                .map_or((-1, 1), |(r, t)| (r, t.api_tick_type()));
-            let attrib_last = TickAttribLast::default();
+            let attrib_last = TickAttribLast { past_limit: trade.past_limit, unreported: trade.unreported };
             wrapper.tick_by_tick_all_last(
-                req_id, tick_type, trade.timestamp as i64,
+                trade.req_id, trade.tbt_type.api_tick_type(), trade.timestamp as i64,
                 trade.price as f64 / PRICE_SCALE_F, trade.size as f64,
                 &attrib_last, &trade.exchange, &trade.conditions,
             );
@@ -298,13 +292,17 @@ impl EClient {
 
         // TBT quotes → tick_by_tick_bid_ask
         for quote in self.shared.market.drain_tbt_quotes() {
-            let req_id = self.core.tbt_req_for(quote.instrument, false).map_or(-1, |(r, _)| r);
-            let attrib_ba = TickAttribBidAsk::default();
+            let attrib_ba = TickAttribBidAsk { bid_past_low: quote.bid_past_low, ask_past_high: quote.ask_past_high };
             wrapper.tick_by_tick_bid_ask(
-                req_id, quote.timestamp as i64,
+                quote.req_id, quote.timestamp as i64,
                 quote.bid as f64 / PRICE_SCALE_F, quote.ask as f64 / PRICE_SCALE_F,
                 quote.bid_size as f64, quote.ask_size as f64, &attrib_ba,
             );
+        }
+
+        // TBT midpoints → tick_by_tick_mid_point (ibx#404)
+        for mid in self.shared.market.drain_tbt_mid_points() {
+            wrapper.tick_by_tick_mid_point(mid.req_id, mid.timestamp as i64, mid.mid_point as f64 / PRICE_SCALE_F);
         }
 
         // Depth updates → update_mkt_depth / update_mkt_depth_l2, as the

@@ -1374,6 +1374,20 @@ pub fn parse_server_time(s: &str) -> Option<i64> {
 /// separated, give past limit (`H`), unreported (`U`), ask past high (`AH`)
 /// and bid past low (`BH`). A price `nan` is the maximum double.
 pub fn parse_tick_response(xml: &str) -> Option<TickFrame> {
+    // The reply's data name comes before its events.
+    let head = &xml[..xml.find("<Events>").unwrap_or(xml.len())];
+    let data_name = extract_xml_tag(head, "data").unwrap_or("").trim();
+    parse_tick_frame(xml, data_name)
+}
+
+/// The tick result set that opens a tick-by-tick request with a tick
+/// count (ibx#455): its ticks are read by the request's type, as the
+/// reference reads them (`Last` / `AllLast` as trades).
+pub fn parse_tick_by_tick_history(xml: &str, tbt_type: crate::types::TbtType) -> Option<TickFrame> {
+    parse_tick_frame(xml, tbt_type.as_str())
+}
+
+fn parse_tick_frame(xml: &str, data_name: &str) -> Option<TickFrame> {
     use crate::api::types::{TickAttribBidAsk, TickAttribLast};
     use crate::types::{HistoricalTickBidAsk, HistoricalTickData, HistoricalTickLast, HistoricalTickMidpoint};
     if !xml.contains("<ResultSetTick>") {
@@ -1382,9 +1396,6 @@ pub fn parse_tick_response(xml: &str) -> Option<TickFrame> {
     let query_id = extract_xml_tag(xml, "id").unwrap_or("").to_string();
     let done = extract_xml_tag(xml, "eoq").unwrap_or("false").trim() == "true";
     let size_step: Option<f64> = extract_xml_tag(xml, "sizeMinTick").and_then(|s| s.trim().parse().ok());
-    // The reply's data name comes before its events.
-    let head = &xml[..xml.find("<Events>").unwrap_or(xml.len())];
-    let data_name = extract_xml_tag(head, "data").unwrap_or("").trim();
     let data_name = data_name.strip_prefix("All").unwrap_or(data_name);
 
     let mut ticks: Vec<&str> = Vec::new();
@@ -1509,7 +1520,10 @@ pub fn build_realtime_bar_xml(
 /// Decode a real-time bar binary payload.
 ///
 /// Uses LSB-first bit reader with 4-byte group reversal.
-/// Returns (low, open, high, close, volume, wap, count) or None.
+/// Returns (low, open, high, close, volume, wap, count) or None. As the
+/// reference's 5-second router, a bar with a negative trade count, or an
+/// empty one (no trade, all prices and the WAP total 0), is dropped
+/// (ibx#454).
 pub fn decode_bar_payload(payload: &[u8], min_tick: f64) -> Option<crate::types::RealTimeBar> {
     if payload.is_empty() {
         return None;
@@ -1548,6 +1562,10 @@ pub fn decode_bar_payload(payload: &[u8], min_tick: f64) -> Option<crate::types:
     } else {
         read_bits(&mut pos, 32) as i32
     };
+    if count < 0 {
+        log::info!("5-second bar dropped: invalid number of trades {}", count);
+        return None;
+    }
 
     // Low price in ticks (31-bit signed)
     let low_ticks = read_bits(&mut pos, 31);
@@ -1589,6 +1607,12 @@ pub fn decode_bar_payload(payload: &[u8], min_tick: f64) -> Option<crate::types:
     } else {
         read_bits(&mut pos, 32) as f64
     };
+
+    let wap_total = volume * low + wap_sum * min_tick;
+    if count == 0 && low == 0.0 && open == 0.0 && high == 0.0 && close == 0.0 && wap_total == 0.0 {
+        log::debug!("5-second bar dropped: completely empty");
+        return None;
+    }
 
     let wap = if count > 1 && volume > 0.0 {
         low + wap_sum * min_tick / volume
@@ -2620,5 +2644,51 @@ mod tests {
         // After 4-byte group reversal decoding, this is complex to hand-build.
         // Just verify None on empty payload.
         assert!(decode_bar_payload(&[], 0.01).is_none());
+    }
+
+    /// A bar payload from `(value, width)` fields, LSB first, 4-byte
+    /// groups reversed as on the wire.
+    fn bar_payload(fields: &[(u32, usize)]) -> Vec<u8> {
+        let mut bits: Vec<u8> = Vec::new();
+        for &(v, n) in fields {
+            for i in 0..n {
+                bits.push(((v >> i) & 1) as u8);
+            }
+        }
+        let mut bytes = vec![0u8; bits.len().div_ceil(32) * 4];
+        for (i, b) in bits.iter().enumerate() {
+            bytes[i / 8] |= b << (i % 8);
+        }
+        bytes.chunks(4).flat_map(|c| c.iter().rev().copied().collect::<Vec<_>>()).collect()
+    }
+
+    // ibx#454: as the reference's 5-second router, a negative 32-bit
+    // trade count drops the bar, so does a completely empty bar (no trade,
+    // all prices and the WAP total 0); a bar with no trade but a price is
+    // kept (captured pre-market 25/09/2026: flat bars with volume 0).
+    #[test]
+    fn bar_drop_rules() {
+        // pad, short count flag, count, low, short volume flag, volume.
+        let flat = bar_payload(&[(0, 4), (1, 1), (0, 8), (33_596, 31), (1, 1), (0, 16)]);
+        let bar = decode_bar_payload(&flat, 0.01).expect("a bar with a price is kept");
+        assert_eq!((bar.count, bar.volume), (0, 0.0));
+        assert!((bar.close - 335.96).abs() < 1e-9);
+        let empty = bar_payload(&[(0, 4), (1, 1), (0, 8), (0, 31), (1, 1), (0, 16)]);
+        assert!(decode_bar_payload(&empty, 0.01).is_none());
+        let negative = bar_payload(&[(0, 4), (0, 1), (0x8000_0001, 32), (100, 31), (1, 1), (5, 16)]);
+        assert!(decode_bar_payload(&negative, 0.01).is_none());
+    }
+
+    // ibx#455: the past ticks of a tick-by-tick request are read by the
+    // request's type, Last and AllLast as trades.
+    #[test]
+    fn tick_by_tick_history_is_read_by_the_request_type() {
+        let xml = "<ResultSetTick><id>rtTicker1;;SPY@SMARTMidPoint;;1;;true;;0;;U</id><eoq>false</eoq><Events>\
+            <Tick><time>20260918-13:30:00</time><price>660.5</price><size>0</size></Tick></Events></ResultSetTick>";
+        let f = parse_tick_by_tick_history(xml, crate::types::TbtType::MidPoint).unwrap();
+        assert!(!f.done);
+        assert!(matches!(f.data, Some(crate::types::HistoricalTickData::Midpoint(ref t)) if t.len() == 1 && t[0].price == 660.5));
+        let f = parse_tick_by_tick_history(xml, crate::types::TbtType::AllLast).unwrap();
+        assert!(matches!(f.data, Some(crate::types::HistoricalTickData::Last(_))));
     }
 }
