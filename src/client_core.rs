@@ -924,9 +924,14 @@ impl StreamPass<'_> {
                 }),
                 // The delayed sender sends no exchanges.
                 12 | 13 if self.delayed => {}
+                // An empty text is not sent (`jextend.dK.c(List,int,int,
+                // String)@0-14`): no letters before the exchange map came.
                 12 | 13 => {
                     let tick_type = if idx == 12 { TICK_BID_EXCHANGE } else { TICK_ASK_EXCHANGE };
-                    self.ticks.push(MdTick::Text { tick_type, value: render_exchange_mask(self.fields[idx], self.instrument, self.shared) });
+                    let value = render_exchange_mask(self.fields[idx], self.instrument, self.shared);
+                    if !value.is_empty() {
+                        self.ticks.push(MdTick::Text { tick_type, value });
+                    }
                 }
                 _ => {}
             }
@@ -3291,7 +3296,10 @@ impl ClientCore {
         }
         for (mask, tt) in [(q.bid_exch_mask, TICK_BID_EXCHANGE), (q.ask_exch_mask, TICK_ASK_EXCHANGE)] {
             if !delayed && mask != 0 && snap.take(tt) {
-                ticks.push(MdTick::Text { tick_type: tt, value: render_exchange_mask(mask, iid, shared) });
+                let value = render_exchange_mask(mask, iid, shared);
+                if !value.is_empty() {
+                    ticks.push(MdTick::Text { tick_type: tt, value });
+                }
             }
         }
         let delivered = !ticks.is_empty();
