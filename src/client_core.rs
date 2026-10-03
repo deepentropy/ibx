@@ -669,8 +669,11 @@ pub struct OrderView {
 }
 
 /// Text of error 10027, a smartComboRoutingParams name the reference does
-/// not know (ibx#470).
-pub const INVALID_COMBO_ROUTING_TAG: &str = "Invalid combo routing tag. Valid tags are LeginPrio, MaxSegSize,     DontLeginNext, ChangeToMktTime1, ChangeToMktTime2, ChangeToMktOffset, DiscretionaryPct, NonGuaranteed,     CondPriceMin, CondPriceMax, and PriceCondConid.";
+/// not know (ibx#470; one space after each comma, as the message table
+/// `Invalid_combo_routing_tag_api`, ibx#485).
+pub const INVALID_COMBO_ROUTING_TAG: &str = "Invalid combo routing tag. Valid tags are LeginPrio, MaxSegSize, \
+    DontLeginNext, ChangeToMktTime1, ChangeToMktTime2, ChangeToMktOffset, DiscretionaryPct, NonGuaranteed, \
+    CondPriceMin, CondPriceMax, and PriceCondConid.";
 
 /// The order attribute tag of a smartComboRoutingParams name
 /// (`jattrib.Attributes.f`, ibx#470); None for a name the reference does
@@ -4371,14 +4374,25 @@ impl ClientCore {
     }
 
     /// Order rules the reference checks before sending, answered as error
-    /// 321 with the rule text (ibx#468). The text after "cause - " is the
-    /// rule's; for the TRAIL LIMIT rule only its end is known.
+    /// 321 with the rule text (ibx#468), in the reference's order
+    /// (`jextend.bH.S()` stops at the first). The text after "cause - " is
+    /// the rule's; for the TRAIL LIMIT rule only its end is known.
     fn order_rule_refusal(order: &ApiOrder) -> Option<(i64, String)> {
         let refuse = |cause: &str| Some((321, format!("Error validating request.-'bH' : cause - {}", cause)));
         let order_type = order.order_type.to_uppercase();
         // A quantity below 0 or above 999,999,999 (ibx#263).
         if order.total_quantity < 0.0 || order.total_quantity > 999_999_999.0 {
             return refuse("Order size does not conform to market rule.");
+        }
+        // A stop type without its stop price, the API's unset value
+        // (`jextend.bH.S()@1690-1750`, ibx#485): the auxPrice of STP,
+        // STP LMT and STP PRT, the trailStopPrice of a TRAIL LIMIT
+        // (ib-agent#194, no final period; ibx takes 0 as unset there too).
+        let stop_type = matches!(order_type.as_str(), "STP" | "STP LMT" | "STP PRT");
+        if (stop_type && order.aux_price == f64::MAX)
+            || (order_type == "TRAIL LIMIT" && (order.trail_stop_price == f64::MAX || order.trail_stop_price == 0.0))
+        {
+            return refuse("Please enter a stop price");
         }
         // A trigger method that is not one of the reference's (ibx#263,
         // `jextend.bH.S()@2257`, error 146's text): 0 default, 1 double
@@ -4392,20 +4406,6 @@ impl ClientCore {
         if order.what_if && !order.transmit {
             return Some((321, "Error validating request.-'v' : cause - What-If order should have transmit flag set to TRUE.".into()));
         }
-        // Midprice outside regular hours: refused whatever the time of day
-        // (the flag alone, reference refusal 10210).
-        if matches!(order_type.as_str(), "MIDPRICE" | "MIDPX") && order.outside_rth {
-            return refuse("Midprice orders are not supported outside of regular trading hours.");
-        }
-        // TRAIL LIMIT: exactly one of lmtPrice and lmtPriceOffset (also on a
-        // replace: sending back the computed lmtPrice with the offset was
-        // refused, captured 23/09/2026). lmtPrice is unset at 0 or MAX,
-        // lmtPriceOffset at MAX.
-        // A TRAIL LIMIT needs its stop price (trailStopPrice), checked
-        // before the limit fields (ib-agent#194, no final period).
-        if order_type == "TRAIL LIMIT" && (order.trail_stop_price == f64::MAX || order.trail_stop_price == 0.0) {
-            return refuse("Please enter a stop price");
-        }
         // A trailing percent below 0 or above 100 (ibx#263).
         let pct = order.trailing_percent;
         if matches!(order_type.as_str(), "TRAIL" | "TRAIL LIMIT") && pct != 0.0 && pct != f64::MAX
@@ -4413,12 +4413,32 @@ impl ClientCore {
         {
             return refuse("Invalid Trailing Percent value. Valid values are greater than 0 and less than 100.");
         }
+        // A stop or trigger price that is not a number (`jextend.bH.S()`
+        // @6661-6696 for the stop types, error 403's text; @6731-6766 for
+        // MIT and LIT, error 361's; the value must be finite and set,
+        // `twslaunch.jutils.av.d(double)`; ibx#485).
+        let stop = if order_type == "TRAIL LIMIT" { order.trail_stop_price } else { order.aux_price };
+        if (stop_type || order_type == "TRAIL LIMIT") && !stop.is_finite() {
+            return refuse("Invalid Stop Price");
+        }
+        if matches!(order_type.as_str(), "MIT" | "LIT") && (!order.aux_price.is_finite() || order.aux_price == f64::MAX) {
+            return refuse("Invalid Trigger Price");
+        }
+        // TRAIL LIMIT: exactly one of lmtPrice and lmtPriceOffset (also on a
+        // replace: sending back the computed lmtPrice with the offset was
+        // refused, captured 23/09/2026). lmtPrice is unset at 0 or MAX,
+        // lmtPriceOffset at MAX.
         if order_type == "TRAIL LIMIT" {
             let price_set = order.lmt_price != 0.0 && order.lmt_price != f64::MAX;
             let offset_set = order.lmt_price_offset != f64::MAX;
             if price_set == offset_set {
                 return refuse("You must specify one value: limit price or limit price offset value.");
             }
+        }
+        // Midprice outside regular hours: refused whatever the time of day
+        // (the flag alone, reference refusal 10210, `jextend.bH.S()@7521`).
+        if matches!(order_type.as_str(), "MIDPRICE" | "MIDPX") && order.outside_rth {
+            return refuse("Midprice orders are not supported outside of regular trading hours.");
         }
         None
     }
@@ -5749,6 +5769,28 @@ mod tests {
         let two = ApiOrder { discretionary_amt: -0.1, ..both };
         assert_eq!(ClientCore::refusal_before_sending(&two).unwrap().1,
             "Error reading request:Cannot specify Trailing Amount and Trailing Percent at the same time");
+    }
+
+    // ibx#485: the stop and trigger price rules of the reference, in its
+    // order: an unset stop price, then a stop or trigger price that is not
+    // a number; a set price passes.
+    #[test]
+    fn stop_and_trigger_prices_follow_the_reference() {
+        let rule = |cause: &str| Some((321, format!("Error validating request.-'bH' : cause - {}", cause)));
+        let typed = |t: &str, aux: f64| ApiOrder { order_type: t.into(), aux_price: aux, ..lmt(100.0) };
+        for t in ["STP", "STP LMT", "STP PRT"] {
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::MAX)), rule("Please enter a stop price"), "{t}");
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::NAN)), rule("Invalid Stop Price"), "{t}");
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, 90.0)), None, "{t}");
+        }
+        for t in ["MIT", "LIT"] {
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::MAX)), rule("Invalid Trigger Price"), "{t}");
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::INFINITY)), rule("Invalid Trigger Price"), "{t}");
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, 90.0)), None, "{t}");
+        }
+        // The stop price comes before the trigger method.
+        let both = ApiOrder { trigger_method: 5, ..typed("STP", f64::MAX) };
+        assert_eq!(ClientCore::refusal_before_sending(&both), rule("Please enter a stop price"));
     }
 
     // ibx#468: two local refusals of the reference.
