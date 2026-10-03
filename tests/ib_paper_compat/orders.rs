@@ -616,7 +616,7 @@ pub(super) fn phase_limit_fok(conns: Conns) -> Conns {
     let conns = shutdown_and_reclaim(&control_tx, join, account_id);
 
     if order_rejected {
-        let errors: Vec<(i64, String)> = shared.orders.drain_order_errors()
+        let errors: Vec<(i64, String)> = drain_after_reject(&shared)
             .into_iter().map(|(_, code, text)| (code, text)).collect();
         if is_reference_reject(&errors, FOK_REFERENCE_REJECT) {
             pass!("  PASS (rejected by the server as the reference: {})

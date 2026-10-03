@@ -476,9 +476,11 @@ fn conditions(paper: &mut Paper, base: i64) {
     }
 }
 
-/// ibx#250: a server reject reaches the caller as error 201 with the
-/// server's reason, before the Inactive status (ib-agent#192 C1). The server
-/// refuses FOK on this route (ib-agent#192 C7).
+/// ibx#250, ibx#486: a server reject reaches the caller as the Inactive
+/// status, then error 201 with the server's reason, then the status once
+/// more, as the reference (every 39=8 of the four-leg recordings of 26/09
+/// to 02/10/2026, ib-agent captures/four-leg). The server refuses FOK on
+/// this route (ib-agent#192 C7).
 fn server_reject(paper: &mut Paper, id: i64) {
     println!("  server reject (order {})", id);
     let order = Order {
@@ -486,15 +488,17 @@ fn server_reject(paper: &mut Paper, id: i64) {
         tif: "FOK".into(), ..Default::default()
     };
     paper.place(id, &order);
-    let done = paper.pump(20, |s| last_status(s, id).as_deref() == Some("Inactive"));
+    let error_key = format!("error:{}:201", id);
+    let done = paper.pump(20, |s| last_status(s, id).as_deref() == Some("Inactive")
+        && s.sequence.iter().any(|e| *e == error_key));
     let s = paper.state.lock().unwrap();
-    let error = s.sequence.iter().position(|e| *e == format!("error:{}:201", id));
+    let error = s.sequence.iter().position(|e| *e == error_key);
     let status = s.sequence.iter().position(|e| *e == format!("status:{}:Inactive", id));
     let reason_ok = s.errors.iter().any(|(r, c, m)| *r == id && *c == 201 && m.starts_with("Order rejected - reason:") && m.len() > 24);
     drop(s);
-    paper.check(done, "server reject: status Inactive");
+    paper.check(done, "server reject: status Inactive and error 201");
     paper.check(reason_ok, "server reject: error 201 with the server's reason");
-    paper.check(error.is_some() && error < status, "server reject: error before the status");
+    paper.check(status.is_some() && status < error, "server reject: the status before the error");
 }
 
 /// ibx#328: every new order carries the contract id after the secondary

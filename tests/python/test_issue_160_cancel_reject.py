@@ -146,7 +146,7 @@ class TestCancelRejectReconcile:
                 assert not statuses, (candidate_id, errors, statuses)
                 continue
             if 202 in codes:
-                # Normal cancel: the notice, then Cancelled.
+                # Normal cancel: Cancelled, then the notice (ibx#486).
                 assert codes == [202], errors
                 assert statuses and statuses[-1] == "Cancelled", (candidate_id, statuses)
                 continue
