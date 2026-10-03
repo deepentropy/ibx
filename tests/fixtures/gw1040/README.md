@@ -51,3 +51,18 @@ it always comes after the `fix_in` that caused it.
 | `20261002` | pre-open | b1_432_hist_ticks: historical ticks of AAPL and EUR.USD (start, end, both, no zone, refusals, AGGTRADES); b1_429_keep_up_to_date: four keepUpToDate requests, their updates, cancels and refusals; b1_431_hist_format: formatDate 1 and 2 bars, historicalDataEnd strings, head timestamps, cancel of an unknown request |
 
 The `6010` (orderRef) values in the order frames are labels chosen by the recording scripts.
+
+## Codec fixtures (`codec/`, ibx#486)
+
+Slices of the scenarios above (and of other recorded sessions) for the golden codec tests (`src/golden/`), one file
+per scenario, `codec/1` format, made by `scripts/codec_fixtures.py`:
+
+- line 1, the header: `scenario`, `area`, `source` (the scenario file), `capture_date`, `market_session`, `notes`;
+- then the kept records in their order (`seq`, `leg`, `conn`, `msg_type` or `msg_name`, `raw_b64`), with the API side
+  decoded by the official client library: `request` on an `api_out` record (for placeOrder the order and the contract
+  as the library reads them back, only the fields that differ from a new object), `callbacks` on an `api_in` record
+  (the wrapper calls the library makes for the message).
+
+The decode tests send the recorded server frames to ibx (the farm request ids and lookup ids replaced by ibx's) and
+compare ibx's callbacks with `callbacks`; the encode tests make the `request` again and compare ibx's messages with the
+recorded ones after `test_support::normalise`.
