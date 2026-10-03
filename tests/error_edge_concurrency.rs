@@ -25,6 +25,35 @@ fn test_client() -> (EClient, crossbeam_channel::Receiver<ControlCommand>, Arc<S
     (client, rx, shared)
 }
 
+/// A client whose commands go to a stand-in for the engine, which answers
+/// every subscription and registration with instrument 0 (the seeded SPY
+/// slot) at once. Without it each market data request waits for the
+/// registration timeout (5 s). Send `Shutdown` to end it; it returns the
+/// number of commands it got before.
+fn test_client_with_engine() -> (EClient, crossbeam_channel::Sender<ControlCommand>, thread::JoinHandle<usize>, Arc<SharedState>) {
+    let shared = Arc::new(SharedState::new());
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let engine = thread::spawn(move || {
+        let mut count = 0;
+        while let Ok(cmd) = rx.recv() {
+            match cmd {
+                ControlCommand::Shutdown => break,
+                ControlCommand::Subscribe { reply_tx: Some(reply), .. }
+                | ControlCommand::RegisterInstrument { reply_tx: Some(reply), .. } => {
+                    let _ = reply.send(Ok(0));
+                }
+                _ => {}
+            }
+            count += 1;
+        }
+        count
+    });
+    let client = EClient::from_parts(shared.clone(), tx.clone(), thread::spawn(|| {}), "DU123".into());
+    client.seed_instrument(756733, 0);
+    client.seed_instrument(0, 1);
+    (client, tx, engine, shared)
+}
+
 fn spy() -> Contract {
     Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() }
 }
@@ -142,12 +171,13 @@ fn req_global_cancel_no_instruments_no_commands() {
 
 #[test]
 fn disconnect_during_active_subscription() {
-    let (client, rx, shared) = test_client();
+    let (client, engine_tx, engine, shared) = test_client_with_engine();
     shared.market.set_instrument_count(1);
 
     // Subscribe
-    let _ = client.req_mkt_data(1, &spy(), "", false, false);
-    while rx.try_recv().is_ok() {}
+    client.req_mkt_data(1, &spy(), "", false, false).unwrap();
+    engine_tx.send(ControlCommand::Shutdown).unwrap();
+    assert!(engine.join().unwrap() > 0);
 
     // Disconnect
     client.disconnect();
@@ -530,20 +560,17 @@ fn concurrent_disconnect_during_process_msgs() {
 
 #[test]
 fn rapid_subscribe_unsubscribe_no_stale_state() {
-    let (client, rx, shared) = test_client();
+    let (client, engine_tx, engine, shared) = test_client_with_engine();
     shared.market.set_instrument_count(1);
 
     for _ in 0..100 {
-        let _ = client.req_mkt_data(1, &spy(), "", false, false);
+        client.req_mkt_data(1, &spy(), "", false, false).unwrap();
         client.cancel_mkt_data(1).unwrap();
     }
 
     // All commands should have been sent without panic
-    let mut count = 0;
-    while rx.try_recv().is_ok() {
-        count += 1;
-    }
-    assert!(count > 0);
+    engine_tx.send(ControlCommand::Shutdown).unwrap();
+    assert!(engine.join().unwrap() > 0);
 
     // After all subscribe/unsubscribe cycles, mapping should be cleared
     let mut w = RecordingWrapper::default();
@@ -566,7 +593,12 @@ fn concurrent_place_order_and_process_msgs() {
     shared.market.set_instrument_count(1);
     let (tx, _rx) = crossbeam_channel::unbounded();
     let handle = thread::spawn(|| {});
-    let client = Arc::new(EClient::from_parts(shared.clone(), tx, handle, "DU123".into()));
+    let client = EClient::from_parts(shared.clone(), tx, handle, "DU123".into());
+    // The instrument is known, as after its first order: no engine runs
+    // here to answer a registration, and each order would wait for the
+    // registration timeout (5 s, 50 orders) and test nothing more.
+    client.seed_instrument(756733, 0);
+    let client = Arc::new(client);
 
     // Thread A: process_msgs
     let client_a = client.clone();
