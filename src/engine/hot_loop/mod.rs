@@ -904,7 +904,6 @@ impl HotLoop {
         self.ccp.sweep_pending_schedule_pairs(&self.shared, &self.event_tx);
         self.ccp.sweep_scanner_enrichments(&self.shared);
         self.ccp.sweep_contract_details(&self.shared, &self.event_tx, &mut self.ccp_conn, &mut self.hb);
-        self.ccp.sweep_contract_resolves(&self.shared);
         self.ccp.optcalc.progress(&mut self.ccp_conn, &mut self.hb, &self.shared);
         self.ccp.pump_matching_symbols(Instant::now(), &mut self.ccp_conn, &mut self.hb, &self.shared);
         order_builder::sweep_rth_lookups(&mut self.context);
@@ -919,7 +918,7 @@ impl HotLoop {
         if !msgs.is_empty() {
             self.send_farm_messages(msgs);
         }
-        self.hmds.sweep_pending_historical(&self.shared);
+        self.hmds.sweep_head_timestamps(&self.shared);
     }
 
     /// A market data subscription without a conId (ibx#278): the contract
@@ -1438,7 +1437,7 @@ impl HotLoop {
                             }
                             if farm_id != PRIMARY_HMDS {
                                 let sent: Vec<String> = self.hmds.pending_historical.iter()
-                                    .filter(|(_, r, _)| *r == req_id).map(|(q, ..)| q.clone()).collect();
+                                    .filter(|(_, r)| *r == req_id).map(|(q, _)| q.clone()).collect();
                                 for q in sent {
                                     self.hmds.query_farms.insert(q, farm_id);
                                 }

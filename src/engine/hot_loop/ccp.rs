@@ -16,11 +16,6 @@ use crossbeam_channel::Sender;
 
 use super::{HeartbeatState, emit, clone_for_event, parse_price_tag, parse_qty, decode_tif};
 
-/// Bound for an in-flight contract-details request (secdef reply or
-/// per-exchange fan-out). Refreshed on fan-out activity; on expiry the
-/// request surfaces error 200 + contract_details_end instead of hanging
-/// forever (ibx#227). A gateway rejection arrives in well under a second,
-/// and a full 27-exchange fan-out completes within a few.
 /// API error 10159 of a matching-symbols request that could not be sent
 /// (ibx#369).
 pub(crate) const MATCHING_SYMBOLS_SEND_FAILED: &str =
@@ -31,7 +26,18 @@ const MATCHING_SYMBOLS_FAILED: &str = "Failed to request matching symbols:";
 /// Pause after each matching-symbols send, as the reference (ibx#369).
 const MATCHING_SYMBOLS_SEND_GAP: std::time::Duration = std::time::Duration::from_millis(1000);
 
+/// How long an internal contract lookup of ibx (cache fill, scanner
+/// enrichment: ids from 0xF000_0000) waits for its answer. A caller's
+/// contract details request has no deadline, as in the reference: its
+/// contract definition requests (`jclient.mE`, the 6 s sweep of
+/// `jclient.pN`) give up only for an order's lookup (`jextend.dx.a()`,
+/// 30 s), and the API request waits for its answer (ibx#485).
 const SECDEF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether a lookup is an internal one of ibx, not a caller's request.
+fn internal_lookup(req_id: ReqId) -> bool {
+    req_id >= 0xF000_0000
+}
 /// Error 200 text for a lookup that found no contract (ibx#400).
 pub(crate) const NO_SECURITY_DEFINITION: &str = "No security definition has been found for the request";
 
@@ -229,11 +235,10 @@ pub(crate) struct CcpState {
     /// first 35=d reply is also the last (server emits no 323=5/6 terminator
     /// for these). Multi-record by-symbol/matching-symbols requests push
     /// `false` and rely on the response-type sentinel for is_last.
-    /// In-flight secdef requests: (req_id, single_shot, deadline). The
-    /// deadline is swept by `sweep_contract_details` so a request the
-    /// gateway never answers (SessionReject, dead socket, lost reply)
-    /// surfaces error 200 + contract_details_end instead of hanging
-    /// forever (ibx#227).
+    /// In-flight secdef requests: (req_id, single_shot, deadline). Only an
+    /// internal lookup is dropped at its deadline (`sweep_contract_details`);
+    /// a caller's request waits for its answer, as in the reference
+    /// (ibx#485).
     pub(crate) pending_secdef: Vec<(ReqId, bool, Instant)>,
     /// By-symbol lookups in flight: the request multiplier and the strike
     /// retry (ibx#410, ibx#435).
@@ -330,7 +335,6 @@ pub(crate) struct PendingResolve {
     /// API request id of the waiting request.
     pub req_id: ReqId,
     pub request: crate::types::ControlCommand,
-    pub deadline: Instant,
 }
 
 /// Request numbers of the contract lookups of historical-data requests
@@ -384,9 +388,9 @@ pub(crate) struct PendingFanout {
     pub total: usize,
     /// The records of the lookup, in reply order.
     pub records: Vec<crate::control::contracts::ContractDefinition>,
-    /// Idle deadline, refreshed on every per-exchange reply. One lost or
-    /// unparseable fan-out reply out of ~27 previously left the lookup
-    /// waiting forever (ibx#227).
+    /// Idle deadline of an internal lookup, refreshed on every
+    /// per-exchange reply; a caller's lookup waits for every reply, as in
+    /// the reference (ibx#485).
     pub deadline: Instant,
 }
 
@@ -925,8 +929,8 @@ impl CcpState {
                 let ref_tag = parsed.get(&371).map(|s| s.as_str()).unwrap_or("?");
                 // The reject carries no request id: like the reference, it is
                 // only logged, and a lookup it hit gets neither an error nor
-                // an end from it (ibx#400). Such a lookup stays pending and
-                // the deadline sweep (ibx#227) still ends it.
+                // an end from it (ibx#400). Such a lookup stays pending, as
+                // in the reference (no deadline, ibx#485).
                 log::warn!("SessionReject: reason='{}' refTag={}", reason, ref_tag);
             }
             "U" => {
@@ -2224,14 +2228,12 @@ impl CcpState {
         }
     }
 
-    /// Drop pending schedule pairs past their deadline, emitting partial details.
-    /// Fail contract-details requests whose deadline has passed (ibx#227):
-    /// both plain/by-symbol secdef lookups the gateway never answered and
-    /// by-symbol fan-outs missing one or more per-exchange replies. On
-    /// expiry the caller gets error 200 plus contract_details_end, so a
-    /// blocked wait unblocks with no API change. Internal sentinel req_ids
-    /// (>= 0xF000_0000: cache auto-fetch, scanner enrichment) are dropped
-    /// silently — no user is waiting on them.
+    /// Drop the internal lookups of ibx (ids from 0xF000_0000: cache
+    /// fill, scanner enrichment) past their deadline, silently: no caller
+    /// waits on them. A caller's contract details request, and its
+    /// per-exchange fan-out, has no deadline, as in the reference: it waits
+    /// for its answer (ibx#485; ibx#227 gave it error 200 with a text of
+    /// ibx's own).
     pub(crate) fn sweep_contract_details(
         &mut self,
         shared: &SharedState,
@@ -2243,51 +2245,31 @@ impl CcpState {
             return;
         }
         let now = Instant::now();
-        let mut expired: Vec<ReqId> = Vec::new();
         self.pending_secdef.retain(|(req_id, _, deadline)| {
-            if now >= *deadline {
-                if *req_id < 0xF000_0000 {
-                    expired.push(*req_id);
-                } else {
-                    log::warn!("Internal secdef timeout: req_id={:#x}", req_id);
-                }
-                false
-            } else {
-                true
+            let expired = internal_lookup(*req_id) && now >= *deadline;
+            if expired {
+                log::warn!("Internal secdef timeout: req_id={:#x}", req_id);
             }
+            !expired
         });
         let mut late: Vec<PendingFanout> = Vec::new();
         let mut i = 0;
         while i < self.pending_fanout.len() {
-            if now >= self.pending_fanout[i].deadline {
+            if internal_lookup(self.pending_fanout[i].api_req_id) && now >= self.pending_fanout[i].deadline {
                 late.push(self.pending_fanout.swap_remove(i));
             } else {
                 i += 1;
             }
         }
-        self.pending_lookups.retain(|l| !expired.contains(&l.req_id));
-        self.pending_continuous.retain(|c| !expired.contains(&c.req_id));
         for fanout in late {
             log::warn!(
-                "Contract-details fan-out timeout: api_req_id={} answered {} of {}",
+                "Internal fan-out timeout: api_req_id={:#x} answered {} of {}",
                 fanout.api_req_id, fanout.total - fanout.outstanding.len(), fanout.total,
             );
-            if fanout.records.is_empty() {
-                expired.push(fanout.api_req_id);
-            } else {
-                // The rows go out with the market rules known so far.
+            if !fanout.records.is_empty() {
+                // The rows go to the cache with the market rules known so far.
                 self.deliver_contract_rows(fanout.api_req_id, fanout.records, shared, event_tx, ccp_conn, hb);
             }
-        }
-        for req_id in expired {
-            log::warn!("Contract-details timeout: req_id={} — no gateway reply within {:?}",
-                req_id, SECDEF_TIMEOUT);
-            shared.reference.push_historical_error(
-                req_id, 200,
-                "contract details request timed out — no reply from the gateway".to_string(),
-            );
-            shared.reference.push_contract_details_end(req_id);
-            emit(event_tx, Event::ContractDetailsEnd(req_id));
         }
     }
 
@@ -2426,8 +2408,7 @@ impl CcpState {
             log::info!("Sent secdef request: req_id={} con_id={}", req_id, con_id);
             hb.last_ccp_sent = Instant::now();
         } else {
-            // No CCP socket: the entry still gets a deadline, so the caller
-            // receives error 200 + end via the sweep instead of silence (ibx#227).
+            // No CCP socket: the entry waits, as a sent one does (ibx#485).
             log::warn!("secdef request req_id={} queued with no CCP socket", req_id);
         }
         // Known-conId lookup: single record, no paginated terminator.
@@ -2819,12 +2800,9 @@ impl CcpState {
         } else {
             log::warn!("Contract lookup {} for req_id={} queued with no auth connection", lookup_id, req_id);
         }
-        self.pending_resolves.push(PendingResolve {
-            lookup_id,
-            req_id,
-            request,
-            deadline: Instant::now() + SECDEF_TIMEOUT,
-        });
+        // No deadline: the request waits for the lookup's answer, as in
+        // the reference (ibx#485).
+        self.pending_resolves.push(PendingResolve { lookup_id, req_id, request });
     }
 
     /// The answer to a contract lookup of a historical-data request
@@ -2851,31 +2829,6 @@ impl CcpState {
             shared.reference.push_historical_error(pending.req_id, 200, NO_SECURITY_DEFINITION.to_string());
         }
         true
-    }
-
-    /// Contract lookups of historical-data requests with no answer in time
-    /// (ibx#427): the request gets error 200 and no query.
-    pub(crate) fn sweep_contract_resolves(&mut self, shared: &SharedState) {
-        if self.pending_resolves.is_empty() {
-            return;
-        }
-        let now = Instant::now();
-        let mut expired: Vec<ReqId> = Vec::new();
-        self.pending_resolves.retain(|p| {
-            if now >= p.deadline {
-                log::warn!("Contract lookup {} timeout: req_id={}", p.lookup_id, p.req_id);
-                expired.push(p.req_id);
-                false
-            } else {
-                true
-            }
-        });
-        for req_id in expired {
-            shared.reference.push_historical_error(
-                req_id, 200,
-                "contract details request timed out — no reply from the gateway".to_string(),
-            );
-        }
     }
 
     /// Contract cache entry of a definition, for every reply (rows or not).
@@ -4650,41 +4603,24 @@ mod tests {
         assert_eq!(decode_tif(b'7'), "???");
     }
 
-    // ── ibx#227: contract-details deadline sweep ──
+    // ── ibx#485: a caller's contract details request has no deadline ──
 
+    // As in the reference (`jclient.mE`: only an order's lookup gives up),
+    // a caller's request waits for its answer: no error 200 of ibx's own,
+    // no end. A negative request id is a caller's (ibx#285).
     #[test]
-    fn sweep_times_out_pending_secdef_with_error_and_end() {
+    fn sweep_keeps_a_callers_request_past_any_deadline() {
         let mut ccp = CcpState::new();
         let shared = SharedState::new();
-        let past = Instant::now() - std::time::Duration::from_secs(1);
+        let past = Instant::now() - std::time::Duration::from_secs(3600);
         ccp.pending_secdef.push((7, true, past));
-
-        ccp.sweep_contract_details(&shared, &None, &mut None, &mut HeartbeatState::new());
-
-        assert!(ccp.pending_secdef.is_empty(), "expired entry must be reclaimed");
-        let errors = shared.reference.drain_historical_errors();
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].0, 7);
-        assert_eq!(errors[0].1, 200);
-        assert_eq!(shared.reference.drain_contract_details_end(), vec![7],
-            "end must fire so a blocked wait unblocks");
-    }
-
-    // ibx#285: a negative API request id is the caller's, not an internal
-    // lookup: cast to an unsigned type it fell in the internal range and
-    // its timeout was dropped.
-    #[test]
-    fn sweep_times_out_a_negative_request_id_as_the_callers() {
-        let mut ccp = CcpState::new();
-        let shared = SharedState::new();
-        let past = Instant::now() - std::time::Duration::from_secs(1);
         ccp.pending_secdef.push((-7, true, past));
 
         ccp.sweep_contract_details(&shared, &None, &mut None, &mut HeartbeatState::new());
 
-        let errors = shared.reference.drain_historical_errors();
-        assert_eq!(errors.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), vec![(-7, 200)]);
-        assert_eq!(shared.reference.drain_contract_details_end(), vec![-7]);
+        assert_eq!(ccp.pending_secdef.len(), 2, "both still wait");
+        assert!(shared.reference.drain_historical_errors().is_empty());
+        assert!(shared.reference.drain_contract_details_end().is_empty());
     }
 
     #[test]
@@ -4702,26 +4638,28 @@ mod tests {
         assert!(shared.reference.drain_contract_details_end().is_empty());
     }
 
+    // ibx#485: a caller's fan-out waits for every per-exchange reply, as
+    // the reference's contract details end does; an internal one is
+    // dropped at its deadline.
     #[test]
-    fn sweep_times_out_incomplete_fanout() {
+    fn sweep_keeps_a_callers_fanout_and_drops_an_internal_one() {
         let mut ccp = CcpState::new();
         let shared = SharedState::new();
-        ccp.pending_fanout.push(PendingFanout {
-            api_req_id: 9,
+        let fanout = |api_req_id| PendingFanout {
+            api_req_id,
             outstanding: vec![("ibxfan-9-26".to_string(), 1, "IEX".to_string())],
-            total: 27, // one reply lost — previously hung forever
+            total: 27,
             records: Vec::new(),
             deadline: Instant::now() - std::time::Duration::from_secs(1),
-        });
+        };
+        ccp.pending_fanout.push(fanout(9));
+        ccp.pending_fanout.push(fanout(0xF000_0003));
 
         ccp.sweep_contract_details(&shared, &None, &mut None, &mut HeartbeatState::new());
 
-        assert!(ccp.pending_fanout.is_empty());
-        let errors = shared.reference.drain_historical_errors();
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].0, 9);
-        assert_eq!(errors[0].1, 200);
-        assert_eq!(shared.reference.drain_contract_details_end(), vec![9]);
+        assert_eq!(ccp.pending_fanout.iter().map(|f| f.api_req_id).collect::<Vec<_>>(), vec![9]);
+        assert!(shared.reference.drain_historical_errors().is_empty());
+        assert!(shared.reference.drain_contract_details_end().is_empty());
     }
 
     // ── ibx#400: empty reply and session reject ──
@@ -5225,8 +5163,10 @@ mod tests {
         assert_eq!(shared.reference.drain_contract_details_end(), vec![41]);
     }
 
+    // ibx#485: a caller's lookup waits for its per-exchange replies with
+    // no deadline: nothing goes out before them.
     #[test]
-    fn a_fanout_timeout_sends_the_waiting_rows_then_end() {
+    fn a_callers_fanout_waits_for_every_reply() {
         let (mut ccp, mut context, shared) = u186_test_state();
         ccp.send_secdef_request_by_symbol(51, "AAPL", "STK", "SMART", "USD", &Default::default(), &mut None,
             &mut HeartbeatState::new());
@@ -5236,10 +5176,9 @@ mod tests {
 
         ccp.sweep_contract_details(&shared, &None, &mut None, &mut HeartbeatState::new());
 
-        let rows = shared.reference.drain_contract_details();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].1.market_rule_ids, "4563", "the rules known so far");
-        assert_eq!(shared.reference.drain_contract_details_end(), vec![51]);
+        assert_eq!(ccp.pending_fanout.len(), 1, "still waiting");
+        assert!(shared.reference.drain_contract_details().is_empty());
+        assert!(shared.reference.drain_contract_details_end().is_empty());
         assert!(shared.reference.drain_historical_errors().is_empty());
     }
 
@@ -5411,7 +5350,6 @@ mod tests {
             lookup_id: HIST_LOOKUP_FIRST_ID,
             req_id: 77,
             request: crate::types::ControlCommand::Shutdown,
-            deadline: Instant::now() + SECDEF_TIMEOUT,
         });
         let key = "1/STK/ARCA#LITE";
         ccp.send_secdef_request(1001, 756733, &mut None, &mut hb);
@@ -6762,15 +6700,15 @@ mod reconnect_tests {
             assert!(HIST_LOOKUP_FIRST_ID + HIST_LOOKUP_IDS <= crate::engine::hot_loop::farm::MD_LOOKUP_FIRST_ID);
         }
 
+        // ibx#485: no deadline, as the reference: the request waits for the
+        // lookup's answer (ibx#427 gave error 200 with a text of ibx's own).
         #[test]
-        fn a_lookup_with_no_answer_gives_200() {
+        fn a_lookup_with_no_answer_keeps_waiting() {
             let (mut ccp, shared) = (CcpState::new(), SharedState::new());
             ccp.start_contract_resolve(8, lookup(), bars(8), &mut None, &mut HeartbeatState::new());
-            ccp.pending_resolves[0].deadline = Instant::now() - std::time::Duration::from_secs(1);
-            ccp.sweep_contract_resolves(&shared);
-            assert!(ccp.pending_resolves.is_empty());
-            let errors = shared.reference.drain_historical_errors();
-            assert_eq!((errors[0].0, errors[0].1), (8, 200));
+            ccp.sweep_contract_details(&shared, &None, &mut None, &mut HeartbeatState::new());
+            assert_eq!(ccp.pending_resolves.len(), 1);
+            assert!(shared.reference.drain_historical_errors().is_empty());
         }
 
         #[test]

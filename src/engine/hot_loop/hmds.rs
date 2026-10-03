@@ -13,13 +13,6 @@ use crossbeam_channel::Sender;
 use super::{HeartbeatState, emit, clone_for_event, find_body_after_tag, extract_raw_tag};
 use super::pool::FixSink;
 
-/// Idle bound for an in-flight historical query: if no bar segment, error,
-/// or completion arrives for this long, the request is failed with error 162
-/// and a terminal sentinel instead of hanging forever (ibx#231). The
-/// gateway's pacing limiter drops requests silently, which is otherwise
-/// indistinguishable from a permanent hang.
-const HISTORICAL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// A head timestamp query with no answer for this long fails with
 /// "Request Timed Out", as the reference (ibx#428).
 const HEAD_TIMESTAMP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -44,13 +37,12 @@ pub(crate) struct HmdsState {
     pub(crate) tbt_guess_window: (i64, i64),
     pub(crate) next_hmds_query_id: u32,
     pub(crate) disconnected: bool,
-    /// In-flight historical bar queries: (query_id, req_id, idle deadline).
-    /// The deadline is refreshed on every matched bar segment and swept by
-    /// `sweep_pending_historical` — a gateway that goes silent (e.g. the
-    /// pacing limiter tripping) no longer hangs the request forever
-    /// (ibx#231). keepUpToDate entries are exempt: they stay resident by
-    /// design and their bars flow on a different path.
-    pub(crate) pending_historical: Vec<(String, ReqId, Instant)>,
+    /// In-flight historical bar queries: (query_id, req_id). No deadline,
+    /// as in the reference: its bar query (`jextend.j`, `hmdscore`) waits
+    /// for the server's answer, an error or a cancel; only a head timestamp
+    /// query times out (ibx#485; ibx#231 failed a bar request after 60 s
+    /// with a text of ibx's own).
+    pub(crate) pending_historical: Vec<(String, ReqId)>,
     /// In-flight head timestamp queries: (window id, req_id, deadline).
     pub(crate) pending_head_ts: Vec<(String, ReqId, Instant)>,
     /// Running numbers of the window ids of head timestamp, histogram and
@@ -353,8 +345,6 @@ const INVALID_ROUTE: &str = "Invalid Route";
 pub(crate) struct PendingHistogram {
     pub(crate) window_id: String,
     pub(crate) req_id: ReqId,
-    /// Idle deadline, pushed out by every frame.
-    pub(crate) deadline: Instant,
     pub(crate) sum: crate::control::histogram::HistogramSum,
 }
 
@@ -640,11 +630,9 @@ impl HmdsState {
                     );
                     if let Some(mut resp) = crate::control::historical::parse_bar_response(xml_tag) {
                         let wid = crate::control::historical::window_id(&resp.query_id);
-                        if let Some(pos) = self.pending_historical.iter().position(|(qid, _, _)| qid == wid) {
-                            let (_, req_id, _) = self.pending_historical[pos];
+                        if let Some(pos) = self.pending_historical.iter().position(|(qid, _)| qid == wid) {
+                            let (_, req_id) = self.pending_historical[pos];
                             let is_complete = resp.is_complete;
-                            // Activity on this query — push the idle deadline out (ibx#231).
-                            self.pending_historical[pos].2 = Instant::now() + HISTORICAL_IDLE_TIMEOUT;
                             if self.multi_leg.iter().any(|m| m.req_id == req_id) {
                                 let leg_qid = self.pending_historical[pos].0.clone();
                                 if is_complete {
@@ -720,7 +708,6 @@ impl HmdsState {
                         if let Some(pos) = self.pending_histogram.iter().position(|h| h.window_id == wid) {
                             let h = &mut self.pending_histogram[pos];
                             h.sum.add(&frame);
-                            h.deadline = Instant::now() + HISTORICAL_IDLE_TIMEOUT;
                             if frame.is_complete {
                                 let h = self.pending_histogram.remove(pos);
                                 shared.reference.push_histogram_data(h.req_id, h.sum.entries());
@@ -823,8 +810,8 @@ impl HmdsState {
                         let mut released: Option<(ReqId, i32, String)> = None;
                         if let Some(qid) = &query_id {
                             let wid = crate::control::historical::window_id(qid);
-                            if let Some(pos) = self.pending_historical.iter().position(|(q, _, _)| q == wid) {
-                                let (leg_qid, req_id, _) = self.pending_historical.remove(pos);
+                            if let Some(pos) = self.pending_historical.iter().position(|(q, _)| q == wid) {
+                                let (leg_qid, req_id) = self.pending_historical.remove(pos);
                                 self.keep_up_to_date_reqs.remove(&req_id);
                                 self.live_bars.retain(|l| l.req_id != req_id);
                                 self.bar_requests.retain(|b| b.req_id != req_id);
@@ -1511,7 +1498,7 @@ impl HmdsState {
                     reply_zone: String::new(),
                 });
             }
-            self.pending_historical.push((query_id, req_id, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+            self.pending_historical.push((query_id, req_id));
         }
         if !leg_states.is_empty() {
             // Chart name as the reference: symbol, API exchange and the
@@ -1614,7 +1601,7 @@ impl HmdsState {
     /// keepUpToDate request is cancelled (`ticker:{id}`) once no other
     /// request uses it. Gives the farm and the body of each cancel to send.
     pub(crate) fn cancel_bar_request(&mut self, req_id: ReqId, shared: &SharedState) -> Vec<(super::pool::FarmId, String)> {
-        let known = self.pending_historical.iter().any(|(_, r, _)| *r == req_id)
+        let known = self.pending_historical.iter().any(|(_, r)| *r == req_id)
             || self.live_bars.iter().any(|l| l.req_id == req_id)
             || self.pending_schedule.iter().any(|(_, r)| *r == req_id);
         if !known {
@@ -1631,7 +1618,7 @@ impl HmdsState {
         self.multi_leg.retain(|m| m.req_id != req_id);
         self.bar_requests.retain(|b| b.req_id != req_id);
         let mut waiting = Vec::new();
-        self.pending_historical.retain(|(qid, rid, _)| {
+        self.pending_historical.retain(|(qid, rid)| {
             if *rid == req_id {
                 waiting.push(qid.clone());
                 false
@@ -2157,12 +2144,8 @@ impl HmdsState {
             hb.last_hmds_sent = Instant::now();
             log::info!("Sent histogram request: req_id={} con_id={}", req_id, con_id);
         }
-        self.pending_histogram.push(PendingHistogram {
-            window_id,
-            req_id,
-            deadline: Instant::now() + HISTORICAL_IDLE_TIMEOUT,
-            sum: Default::default(),
-        });
+        // No deadline, as in the reference (ibx#485).
+        self.pending_histogram.push(PendingHistogram { window_id, req_id, sum: Default::default() });
     }
 
     /// Send a historical ticks query (ibx#432) to `sink`, the farm of its
@@ -2340,93 +2323,26 @@ impl HmdsState {
         self.pending_schedule.push((query_id, req_id));
     }
 
-    /// Fail historical queries whose idle deadline has passed (ibx#231).
-    /// Surfaces error 162 plus a terminal
-    /// `is_complete=true` sentinel so a consumer blocked on
-    /// historical_data_end unblocks with no API change. keepUpToDate
-    /// subscriptions are exempt — they stay resident by design and their
-    /// live bars flow on the rtbar path.
-    pub(crate) fn sweep_pending_historical(&mut self, shared: &SharedState) {
-        self.sweep_head_ts_and_histogram(shared);
-        if self.pending_historical.is_empty() {
+    /// Fail head timestamp queries past their deadline: 162 "Request
+    /// Timed Out" after 5 s, as the reference (ibx#428). Bar and histogram
+    /// queries have no deadline, as in the reference (ibx#485).
+    pub(crate) fn sweep_head_timestamps(&mut self, shared: &SharedState) {
+        if self.pending_head_ts.is_empty() {
             return;
         }
         let now = Instant::now();
-        let mut expired: Vec<(String, ReqId)> = Vec::new();
-        let kut = &self.keep_up_to_date_reqs;
-        self.pending_historical.retain(|(qid, req_id, deadline)| {
-            if now >= *deadline && !kut.contains(req_id) {
-                expired.push((qid.clone(), *req_id));
-                false
-            } else {
-                true
-            }
-        });
-        // A timed-out leg of a multi-query request ends the whole request
-        // once: its other legs are dropped with it (ibx#408).
-        expired.sort_by_key(|(_, req_id)| *req_id);
-        expired.dedup_by_key(|(_, req_id)| *req_id);
-        for (_, req_id) in &expired {
-            if let Some(pos) = self.multi_leg.iter().position(|m| m.req_id == *req_id) {
-                self.multi_leg.remove(pos);
-                self.pending_historical.retain(|(_, rid, _)| rid != req_id);
-            }
-        }
-        for (query_id, req_id) in expired {
-            log::warn!(
-                "HMDS historical timeout: req_id={} query_id={} — no response within {:?}",
-                req_id, query_id, HISTORICAL_IDLE_TIMEOUT,
-            );
-            shared.reference.push_historical_error(
-                req_id, 162,
-                "historical request timed out — no response from the gateway".to_string(),
-            );
-            shared.reference.push_historical_data(
-                req_id,
-                crate::control::historical::HistoricalResponse {
-                    query_id,
-                    timezone: String::new(),
-                    is_complete: true,
-                    bars: Vec::new(),
-                    ..Default::default()
-                },
-            );
-        }
-    }
-}
-
-impl HmdsState {
-    /// Fail head timestamp and histogram queries past their deadline, as
-    /// bar queries are (ibx#428): a head timestamp gets 162 "Request Timed
-    /// Out" after 5 s, as the reference; a histogram gets 10188 after the
-    /// bar idle time.
-    fn sweep_head_ts_and_histogram(&mut self, shared: &SharedState) {
-        if self.pending_head_ts.is_empty() && self.pending_histogram.is_empty() {
-            return;
-        }
-        let now = Instant::now();
-        let mut expired: Vec<(ReqId, i32, String)> = Vec::new();
+        let mut expired: Vec<ReqId> = Vec::new();
         self.pending_head_ts.retain(|(wid, req_id, deadline)| {
             if now >= *deadline {
                 log::warn!("HMDS head timestamp timeout: req_id={} id={}", req_id, wid);
-                expired.push((*req_id, 162, historical_service_error("Request Timed Out")));
+                expired.push(*req_id);
                 false
             } else {
                 true
             }
         });
-        self.pending_histogram.retain(|h| {
-            if now >= h.deadline {
-                log::warn!("HMDS histogram timeout: req_id={} id={}", h.req_id, h.window_id);
-                expired.push((h.req_id, 10188, crate::control::historical::join_error_text(
-                    HISTOGRAM_ERROR, "histogram request timed out — no response from the gateway")));
-                false
-            } else {
-                true
-            }
-        });
-        for (req_id, code, text) in expired {
-            shared.reference.push_historical_error(req_id, code, text);
+        for req_id in expired {
+            shared.reference.push_historical_error(req_id, 162, historical_service_error("Request Timed Out"));
         }
     }
 }
@@ -2483,7 +2399,7 @@ pub(crate) mod tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.pending_historical.push(("q7".to_string(), 21, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+        hmds.pending_historical.push(("q7".to_string(), 21));
 
         hmds.process_hmds_message(&make_bar_msg("q7", false), &mut conn, &shared, &None, &mut hb);
         assert_eq!(hmds.pending_historical.len(), 1, "entry must persist through eoq=false");
@@ -2506,7 +2422,7 @@ pub(crate) mod tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.pending_historical.push(("q8".to_string(), 22, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+        hmds.pending_historical.push(("q8".to_string(), 22));
 
         let mut msg = Vec::new();
         msg.extend_from_slice(b"35=U\x016040=10022\x016118=");
@@ -2525,7 +2441,7 @@ pub(crate) mod tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.pending_historical.push(("hist_1003".to_string(), 11, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+        hmds.pending_historical.push(("hist_1003".to_string(), 11));
         hmds.keep_up_to_date_reqs.insert(11);
 
         let msg = make_query_error_msg("hist_1003", "invalid step: 1");
@@ -2551,8 +2467,8 @@ pub(crate) mod tests {
         let mut conn: Option<Connection> = None;
         hmds.send_historical_request_ex(req_id, 416904, "IND", "CBOE", "", "3600 S", "1 min", "BID_ASK",
             true, false, "SPX", &mut conn, &mut hb, shared, false, 1, None, super::super::pool::PRIMARY_HMDS);
-        let legs: Vec<&(String, ReqId, Instant)> =
-            hmds.pending_historical.iter().filter(|(_, r, _)| *r == req_id).collect();
+        let legs: Vec<&(String, ReqId)> =
+            hmds.pending_historical.iter().filter(|(_, r)| *r == req_id).collect();
         assert_eq!(legs.len(), 2, "BID_ASK must go out as two queries");
         (legs[0].0.clone(), legs[1].0.clone())
     }
@@ -2711,20 +2627,6 @@ pub(crate) mod tests {
         let _ = (&mut hb, &mut conn);
     }
 
-    #[test]
-    fn bid_ask_timeout_ends_the_request_once() {
-        let mut hmds = HmdsState::new();
-        let shared = SharedState::new();
-        send_bid_ask(&mut hmds, &shared, 10);
-        for entry in &mut hmds.pending_historical {
-            entry.2 = Instant::now() - std::time::Duration::from_secs(1);
-        }
-        hmds.sweep_pending_historical(&shared);
-        assert!(hmds.pending_historical.is_empty());
-        assert!(hmds.multi_leg.is_empty());
-        assert_eq!(shared.reference.drain_historical_errors().len(), 1);
-        assert_eq!(shared.reference.drain_historical_data().len(), 1);
-    }
 
     #[test]
     fn bid_ask_keep_up_to_date_is_rejected() {
@@ -2816,9 +2718,8 @@ pub(crate) mod tests {
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        let deadline = Instant::now() + HISTORICAL_IDLE_TIMEOUT;
-        hmds.pending_historical.push(("hist_100".to_string(), 1, deadline));
-        hmds.pending_historical.push(("hist_1000".to_string(), 2, deadline));
+        hmds.pending_historical.push(("hist_100".to_string(), 1));
+        hmds.pending_historical.push(("hist_1000".to_string(), 2));
         hmds.process_hmds_message(&make_bar_msg("hist_1000", true), &mut conn, &shared, &None, &mut hb);
         let hist = shared.reference.drain_historical_data();
         assert_eq!(hist.len(), 1);
@@ -2951,26 +2852,28 @@ pub(crate) mod tests {
         assert!(hmds.cancel_fundamental(5).is_none());
     }
 
+    // A head timestamp times out after 5 s, as the reference (ibx#428);
+    // bar and histogram queries have no deadline, as the reference
+    // (ibx#485): they wait for their answer, with no error and no end.
     #[test]
-    fn head_timestamp_and_histogram_time_out() {
+    fn only_a_head_timestamp_times_out() {
         let mut hmds = HmdsState::new();
         let shared = SharedState::new();
         let past = Instant::now() - std::time::Duration::from_secs(1);
         hmds.pending_head_ts.push(("TickHeadClient1".to_string(), 1, past));
-        let pending = |w: &str, req_id: ReqId, deadline: Instant| PendingHistogram {
-            window_id: w.to_string(), req_id, deadline, sum: Default::default(),
-        };
-        hmds.pending_histogram.push(pending("histogramQuery0", 2, past));
-        hmds.pending_histogram.push(pending("histogramQuery1", 3, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
-        hmds.sweep_pending_historical(&shared);
+        hmds.pending_histogram.push(PendingHistogram {
+            window_id: "histogramQuery0".into(), req_id: 2, sum: Default::default(),
+        });
+        send_bid_ask(&mut hmds, &shared, 10);
+        hmds.pending_historical.push(("hist_1010".to_string(), 21));
+        hmds.sweep_head_timestamps(&shared);
         let errors = shared.reference.drain_historical_errors();
-        assert_eq!(errors.len(), 2);
-        assert_eq!(errors[0], (1, 162, "Historical Market Data Service error message:Request Timed Out".to_string()));
-        assert_eq!((errors[1].0, errors[1].1), (2, 10188));
-        assert!(errors[1].2.starts_with("Failed to request histogram data:"));
+        assert_eq!(errors, [(1, 162, "Historical Market Data Service error message:Request Timed Out".to_string())]);
         assert!(hmds.pending_head_ts.is_empty());
         assert_eq!(hmds.pending_histogram.len(), 1);
-        assert!(shared.reference.drain_historical_data().is_empty(), "no bar end for these requests");
+        assert_eq!(hmds.pending_historical.len(), 3, "the two bid/ask legs and the bar query wait");
+        assert_eq!(hmds.multi_leg.len(), 1);
+        assert!(shared.reference.drain_historical_data().is_empty(), "no bar end");
     }
 
     // ── ibx#433: a histogram is summed over all frames, sent once ──
@@ -3277,53 +3180,13 @@ pub(crate) mod tests {
         )]);
     }
 
-    // ── ibx#231: idle-deadline sweep ──
-
-    #[test]
-    fn sweep_times_out_idle_historical_with_error_and_end_sentinel() {
-        let mut hmds = HmdsState::new();
-        let shared = SharedState::new();
-        // Deadline already in the past — the gateway went silent.
-        hmds.pending_historical.push(("hist_1010".to_string(), 21, Instant::now() - std::time::Duration::from_secs(1)));
-
-        hmds.sweep_pending_historical(&shared);
-
-        assert!(hmds.pending_historical.is_empty(), "expired entry must be reclaimed");
-        let errors = shared.reference.drain_historical_errors();
-        assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].0, 21);
-        assert_eq!(errors[0].1, 162);
-        let hist = shared.reference.drain_historical_data();
-        assert_eq!(hist.len(), 1, "terminal sentinel must unblock historical_data_end waiters");
-        assert_eq!(hist[0].0, 21);
-        assert!(hist[0].1.is_complete);
-        assert!(hist[0].1.bars.is_empty());
-    }
-
-    #[test]
-    fn sweep_spares_keep_up_to_date_and_live_entries() {
-        let mut hmds = HmdsState::new();
-        let shared = SharedState::new();
-        // keepUpToDate entry: resident by design, even past its deadline.
-        hmds.pending_historical.push(("hist_kut".to_string(), 30, Instant::now() - std::time::Duration::from_secs(1)));
-        hmds.keep_up_to_date_reqs.insert(30);
-        // Live entry: deadline in the future.
-        hmds.pending_historical.push(("hist_live".to_string(), 31, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
-
-        hmds.sweep_pending_historical(&shared);
-
-        assert_eq!(hmds.pending_historical.len(), 2, "neither entry may be swept");
-        assert!(shared.reference.drain_historical_errors().is_empty());
-        assert!(shared.reference.drain_historical_data().is_empty());
-    }
-
     #[test]
     fn query_error_for_unknown_query_id_drops_nothing_and_emits_no_error() {
         let mut hmds = HmdsState::new();
         let shared = SharedState::new();
         let mut hb = HeartbeatState::new();
         let mut conn: Option<Connection> = None;
-        hmds.pending_historical.push(("hist_1003".to_string(), 11, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+        hmds.pending_historical.push(("hist_1003".to_string(), 11));
 
         let msg = make_query_error_msg("hist_9999", "Boom");
         hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
@@ -3361,7 +3224,7 @@ pub(crate) mod tests {
     /// window id of the recorded query.
     fn recorded_live(hmds: &mut HmdsState, req_id: ReqId, window_id: &str, label: &str,
                      bar_size: crate::control::historical::BarSize, trades: bool) {
-        hmds.pending_historical.push((window_id.to_string(), req_id, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+        hmds.pending_historical.push((window_id.to_string(), req_id));
         hmds.keep_up_to_date_reqs.insert(req_id);
         hmds.bar_requests.push(BarRequestInfo {
             req_id, format_date: 1, intraday: bar_size.is_intraday(), zone: Some("US/Eastern".into()), start: 0, end: 0,
@@ -3491,7 +3354,7 @@ pub(crate) mod tests {
         let mut conn: Option<Connection> = None;
         let end = crate::control::historical::parse_server_time("20261002-08:57:40").unwrap();
         for (w, req, format_date, intraday) in [("cf76", 9540, 1, true), ("cf80", 9541, 2, true), ("cf84", 9542, 1, false), ("cf88", 9543, 2, false)] {
-            hmds.pending_historical.push((w.to_string(), req, Instant::now() + HISTORICAL_IDLE_TIMEOUT));
+            hmds.pending_historical.push((w.to_string(), req));
             let duration = if intraday { "1 d" } else { "1 m" };
             hmds.bar_requests.push(BarRequestInfo { req_id: req, format_date, intraday, zone: Some("US/Eastern".into()),
                 start: crate::control::historical::duration_start(end, duration, "Europe/Paris"), end });
