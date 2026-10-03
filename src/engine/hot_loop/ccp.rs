@@ -1359,6 +1359,7 @@ impl CcpState {
             let reported = |tag: u32| parsed.get(&tag).and_then(|s| s.parse::<f64>().ok())
                 .map(|v| (v * PRICE_SCALE as f64).round() as i64);
             let stop = reported(6117);
+            if let Some(stop) = stop { context.reported_stop.insert(clord_id, stop); }
             if let Some(offset) = reported(6370) {
                 let previous_stop = context.trail_limit_reported.get(&clord_id).map_or(0, |r| r.stop);
                 context.trail_limit_reported.insert(clord_id, crate::engine::context::TrailLimitReported {

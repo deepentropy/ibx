@@ -4141,7 +4141,7 @@ impl ClientCore {
     /// from the same `Order` fields. Used for a replace, which restates the
     /// order type and its prices (ibx#247).
     pub fn order_kind(order: &ApiOrder) -> Result<OrderKind, String> {
-        let scale = |v: f64| (v * PRICE_SCALE_F) as i64;
+        let scale = crate::api::types::price_from_f64;
         if !order.adjusted_order_type.is_empty() {
             let adjusted = match order.adjusted_order_type.to_uppercase().as_str() {
                 "STP" => AdjustedOrderType::Stop,
@@ -4226,7 +4226,7 @@ impl ClientCore {
     /// the pegged change and its direction, the reference change. An
     /// unset price is 0 (not sent).
     fn peg_bench_kind(order: &ApiOrder) -> OrderKind {
-        let scale = |v: f64| (aux_or_zero(v) * PRICE_SCALE_F) as i64;
+        let scale = |v: f64| crate::api::types::price_from_f64(aux_or_zero(v));
         OrderKind::PegBench {
             starting_price: scale(order.starting_price),
             stock_ref_price: scale(order.stock_ref_price),
@@ -4399,7 +4399,7 @@ impl ClientCore {
                 "TRAIL LIMIT" => AdjustedOrderType::TrailLimit,
                 other => return Err(format!("unknown adjustedOrderType '{}'", other)),
             };
-            let scale = |v: f64| (v * PRICE_SCALE_F) as i64;
+            let scale = crate::api::types::price_from_f64;
             // adjusted_trailing_amount defaults to f64::MAX when unset.
             let adj_trail = if order.adjusted_trailing_amount == f64::MAX {
                 0.0
@@ -4435,7 +4435,7 @@ impl ClientCore {
                 else { OrderRequest::SubmitMarket { order_id, instrument, side, qty } }
             }
             "LMT" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
+                let price = crate::api::types::price_from_f64(order.lmt_price);
                 if extended {
                     OrderRequest::SubmitLimitEx {
                         order_id, instrument, side, qty, price,
@@ -4447,19 +4447,19 @@ impl ClientCore {
                 }
             }
             "STP" => {
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
+                let stop = crate::api::types::price_from_f64(order.aux_price);
                 if extended { ex(OrderKind::Stop { stop_price: stop }) }
                 else { OrderRequest::SubmitStop { order_id, instrument, side, qty, stop_price: stop } }
             }
             "STP LMT" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
+                let price = crate::api::types::price_from_f64(order.lmt_price);
+                let stop = crate::api::types::price_from_f64(order.aux_price);
                 if extended { ex(OrderKind::StopLimit { price, stop_price: stop }) }
                 else { OrderRequest::SubmitStopLimit { order_id, instrument, side, qty, price, stop_price: stop } }
             }
             "TRAIL" => {
                 // Optional initial stop trigger (tag 6117); default f64::MAX = unset.
-                let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { (order.trail_stop_price * PRICE_SCALE_F) as i64 };
+                let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { crate::api::types::price_from_f64(order.trail_stop_price) };
                 if order.trailing_percent > 0.0 {
                     let pct = (order.trailing_percent * 100.0).round() as u32;
                     if extended {
@@ -4473,7 +4473,7 @@ impl ClientCore {
                         OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_pct: pct, trail_stop_price: trail_stop }
                     }
                 } else {
-                    let trail = (order.aux_price * PRICE_SCALE_F) as i64;
+                    let trail = crate::api::types::price_from_f64(order.aux_price);
                     if extended { ex(OrderKind::TrailingStop { trail_amt: trail, trail_stop_price: trail_stop }) }
                     else { OrderRequest::SubmitTrailingStop { order_id, instrument, side, qty, trail_amt: trail, trail_stop_price: trail_stop } }
                 }
@@ -4483,12 +4483,12 @@ impl ClientCore {
                 // 6370), as the caller gave it (ib-agent#194): exactly one of
                 // them, else refused before this (ibx#468).
                 let (lmt_offset, lmt_price) = if order.lmt_price_offset != f64::MAX {
-                    ((order.lmt_price_offset * PRICE_SCALE_F) as i64, None)
+                    (crate::api::types::price_from_f64(order.lmt_price_offset), None)
                 } else {
-                    (0, Some((order.lmt_price * PRICE_SCALE_F) as i64))
+                    (0, Some(crate::api::types::price_from_f64(order.lmt_price)))
                 };
-                let trail = (order.aux_price * PRICE_SCALE_F) as i64;
-                let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { (order.trail_stop_price * PRICE_SCALE_F) as i64 };
+                let trail = crate::api::types::price_from_f64(order.aux_price);
+                let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { crate::api::types::price_from_f64(order.trail_stop_price) };
                 if extended { ex(OrderKind::TrailingStopLimit { lmt_offset, lmt_price, trail_amt: trail, trail_stop_price: trail_stop }) }
                 else { OrderRequest::SubmitTrailingStopLimit { order_id, instrument, side, qty, lmt_offset, lmt_price, trail_amt: trail, trail_stop_price: trail_stop } }
             }
@@ -4497,18 +4497,18 @@ impl ClientCore {
                 else { OrderRequest::SubmitMoc { order_id, instrument, side, qty } }
             }
             "LOC" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
+                let price = crate::api::types::price_from_f64(order.lmt_price);
                 if extended { ex(OrderKind::Loc { price }) }
                 else { OrderRequest::SubmitLoc { order_id, instrument, side, qty, price } }
             }
             "MIT" => {
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
+                let stop = crate::api::types::price_from_f64(order.aux_price);
                 if extended { ex(OrderKind::Mit { stop_price: stop }) }
                 else { OrderRequest::SubmitMit { order_id, instrument, side, qty, stop_price: stop } }
             }
             "LIT" => {
-                let price = (order.lmt_price * PRICE_SCALE_F) as i64;
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
+                let price = crate::api::types::price_from_f64(order.lmt_price);
+                let stop = crate::api::types::price_from_f64(order.aux_price);
                 if extended { ex(OrderKind::Lit { price, stop_price: stop }) }
                 else { OrderRequest::SubmitLit { order_id, instrument, side, qty, price, stop_price: stop } }
             }
@@ -4521,32 +4521,32 @@ impl ClientCore {
                 else { OrderRequest::SubmitMktPrt { order_id, instrument, side, qty } }
             }
             "STP PRT" => {
-                let stop = (order.aux_price * PRICE_SCALE_F) as i64;
+                let stop = crate::api::types::price_from_f64(order.aux_price);
                 if extended { ex(OrderKind::StpPrt { stop_price: stop }) }
                 else { OrderRequest::SubmitStpPrt { order_id, instrument, side, qty, stop_price: stop } }
             }
             "REL" => {
                 // The price cap when given, as the reference (ibx#263).
-                let offset = (order.aux_price * PRICE_SCALE_F) as i64;
-                let price = (aux_or_zero(order.lmt_price) * PRICE_SCALE_F) as i64;
+                let offset = crate::api::types::price_from_f64(order.aux_price);
+                let price = crate::api::types::price_from_f64(aux_or_zero(order.lmt_price));
                 if extended || price > 0 { ex(OrderKind::Rel { price, offset }) }
                 else { OrderRequest::SubmitRel { order_id, instrument, side, qty, offset } }
             }
             // The limit price when given, and the offset (ibx#414).
             "PEG MKT" => {
-                let price = (aux_or_zero(order.lmt_price) * PRICE_SCALE_F) as i64;
-                let offset = (aux_or_zero(order.aux_price) * PRICE_SCALE_F) as i64;
+                let price = crate::api::types::price_from_f64(aux_or_zero(order.lmt_price));
+                let offset = crate::api::types::price_from_f64(aux_or_zero(order.aux_price));
                 if extended { ex(OrderKind::PegMkt { price, offset }) }
                 else { OrderRequest::SubmitPegMkt { order_id, instrument, side, qty, price, offset } }
             }
             "PEG MID" | "PEG MIDPT" => {
-                let price = (aux_or_zero(order.lmt_price) * PRICE_SCALE_F) as i64;
-                let offset = (aux_or_zero(order.aux_price) * PRICE_SCALE_F) as i64;
+                let price = crate::api::types::price_from_f64(aux_or_zero(order.lmt_price));
+                let offset = crate::api::types::price_from_f64(aux_or_zero(order.aux_price));
                 if extended { ex(OrderKind::PegMid { price, offset }) }
                 else { OrderRequest::SubmitPegMid { order_id, instrument, side, qty, price, offset } }
             }
             "MIDPX" | "MIDPRICE" => {
-                let cap = (order.lmt_price * PRICE_SCALE_F) as i64;
+                let cap = crate::api::types::price_from_f64(order.lmt_price);
                 if extended { ex(OrderKind::MidPrice { price_cap: cap }) }
                 else { OrderRequest::SubmitMidPrice { order_id, instrument, side, qty, price_cap: cap } }
             }
@@ -4555,17 +4555,17 @@ impl ClientCore {
             "PEG BENCH" => ex(Self::peg_bench_kind(order)),
             // The offset is the API auxPrice, 0.00 when unset (ibx#413).
             "SNAP MKT" => {
-                let offset = (aux_or_zero(order.aux_price) * PRICE_SCALE_F) as i64;
+                let offset = crate::api::types::price_from_f64(aux_or_zero(order.aux_price));
                 if extended { ex(OrderKind::SnapMkt { offset }) }
                 else { OrderRequest::SubmitSnapMkt { order_id, instrument, side, qty, offset } }
             }
             "SNAP MID" | "SNAP MIDPT" => {
-                let offset = (aux_or_zero(order.aux_price) * PRICE_SCALE_F) as i64;
+                let offset = crate::api::types::price_from_f64(aux_or_zero(order.aux_price));
                 if extended { ex(OrderKind::SnapMid { offset }) }
                 else { OrderRequest::SubmitSnapMid { order_id, instrument, side, qty, offset } }
             }
             "SNAP PRI" | "SNAP PRIM" => {
-                let offset = (aux_or_zero(order.aux_price) * PRICE_SCALE_F) as i64;
+                let offset = crate::api::types::price_from_f64(aux_or_zero(order.aux_price));
                 if extended { ex(OrderKind::SnapPri { offset }) }
                 else { OrderRequest::SubmitSnapPri { order_id, instrument, side, qty, offset } }
             }
