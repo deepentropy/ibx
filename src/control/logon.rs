@@ -183,6 +183,12 @@ pub struct ApiFeatures {
     /// NIGHTLY: the historical data years limit is not checked
     /// (`jfix.s.x()`).
     pub nightly: bool,
+    /// NOMAGNFIX: option chain strikes are not scaled by the price
+    /// magnifier (`jfix.s.e3()`, ibx#440).
+    pub no_magnifier_fix: bool,
+    /// ISLAND2NASDAQ: NASDAQ is not left out of the option chains
+    /// (`jfix.s.hy()`, ibx#440).
+    pub island_to_nasdaq: bool,
 }
 
 impl ApiFeatures {
@@ -191,6 +197,8 @@ impl ApiFeatures {
             deny_api: has_feature(features, "DENYAPI"),
             matching_symbols: has_feature(features, "SECDEFTA"),
             nightly: has_feature(features, "NIGHTLY"),
+            no_magnifier_fix: has_feature(features, "NOMAGNFIX"),
+            island_to_nasdaq: has_feature(features, "ISLAND2NASDAQ"),
         }
     }
 }
@@ -305,10 +313,12 @@ mod tests {
     // or NIGHTLY.
     #[test]
     fn api_features_of_the_feature_list() {
-        let f = ApiFeatures::parse("1DAYSORDER,APIELOG,SECDEFTA,SCALEUSLOT");
-        assert_eq!(f, ApiFeatures { deny_api: false, matching_symbols: true, nightly: false });
-        let f = ApiFeatures::parse("DENYAPI,NIGHTLY,SECDEFTA:x");
-        assert_eq!(f, ApiFeatures { deny_api: true, matching_symbols: false, nightly: true });
+        let f = ApiFeatures::parse("1DAYSORDER,APIELOG,ISLAND2NASDAQ,SECDEFTA,SCALEUSLOT");
+        assert_eq!(f, ApiFeatures { deny_api: false, matching_symbols: true, nightly: false,
+            no_magnifier_fix: false, island_to_nasdaq: true });
+        let f = ApiFeatures::parse("DENYAPI,NIGHTLY,SECDEFTA:x,NOMAGNFIX");
+        assert_eq!(f, ApiFeatures { deny_api: true, matching_symbols: false, nightly: true,
+            no_magnifier_fix: true, island_to_nasdaq: false });
     }
 
     #[test]

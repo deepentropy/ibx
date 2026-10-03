@@ -5,6 +5,7 @@ pub(crate) mod pool;
 pub mod order_builder;
 pub mod liveness;
 pub(crate) mod optcalc;
+pub(crate) mod optparams;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -1323,6 +1324,11 @@ impl HotLoop {
                 }
                 ControlCommand::FetchMatchingSymbols { req_id, pattern } => {
                     self.ccp.send_matching_symbols_request(req_id, &pattern, &mut self.ccp_conn, &mut self.hb, &self.shared);
+                }
+                ControlCommand::FetchSecDefOptParams { req_id, underlying_symbol, fut_fop_exchange, underlying_sec_type, underlying_con_id } => {
+                    let connected = !self.ccp.disconnected;
+                    self.ccp.optparams.request(req_id, &underlying_symbol, &fut_fop_exchange, &underlying_sec_type,
+                        underlying_con_id, &mut self.ccp_conn, connected, &mut self.hb, &self.shared);
                 }
                 ControlCommand::FetchMktDepthExchanges => {
                     // Answered locally from the depth routes of the market

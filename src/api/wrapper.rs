@@ -363,6 +363,16 @@ pub mod tests {
         fn symbol_samples(&mut self, req_id: i64, descriptions: &[ContractDescription]) {
             self.events.push(format!("symbol_samples:{req_id}:{}", descriptions.len()));
         }
+        fn security_definition_option_parameter(
+            &mut self, req_id: i64, exchange: &str, underlying_con_id: i64,
+            trading_class: &str, multiplier: &str, expirations: &[String], strikes: &[f64],
+        ) {
+            self.events.push(format!("sec_def_opt_param:{req_id}:{exchange}:{underlying_con_id}:{trading_class}:{multiplier}:{}:{:?}",
+                expirations.join(","), strikes));
+        }
+        fn security_definition_option_parameter_end(&mut self, req_id: i64) {
+            self.events.push(format!("sec_def_opt_param_end:{req_id}"));
+        }
         fn scanner_data(
             &mut self, req_id: i64, rank: i32, _details: &ContractDetails,
             _: &str, _: &str, _: &str, _: &str,

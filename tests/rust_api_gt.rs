@@ -2288,3 +2288,105 @@ fn api_shared_requests_live() {
     assert!(has(&format!("error 836 321 Error validating request.-'bQ' : cause - Incorrect generic tick list of 999.  Legal ones for (STK) are: {legal}")));
     assert!(has(&format!("error 837 321 Error validating request.-'bQ' : cause - Incorrect generic tick list of mdoff,292:.  Legal ones for (STK) are: {legal}")));
 }
+
+// ── Option chain parameters (ibx#440), focused ──
+
+/// A row: (reqId, exchange, conId, trading class, multiplier, expirations, strikes).
+type ChainRow = (i64, String, i64, String, String, usize, usize);
+
+#[derive(Default)]
+struct ChainWrapper {
+    events: Vec<String>,
+    rows: Vec<ChainRow>,
+    ends: Vec<i64>,
+    details: Vec<(i64, i64, String)>,
+    details_ends: Vec<i64>,
+}
+
+impl Wrapper for ChainWrapper {
+    fn error(&mut self, req_id: i64, code: i64, text: &str, _: &str) { self.events.push(format!("error {req_id} {code} {text}")); }
+    fn security_definition_option_parameter(
+        &mut self, req_id: i64, exchange: &str, underlying_con_id: i64,
+        trading_class: &str, multiplier: &str, expirations: &[String], strikes: &[f64],
+    ) {
+        self.rows.push((req_id, exchange.into(), underlying_con_id, trading_class.into(), multiplier.into(),
+            expirations.len(), strikes.len()));
+    }
+    fn security_definition_option_parameter_end(&mut self, req_id: i64) { self.ends.push(req_id); }
+    fn contract_details(&mut self, req_id: i64, d: &ContractDetails) {
+        self.details.push((req_id, d.contract.con_id, d.contract.last_trade_date_or_contract_month.clone()));
+    }
+    fn contract_details_end(&mut self, req_id: i64) { self.details_ends.push(req_id); }
+}
+
+/// As the reference (captured 28/09/2026 for AAPL): AAPL STK gives groups
+/// for IBUSOPT, SMART and each listed exchange, trading classes AAPL (and
+/// 2AAPL when listed), then the end; the same request again gives the same
+/// rows in the same order without a new query; OPT gives 321; an ES future
+/// on CME gives futures option groups on CME, then the end. Works with the
+/// market closed. The log shows the 6040=5, 35=c and 6040=138 queries for
+/// AAPL, none for the second AAPL request, and one 6040=138 with 6995=CME
+/// for ES.
+/// Run with: cargo test --test rust_api_gt api_option_chains_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_option_chains_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = ChainWrapper::default();
+    let wait = |client: &EClient, w: &mut ChainWrapper, done: &dyn Fn(&ChainWrapper) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !done(w) && Instant::now() < deadline {
+            client.process_msgs(w);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    std::thread::sleep(Duration::from_secs(3));
+    client.req_sec_def_opt_params(9410, "AAPL", "", "STK", 265598).unwrap();
+    wait(&client, &mut w, &|w| w.ends.contains(&9410) || !w.events.is_empty());
+    client.req_sec_def_opt_params(9421, "AAPL", "", "STK", 265598).unwrap();
+    wait(&client, &mut w, &|w| w.ends.contains(&9421) || !w.events.is_empty());
+    client.req_sec_def_opt_params(9422, "AAPL", "", "OPT", 265598).unwrap();
+    wait(&client, &mut w, &|w| w.events.iter().any(|e| e.starts_with("error 9422 ")));
+    let es = Contract { symbol: "ES".into(), sec_type: "FUT".into(), exchange: "CME".into(), currency: "USD".into(), ..Default::default() };
+    client.req_contract_details(9423, &es).unwrap();
+    wait(&client, &mut w, &|w| w.details_ends.contains(&9423));
+    let today = jiff::Timestamp::now().strftime("%Y%m%d").to_string();
+    let front = w.details.iter().filter(|d| d.0 == 9423 && d.2.as_str() >= today.as_str())
+        .min_by(|a, b| a.2.cmp(&b.2)).map(|d| d.1);
+    if let Some(con_id) = front {
+        client.req_sec_def_opt_params(9424, "ES", "CME", "FUT", con_id).unwrap();
+        wait(&client, &mut w, &|w| w.ends.contains(&9424) || w.events.iter().any(|e| e.starts_with("error 9424 ")));
+    }
+    client.disconnect();
+    let of = |req: i64| w.rows.iter().filter(|r| r.0 == req).cloned().collect::<Vec<_>>();
+    for req in [9410, 9421, 9424] {
+        let rows = of(req);
+        println!("  {req}: {} rows, end {}", rows.len(), w.ends.contains(&req));
+        for r in rows.iter().take(50) {
+            println!("    {} {} {} {} exp={} strikes={}", r.1, r.2, r.3, r.4, r.5, r.6);
+        }
+    }
+    println!("  ES front month {front:?}, events {:?}", w.events);
+    let aapl = of(9410);
+    assert!(w.ends.contains(&9410), "end of 9410");
+    assert!(aapl.iter().any(|r| r.1 == "IBUSOPT" && r.3 == "AAPL"), "{aapl:?}");
+    assert!(aapl.iter().any(|r| r.1 == "SMART" && r.3 == "AAPL"), "{aapl:?}");
+    assert!(aapl.iter().all(|r| r.2 == 265598 && r.4 == "100" && r.5 > 0 && r.6 > 0), "{aapl:?}");
+    let again: Vec<_> = of(9421).into_iter().map(|r| (r.1, r.3, r.5, r.6)).collect();
+    assert_eq!(again, aapl.iter().map(|r| (r.1.clone(), r.3.clone(), r.5, r.6)).collect::<Vec<_>>(), "same rows, same order");
+    assert!(w.events.contains(&"error 9422 321 Error validating request.-'cp' : cause - Invalid security type - OPT".to_string()), "{:?}", w.events);
+    let es_rows = of(9424);
+    assert!(front.is_some(), "ES front month");
+    assert!(w.ends.contains(&9424), "end of 9424: {:?}", w.events);
+    assert!(!es_rows.is_empty() && es_rows.iter().all(|r| r.1 == "CME"), "{es_rows:?}");
+}
+

@@ -170,6 +170,37 @@ impl EClient {
         Ok(())
     }
 
+    /// Request option chain parameters (ibx#440). A request the reference
+    /// refuses locally gets 321; the rows come through
+    /// `security_definition_option_parameter`, then
+    /// `security_definition_option_parameter_end`.
+    #[pyo3(signature = (req_id, underlying_symbol, fut_fop_exchange="", underlying_sec_type="STK", underlying_con_id=0))]
+    fn req_sec_def_opt_params(
+        &self,
+        py: Python<'_>,
+        req_id: i64,
+        underlying_symbol: &str,
+        fut_fop_exchange: &str,
+        underlying_sec_type: &str,
+        underlying_con_id: i64,
+    ) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id) { return r; }
+        if !ClientCore::ids_fit("req_sec_def_opt_params", &[req_id, underlying_con_id]) { return Ok(()); }
+        if let Some((code, text)) = crate::control::optparams::refusal(underlying_sec_type, fut_fop_exchange, underlying_con_id) {
+            self.shared_state()?.orders.push_order_error(req_id, code, text);
+            return Ok(());
+        }
+        let tx = self.tx()?;
+        send_cmd(py, &tx, ControlCommand::FetchSecDefOptParams {
+            req_id,
+            underlying_symbol: underlying_symbol.into(),
+            fut_fop_exchange: fut_fop_exchange.into(),
+            underlying_sec_type: crate::control::optparams::sec_type_name(underlying_sec_type).into(),
+            underlying_con_id,
+        })?;
+        Ok(())
+    }
+
     /// Request scanner subscription: the whole ibapi subscription, the
     /// subscription options and the filter options (ibx#456). A local
     /// refusal comes back through `error`.

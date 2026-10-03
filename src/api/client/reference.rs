@@ -124,6 +124,28 @@ impl EClient {
         })
     }
 
+    /// Request option chain parameters. Matches `reqSecDefOptParams` in C++.
+    /// A request the reference refuses locally gets 321; the rows come
+    /// through `security_definition_option_parameter`, then
+    /// `security_definition_option_parameter_end` (ibx#440).
+    pub fn req_sec_def_opt_params(
+        &self, req_id: i64, underlying_symbol: &str, fut_fop_exchange: &str,
+        underlying_sec_type: &str, underlying_con_id: i64,
+    ) -> Result<(), String> {
+        if !crate::client_core::ClientCore::ids_fit("req_sec_def_opt_params", &[req_id, underlying_con_id]) { return Ok(()); }
+        if let Some((code, text)) = crate::control::optparams::refusal(underlying_sec_type, fut_fop_exchange, underlying_con_id) {
+            self.shared.orders.push_order_error(req_id, code, text);
+            return Ok(());
+        }
+        self.send(ControlCommand::FetchSecDefOptParams {
+            req_id,
+            underlying_symbol: underlying_symbol.into(),
+            fut_fop_exchange: fut_fop_exchange.into(),
+            underlying_sec_type: crate::control::optparams::sec_type_name(underlying_sec_type).into(),
+            underlying_con_id,
+        })
+    }
+
     /// Cancel head timestamp request. Matches `cancelHeadTimestamp` in C++.
     pub fn cancel_head_time_stamp(&self, req_id: i64) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("cancel_head_time_stamp", &[req_id]) { return Ok(()); }
