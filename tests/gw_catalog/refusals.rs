@@ -286,33 +286,53 @@ fn cancel_of_an_order_with_a_cancel_pending() {
 
 // ── Modify ──
 
-#[test]
-fn modify_to_another_order_type() {
+/// Place `first` on `contract`, then the same order id again as
+/// `second` on `second_contract`: refused with `rule`, no replace sent.
+fn modify_refused(rule: &str, contract: &Contract, first: &Order, second_contract: &Contract, second: &Order) {
     let mut engine = Engine::start();
-    engine.client.place_order(REFUSED, &aapl(), &order("LMT")).unwrap();
-    assert_eq!(engine.orders(1).len(), 1);
-    engine.client.place_order(REFUSED, &aapl(), &Order { action: "BUY".into(), aux_price: 90.0, ..order("STP") }).unwrap();
-    let rule = local_rule("329 aj.e(pe)@52");
+    engine.client.place_order(REFUSED, contract, first).unwrap();
+    engine.client.place_order(REFUSED, second_contract, second).unwrap();
+    let rule = local_rule(rule);
     let errors = engine.errors();
     assert!(errors.iter().any(|(id, code, text)| *id == REFUSED && *code == rule.api_code
-        && matches_template(&rule.text, text, true)), "want {:?}, got {errors:?}", rule.text);
+        && matches_template(&rule.text, text, false)), "rule {}: want {:?}, got {errors:?}", rule.id, rule.text);
+    // A valid order after it: the replace was not sent before it.
+    engine.client.place_order(NEXT, &aapl(), &lmt("BUY", 1.0, 100.0)).unwrap();
+    let next = NEXT.to_string();
     let frames = engine.orders(2);
-    assert!(frames.iter().all(|f| field(f, 35) != Some("G")), "no replace sent");
+    assert!(frames.iter().any(|f| field(f, 6121) == Some(next.as_str())), "the valid order is sent");
+    assert!(frames.iter().all(|f| field(f, 35) != Some("G")), "rule {}: no replace sent", rule.id);
+}
+
+#[test]
+fn modify_to_another_order_type() {
+    let stp = Order { aux_price: 90.0, ..order("STP") };
+    modify_refused("329 aj.e(pe)@52", &aapl(), &order("LMT"), &aapl(), &stp);
+}
+
+#[test]
+fn modify_of_the_side() {
+    modify_refused("105 bH.d(pe)@165", &aapl(), &order("LMT"), &aapl(), &Order { action: "SELL".into(), ..order("LMT") });
 }
 
 #[test]
 fn modify_of_the_oca_group() {
-    let mut engine = Engine::start();
     let first = Order { oca_group: "A".into(), ..order("LMT") };
-    engine.client.place_order(REFUSED, &aapl(), &first).unwrap();
-    assert_eq!(engine.orders(1).len(), 1);
-    engine.client.place_order(REFUSED, &aapl(), &Order { oca_group: "B".into(), ..first }).unwrap();
-    let rule = local_rule("10326 bH.d(pe)@836");
-    let errors = engine.errors();
-    assert!(errors.iter().any(|(id, code, text)| *id == REFUSED && *code == rule.api_code
-        && matches_template(&rule.text, text, false)), "want {:?}, got {errors:?}", rule.text);
-    let frames = engine.orders(2);
-    assert!(frames.iter().all(|f| field(f, 35) != Some("G")), "no replace sent");
+    modify_refused("10326 bH.d(pe)@836", &aapl(), &first, &aapl(), &Order { oca_group: "B".into(), ..first.clone() });
+}
+
+#[test]
+fn modify_of_the_oca_type() {
+    let first = Order { oca_group: "A".into(), oca_type: 3, ..order("LMT") };
+    modify_refused("10327 bH.d(pe)@905", &aapl(), &first, &aapl(), &Order { oca_type: 1, ..first.clone() });
+}
+
+#[test]
+fn combo_modify_with_another_leg() {
+    let directed = |legs| Contract { exchange: "ARCA".into(), ..bag(legs) };
+    let first = directed(vec![leg(756733, "BUY"), leg(320227571, "SELL")]);
+    let second = directed(vec![leg(756733, "BUY"), leg(9999, "SELL")]);
+    modify_refused("10059 bH.c(pe,dl)@1067", &first, &order("LMT"), &second, &order("LMT"));
 }
 
 #[test]

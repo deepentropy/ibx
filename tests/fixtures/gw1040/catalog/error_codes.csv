@@ -57,7 +57,7 @@ code,message,wrapping,captured_text
 326,Unable connect as the client id is already in use. Retry with a unique client id.,as_is,
 327,Only API connections with clientId set to 0 can set the auto bind orders property.,as_is,
 328,Trailing stop orders can be attached to limit or stop-limit orders only.,as_is,
-329,Order modify failed. Cannot change to the new order type,as_is,
+329,Order modify failed. Cannot change to the new order type,as_is,Order modify failed. Cannot change to the new order type.%s
 330,Only FA or STL customers can request managed accounts list.,321,
 331,Internal error. FA or STL does not have any managed accounts.,322|as_is,
 333,Invalid share allocation syntax.,321|as_is,
@@ -164,7 +164,7 @@ code,message,wrapping,captured_text
 459,No clearing rule selected,as_is,
 460,No trading permissions,as_is,
 461,Order size is not correct; it must be a multiple of the lot size.,as_is,
-462,Order modify failed. Cannot change to the new Time in Force,as_is,
+462,Order modify failed. Cannot change to the new Time in Force,as_is,Order modify failed. Cannot change to the new Time in Force.%s
 463,You must enter a valid price.,as_is,
 464,Invalid exchange,as_is,
 465,Order not confirmed ,as_is,

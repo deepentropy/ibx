@@ -18,8 +18,13 @@ modify, cancel, combo and local validation), read in the bytecode.
 
 - `wrapping`: `as_is` (the code reaches the API client itself), `321` or `322` (always sent as the cause of
   321 "Error validating request" or 322 "Error processing request"), `321|as_is` (wrapped at some raise sites only).
-- `captured_text`: the text the gateway was captured sending when it differs from its message table (104 "Cannot
-  modify a filled order.", 413 with a final period, 10148 "cannot").
+- `captured_text`: the text the gateway was captured sending when it differs from its message table: 104 "Cannot
+  modify a filled order.", 329 and 462 with the new value after a period, 413 and 10167 with one final period,
+  443 with the parameter after a colon, 2174 with "Warning: " before it, 10148 "cannot". The tests take this text
+  only.
+- `wrapping` of 365 and 366 is `as_is`, read again in the bytecode (`jextend.bC.o()@101-112`,
+  `jextend.bs.o()@90-101`: the code is sent itself); the index rule had them wrapped in 322.
+- A line break of a message is written `\n` (two characters).
 - `%SHORT_COMPNAME%`, `%SHORT_PRODNAME%` are the gateway's own placeholders (product and company names).
 
 ### order_local_rules.csv

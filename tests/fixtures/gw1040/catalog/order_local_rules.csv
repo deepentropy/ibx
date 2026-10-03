@@ -160,8 +160,8 @@ id,code,api_code,stage,text,condition
 10132 aN.a@2163,10132,10132,rules,Cannot place an order using a readonly account ,read-only account
 104 bH.d(pe)@121,104,104,modify,Cannot modify a filled order.,"modify of an order that is filled, cancelled or with a cancel pending"
 105 bH.d(pe)@165,105,105,modify,Order being modified does not match original order,modified order does not match the original
-329 aj.e(pe)@52,329,329,modify,Order modify failed. Cannot change to the new order type,modify to another order type
-462 aj.f(pe)@62,462,462,modify,Order modify failed. Cannot change to the new Time in Force,modify to another time in force
+329 aj.e(pe)@52,329,329,modify,Order modify failed. Cannot change to the new order type.%s,modify to another order type
+462 aj.f(pe)@62,462,462,modify,Order modify failed. Cannot change to the new Time in Force.%s,modify to another time in force
 10326 bH.d(pe)@836,10326,10326,modify,OCA group revision is not allowed,OCA group changed
 10327 bH.d(pe)@905,10327,10327,modify,OCA group type revision is not allowed,OCA type changed
 "10059 bH.c(pe,dl)@1067",10059,10059,modify,Mismatch leg contract.,combo modify with a leg the working order does not have

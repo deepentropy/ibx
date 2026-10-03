@@ -408,7 +408,9 @@ mod tests {
     }
 
     // ib-agent#192 B9b and B10: the captured refusals, from the
-    // definitions.
+    // definitions (gateway local rules `145 algo.a.a(pe,OrderCreator)@212`,
+    // `443 algo.a.a(AlgoExchanges,...)@376`, `441 algo.a.a(AlgoExchanges,...)@649`,
+    // `439 algo.a.a(AlgoExchanges,...)@36`).
     #[test]
     fn refusals_follow_the_definitions() {
         let d = captured_definitions();
@@ -467,9 +469,10 @@ mod tests {
     }
 
     // ibx#263 (`jextend.algo.a`): an overnight order needs an algorithm
-    // allowed overnight (442); the first parameter in the caller's order
-    // that fails gives the refusal; a number the reference cannot read is
-    // refused, and an empty value is not read.
+    // allowed overnight (442, gateway local rule
+    // `442 algo.a.a(AlgoExchanges,...)@150`); the first parameter in the
+    // caller's order that fails gives the refusal; a number the reference
+    // cannot read is refused, and an empty value is not read.
     #[test]
     fn overnight_and_number_rules() {
         let d = definitions_of_20261002();

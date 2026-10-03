@@ -327,6 +327,18 @@ fn cases() -> Vec<Case> {
                 ..attrs()
             } }],
             vec![d("LMT", &["lmt_price", "oca", "gtd_date", "conditions", "attr:583"])]),
+        // The order attributes ibx writes: each with the value kind of the
+        // attribute table.
+        case("SubmitLimitEx with attributes", vec![SubmitLimitEx {
+            order_id: 149, instrument: i, side: s, qty: 10, price: 100 * P, tif: b'0',
+            attrs: OrderAttrs {
+                order_ref: "layer-a".into(), display_size: 5, min_qty: 5, hidden: true, sweep_to_fill: true,
+                discretionary_amt: P / 10, good_after: 4_102_444_800, include_overnight: true,
+                use_price_mgmt_algo: Some(true), customer_account: "CUST1".into(), professional_customer: true,
+                ..attrs()
+            } }],
+            vec![d("LMT", &["lmt_price", "attr:6010", "attr:111", "attr:110", "attr:6135", "attr:6102", "attr:9813",
+                "attr:168", "attr:8534"])]),
         case("SubmitEx GTD with a time", vec![SubmitEx {
             order_id: 146, instrument: i, side: s, qty: q, kind: OrderKind::Limit { price: 100 * P }, tif: b'6',
             attrs: OrderAttrs { good_till: 4_102_444_800, ..attrs() } }],
@@ -412,6 +424,7 @@ fn run() -> Vec<(&'static str, Option<&'static str>, Vec<String>)> {
                 continue;
             };
             used.insert(n);
+            println!("{}: {}", case.name, to_pipe(&frames[n]));
             for p in check(&frames[n], e, &writers[e.msg], &attrs) {
                 problems.push(format!("35={} {p}: {}", e.msg, to_pipe(&frames[n])));
             }
@@ -515,4 +528,25 @@ fn the_checks_find_each_kind_of_difference() {
     assert_eq!(problems(&no_qty, &lmt), ["38 missing"]);
     let bad_kind = reference.replace("|6010=x", "|6010=x|6433=true");
     assert_eq!(problems(&bad_kind, &lmt).len(), 1, "{:?}", problems(&bad_kind, &lmt));
+}
+
+/// Every `OrderRequest` variant (src/types.rs) has a case above (its name
+/// is the case name's first word).
+#[test]
+fn every_order_request_variant_has_a_case() {
+    let types = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/types.rs")).unwrap()
+        .replace("\r\n", "\n");
+    let block = &types[types.find("pub enum OrderRequest {").unwrap()..];
+    let block = &block[..block.find("\n}\n").unwrap()];
+    let variants: Vec<&str> = block.lines()
+        .filter_map(|l| l.strip_prefix("    "))
+        .filter(|l| l.starts_with(|c: char| c.is_ascii_uppercase()))
+        .map(|l| l.split(|c: char| !c.is_alphanumeric()).next().unwrap())
+        .collect();
+    assert!(variants.len() > 30, "{variants:?}");
+    let cases = cases();
+    let missing: Vec<&&str> = variants.iter()
+        .filter(|v| !cases.iter().any(|c| c.name.split(' ').next() == Some(**v)))
+        .collect();
+    assert!(missing.is_empty(), "OrderRequest variants with no case: {missing:?}");
 }
