@@ -2420,21 +2420,13 @@ impl Wrapper for StopsWrapper {
 /// 1: stop at 1.5 times the last daily close, trailing amount half of it
 /// with the first stop at 1.5 times, relative with a price cap at half),
 /// then cancelled. Each must be held by the server (PreSubmitted or
-/// Submitted) with no refusal, then Cancelled. Only outside regular
-/// hours, where the orders wait for the next session: ibx does not send
-/// the REL's price cap.
+/// Submitted) with no refusal, then Cancelled. Works with the market open
+/// or closed (closed: the orders wait for the next session).
 /// Run with: cargo test --test rust_api_gt api_stops_all_or_none_live -- --ignored --nocapture
 #[test]
 #[ignore]
 fn api_stops_all_or_none_live() {
     let _ = env_logger::try_init();
-    let ny = jiff::Timestamp::now().in_tz("America/New_York").expect("New York time zone");
-    let minute = ny.hour() as i32 * 60 + ny.minute() as i32;
-    let weekday = !matches!(ny.weekday(), jiff::civil::Weekday::Saturday | jiff::civil::Weekday::Sunday);
-    if weekday && (9 * 60 + 20..=16 * 60 + 10).contains(&minute) {
-        println!("Skipping: regular trading hours in New York ({ny}); run it outside them");
-        return;
-    }
     let config = match get_config() {
         Some(c) => c,
         None => { println!("Skipping: IB credentials not set"); return; }
