@@ -113,7 +113,7 @@ pub(crate) fn canonical(cb: &Value) -> Option<String> {
         "error" => format!("error|{}|{}|{}", i(1), i(3), s(4)),
         "orderStatus" => format!(
             "orderStatus|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-            i(1), s(2), n(num(&a[3])), n(num(&a[4])), n(num(&a[5])), i(6), i(7), n(num(&a[8])), i(9), s(10), n(num(&a[11])),
+            i(1), s(2), n(num(&a[3])), n(num(&a[4])), n(num(&a[5])), perm(i(6)), i(7), n(num(&a[8])), i(9), s(10), n(num(&a[11])),
         ),
         "openOrder" => open_order_line(i(1), &a[2], &a[3], &a[4]),
         "smartComponents" => {
@@ -127,12 +127,25 @@ pub(crate) fn canonical(cb: &Value) -> Option<String> {
     })
 }
 
-/// The fields of an openOrder the comparison covers.
+/// A permId as compared: the reference's is the integer part of its
+/// ClOrdID, ibx's its own; both are session values. Set or not.
+pub(crate) fn perm(v: i64) -> &'static str {
+    if v == 0 { "0" } else { "{perm}" }
+}
+
+/// The fields of an openOrder the comparison covers. trailStopPrice is
+/// left out: ibx#491 (the reference shows the stop the server reports).
 pub(crate) const OPEN_ORDER_FIELDS: &[&str] = &[
     "action", "totalQuantity", "orderType", "lmtPrice", "auxPrice", "tif", "ocaGroup", "orderRef",
-    "parentId", "outsideRth", "goodAfterTime", "goodTillDate", "account", "trailingPercent", "trailStopPrice",
+    "parentId", "outsideRth", "goodAfterTime", "goodTillDate", "account", "trailingPercent",
     "whatIf", "permId", "clientId",
 ];
+
+/// A price field of an openOrder: unset (the client library's MAX, ibx's
+/// 0 for trailingPercent) as one value.
+pub(crate) fn order_price(v: f64) -> String {
+    if v == f64::MAX || v == 0.0 { "-".into() } else { n(v) }
+}
 
 /// openOrder as one line: the order id, the contract's conId, symbol and
 /// type, the order fields of [`OPEN_ORDER_FIELDS`] and the status. A field
@@ -145,7 +158,8 @@ pub(crate) fn open_order_line(id: i64, contract: &Value, order: &Value, state: &
                 v.as_str().unwrap_or("").to_string(),
             "outsideRth" | "whatIf" => v.as_bool().unwrap_or(false).to_string(),
             "lmtPrice" | "auxPrice" | "trailingPercent" | "trailStopPrice" =>
-                if v.is_null() { "MAX".into() } else { n(num(v)) },
+                if v.is_null() { "-".into() } else { order_price(num(v)) },
+            "permId" => perm(if v.is_null() { 0 } else { num(v) as i64 }).into(),
             _ => if v.is_null() { "0".into() } else { n(num(v)) },
         }
     };

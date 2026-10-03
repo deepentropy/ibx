@@ -86,6 +86,10 @@ def plain(v):
     if isinstance(v, Decimal):
         return str(v)
     if isinstance(v, float):
+        if v != v:
+            return "NaN"
+        if v in (float("inf"), float("-inf")):
+            return "Infinity" if v > 0 else "-Infinity"
         return "MAX" if v == UNSET_FLOAT else v
     if isinstance(v, (str, int, bool)) or v is None:
         return v
@@ -153,6 +157,9 @@ def request(name: str, body: bytes):
         m = import_module("ibapi.protobuf.PlaceOrderRequest_pb2").PlaceOrderRequest()
         m.ParseFromString(payload)
         order = decoder_utils.decodeOrder(m.orderId, m.contract, m.order)
+        # Not read back by decodeOrder (an openOrder carries no transmit);
+        # the client library writes it only when true.
+        order.transmit = m.order.HasField("transmit") and m.order.transmit
         contract = decoder_utils.decodeContract(m.contract)
         out = {"orderId": m.orderId, "contract": plain(contract), "order": plain(order)}
         if m.HasField("attachedOrders"):
@@ -233,6 +240,32 @@ def md_slice(ranges, farms=("usfarm",)):
     return keep
 
 
+ORDER_API = ("PLACE_ORDER", "CANCEL_ORDER", "START_API", "REQ_GLOBAL_CANCEL", "REQ_OPEN_ORDERS", "REQ_ALL_OPEN_ORDERS",
+             "OPEN_ORDER", "ORDER_STATUS", "ERR_MSG", "EXECUTION_DATA", "COMMISSION_REPORT", "NEXT_VALID_ID",
+             "OPEN_ORDER_END")
+
+
+def order_slice(ranges=None):
+    """Order records: the order requests and callbacks, the auth link's
+    order messages, reports and definition lookups (not the option chain
+    ones)."""
+    def keep(r):
+        if ranges and not any(a <= r["seq"] <= b for a, b in ranges):
+            return False
+        if r["kind"] == "api":
+            return r.get("msg_name") in ORDER_API
+        if r["conn"] != "CCP":
+            return False
+        fields = dict((t, v) for t, v in r.get("fields", []))
+        if r.get("msg_type") in ("c", "d"):
+            return not fields.get("320", "").startswith("getECsForConidExchangePairs")
+        # The commission reports.
+        if r.get("msg_type") == "U":
+            return fields.get("6040") == "60"
+        return r.get("msg_type") in ("D", "G", "F", "8", "9", "H")
+    return keep
+
+
 L1_IN = ("Q", "L", "P", "G", "3", "d")
 L1_OUT = ("V", "c")
 ORDER_TYPES = ("D", "G", "F", "8", "c", "d")
@@ -252,15 +285,15 @@ def specs(cap: Path):
            md_slice([(21956, 22700)]),
            "AAPL (and BMW, 7203 on other farms) with delayed data asked, then AAPL with real-time data, before the open")
     for name in ("lmt_cancel", "modify_cancelled", "bracket", "oca_group"):
-        yield (s26 / f"{name}.jsonl", f"orders_{name}", "orders", fix_types(*ORDER_TYPES, conns=("CCP",)),
+        yield (s26 / f"{name}.jsonl", f"orders_{name}", "orders", order_slice(),
                f"{name}: the API orders, the gateway's order messages and the server reports")
-    yield (s26b / "bracket.jsonl", "orders_bracket_b", "orders", fix_types(*ORDER_TYPES, conns=("CCP",)),
+    yield (s26b / "bracket.jsonl", "orders_bracket_b", "orders", order_slice(),
            "bracket (second session): the API orders, the gateway's order messages and the server reports")
     for name in ("premarket_order_types", "rth_order_types", "i196_overnight"):
-        yield (s28 / f"{name}.jsonl", f"orders_{name}", "orders", fix_types(*ORDER_TYPES, conns=("CCP",)),
+        yield (s28 / f"{name}.jsonl", f"orders_{name}", "orders", order_slice(),
                f"{name}: the API orders, the gateway's order messages and the server reports")
     for name in ("b1_416_time_condition", "b1_416_time_near", "b1_462_whatif", "b1_263_algo_refusals"):
-        yield (b1 / f"{name}.jsonl", f"orders_{name}", "orders", fix_types(*ORDER_TYPES, conns=("CCP",)),
+        yield (b1 / f"{name}.jsonl", f"orders_{name}", "orders", order_slice(),
                f"{name}: the API orders, the gateway's order messages and the server reports")
 
 

@@ -15,5 +15,6 @@
 
 mod fixture;
 mod l1;
+mod orders;
 mod replay;
 mod session;

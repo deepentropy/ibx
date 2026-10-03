@@ -11,7 +11,7 @@ use crate::bridge::SharedState;
 use crate::engine::hot_loop::HotLoop;
 use crate::test_support::{parse_fields, Fields, Peer};
 
-use super::fixture::{attr_mask, n, OPEN_ORDER_FIELDS};
+use super::fixture::{attr_mask, n, order_price, perm, OPEN_ORDER_FIELDS};
 
 pub(crate) const ACCOUNT: &str = "DUXXXXXXX";
 
@@ -51,6 +51,12 @@ impl Session {
         engine.set_scale_us_lots(true);
         engine.set_user_book(true);
         engine.set_price_mgmt(true, Some("*/CMDTY;*/CRYPTO;*/FUND;*/IOPT;*/SLB"));
+        // Its smart combo conIds (6611).
+        shared.reference.set_smart_combo_con_ids(concat!(
+            "AUD:61227077,BRL:136000438,CAD:61227082,CHF:61227087,CNH:136000441,DKK:136000423,EUR:58666491,",
+            "GBP:58666494,HKD:61227072,INR:136000444,JPY:61227069,KRW:136000424,MXN:136000449,NOK:136000452,",
+            "NZD:136000435,SEK:136000429,USD:28812380",
+        ));
         let client = EClient::from_parts(shared.clone(), control_tx, std::thread::spawn(|| {}), ACCOUNT.into());
         Self { engine, client, shared, farm, ccp, farm_out: Vec::new(), ccp_out: Vec::new(), callbacks: Vec::new() }
     }
@@ -145,8 +151,8 @@ impl Wrapper for Recorder {
         parent_id: i64, last_fill_price: f64, client_id: i64, why_held: &str, mkt_cap_price: f64,
     ) {
         self.lines.push(format!(
-            "orderStatus|{order_id}|{status}|{}|{}|{}|{perm_id}|{parent_id}|{}|{client_id}|{why_held}|{}",
-            n(filled), n(remaining), n(avg_fill_price), n(last_fill_price), n(mkt_cap_price),
+            "orderStatus|{order_id}|{status}|{}|{}|{}|{}|{parent_id}|{}|{client_id}|{why_held}|{}",
+            n(filled), n(remaining), n(avg_fill_price), perm(perm_id), n(last_fill_price), n(mkt_cap_price),
         ));
     }
     fn open_order(&mut self, order_id: i64, c: &Contract, o: &Order, state: &OrderState) {
@@ -155,8 +161,8 @@ impl Wrapper for Recorder {
                 "action" => o.action.clone(),
                 "totalQuantity" => n(o.total_quantity),
                 "orderType" => o.order_type.clone(),
-                "lmtPrice" => n(o.lmt_price),
-                "auxPrice" => n(o.aux_price),
+                "lmtPrice" => order_price(o.lmt_price),
+                "auxPrice" => order_price(o.aux_price),
                 "tif" => o.tif.clone(),
                 "ocaGroup" => o.oca_group.clone(),
                 "orderRef" => o.order_ref.clone(),
@@ -165,10 +171,10 @@ impl Wrapper for Recorder {
                 "goodAfterTime" => o.good_after_time.clone(),
                 "goodTillDate" => o.good_till_date.clone(),
                 "account" => o.account.clone(),
-                "trailingPercent" => n(o.trailing_percent),
-                "trailStopPrice" => n(o.trail_stop_price),
+                "trailingPercent" => order_price(o.trailing_percent),
+                "trailStopPrice" => order_price(o.trail_stop_price),
                 "whatIf" => o.what_if.to_string(),
-                "permId" => o.perm_id.to_string(),
+                "permId" => perm(o.perm_id).to_string(),
                 "clientId" => o.client_id.to_string(),
                 _ => unreachable!("{k}"),
             }
