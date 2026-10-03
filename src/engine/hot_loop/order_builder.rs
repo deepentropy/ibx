@@ -8,7 +8,7 @@ use crate::protocol::connection::Connection;
 use crate::protocol::fix;
 use crate::types::{AlgoParams, OrderCondition, OrderId, OrderRequest, OrderStatus, OrderUpdate, Side};
 
-use super::{HeartbeatState, format_price, format_price_ref, format_qty, format_uint};
+use super::{HeartbeatState, format_price_ref, format_qty, format_uint};
 
 pub(crate) fn drain_and_send_orders(
     ccp_conn: &mut Option<Connection>,
@@ -165,11 +165,18 @@ pub(crate) fn drain_and_send_orders(
                 continue;
             }
         }
-        // Snap every price to the contract's tick grid before encoding
-        // (ibx#216). The tick comes from the market-data subscription ack;
-        // without one it is 0 and prices pass through unchanged.
-        if let Some(instrument) = order_req.instrument() {
-            order_req.snap_prices(context.market.min_tick_scaled(instrument));
+        // A price off the contract's price grid: refused with 110 and
+        // nothing sent, as the reference; it does not round it (ibx#263,
+        // replacing the snapping of ibx#216). The tick comes from the
+        // market-data subscription ack; without one only a negative price
+        // is refused.
+        let instrument = order_req.instrument().or_else(|| context.order(oid).map(|o| o.instrument));
+        let tick = instrument.map_or(0, |i| context.market.min_tick_scaled(i));
+        if let Some(id) = order_req.off_grid_order(tick) {
+            let (code, message) = crate::client_core::PRICE_VARIATION;
+            log::warn!("Order {} refused: a price off the price grid", id);
+            shared.orders.push_order_error(id, code, message.into());
+            continue;
         }
         // A what-if goes out under a ClOrdID of its own and stays out of
         // the order table: an order with the same id is left as it is
@@ -191,7 +198,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
+                let price_str = format_price_ref(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -220,8 +227,8 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
-                let stop_str = format_price(stop_price);
+                let price_str = format_price_ref(price);
+                let stop_str = format_price_ref(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -252,7 +259,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
+                let price_str = format_price_ref(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -322,7 +329,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let stop_str = format_price(stop_price);
+                let stop_str = format_price_ref(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -352,7 +359,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let stop_str = format_price(stop_price);
+                let stop_str = format_price_ref(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -386,8 +393,8 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
-                let stop_str = format_price(stop_price);
+                let price_str = format_price_ref(price);
+                let stop_str = format_price_ref(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -422,7 +429,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
+                let price_str = format_price_ref(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -451,7 +458,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
+                let price_str = format_price_ref(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -480,8 +487,8 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let trail_str = format_price(trail_amt);
-                let trail_stop_str = format_price(trail_stop_price);
+                let trail_str = format_price_ref(trail_amt);
+                let trail_stop_str = format_price_ref(trail_stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -520,10 +527,10 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let offset_str = format_price(lmt_offset);
-                let price_str = lmt_price.map(format_price);
-                let trail_str = format_price(trail_amt);
-                let trail_stop_str = format_price(trail_stop_price);
+                let offset_str = format_price_ref(lmt_offset);
+                let price_str = lmt_price.map(format_price_ref);
+                let trail_str = format_price_ref(trail_amt);
+                let trail_stop_str = format_price_ref(trail_stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -558,7 +565,7 @@ pub(crate) fn drain_and_send_orders(
                 }
                 send_new_order(conn, context, instrument, &fields)
             }
-            OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_pct, trail_stop_price } => {
+            OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_percent, trail_stop_price } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'P', b'0', 0,
                 ));
@@ -572,8 +579,8 @@ pub(crate) fn drain_and_send_orders(
                 // "Invalid value in field # 18". 6268 is the trail unit, 100 =
                 // percent, at every percentage (ib-agent#192 B7, ibx#339); it
                 // was sent as basis points, right only at exactly 1%.
-                let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
-                let trail_stop_str = format_price(trail_stop_price);
+                let pct_decimal = format_price_ref(trail_percent).to_string();
+                let trail_stop_str = format_price_ref(trail_stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -599,9 +606,9 @@ pub(crate) fn drain_and_send_orders(
                 if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
                 send_new_order(conn, context, instrument, &fields)
             }
-            OrderRequest::SubmitTrailingStopPctEx { order_id, instrument, side, qty, trail_pct, tif, attrs, trail_stop_price } => {
+            OrderRequest::SubmitTrailingStopPctEx { order_id, instrument, side, qty, trail_percent, tif, attrs, trail_stop_price } => {
                 send_order_ex(conn, context, account_id, order_id, instrument, side, qty,
-                    crate::types::OrderKind::TrailPct { trail_pct, trail_stop_price }, tif, &attrs)
+                    crate::types::OrderKind::TrailPct { trail_percent, trail_stop_price }, tif, &attrs)
             }
             OrderRequest::SubmitMoc { order_id, instrument, side, qty } => {
                 context.insert_order(crate::types::Order::new(
@@ -638,7 +645,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
+                let price_str = format_price_ref(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -667,7 +674,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let stop_str = format_price(stop_price);
+                let stop_str = format_price_ref(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -696,8 +703,8 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
-                let stop_str = format_price(stop_price);
+                let price_str = format_price_ref(price);
+                let stop_str = format_price_ref(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -732,9 +739,9 @@ pub(crate) fn drain_and_send_orders(
                 let parent_str = clord(parent_id);
                 let tp_str = clord(tp_id);
                 let sl_str = clord(sl_id);
-                let entry_str = format_price(entry_price);
-                let tp_price_str = format_price(take_profit);
-                let sl_price_str = format_price(stop_loss);
+                let entry_str = format_price_ref(entry_price);
+                let tp_price_str = format_price_ref(take_profit);
+                let sl_price_str = format_price_ref(stop_loss);
                 // The children's parent link and OCA group, as the reference
                 // sends them (ibx#311, ibx#329).
                 let (parent_link, oca_group) = bracket_parent_link(context, parent_id);
@@ -827,7 +834,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let offset_str = format_price(offset);
+                let offset_str = format_price_ref(offset);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -860,7 +867,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
+                let price_str = format_price_ref(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -939,7 +946,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let price_str = format_price(price);
+                let price_str = format_price_ref(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -1000,7 +1007,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_qty(qty);
-                let price_str = format_price(price);
+                let price_str = format_price_ref(price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -1032,7 +1039,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let stop_str = format_price(stop_price);
+                let stop_str = format_price_ref(stop_price);
                 let adjustable = adjustable_stop_tags(trigger_price, adjusted_order_type,
                     adjusted_stop_price, adjusted_stop_limit_price,
                     adjusted_trailing_amount, adjustable_trailing_unit);
@@ -1120,7 +1127,7 @@ pub(crate) fn drain_and_send_orders(
                 let clord_str = format!("{}.{}", order_id, ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
-                let stop_str = format_price(stop_price);
+                let stop_str = format_price_ref(stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 let now = chrono_free_timestamp();
@@ -1172,7 +1179,7 @@ pub(crate) fn drain_and_send_orders(
                 ];
                 let cap_str;
                 if price_cap > 0 {
-                    cap_str = format_price(price_cap);
+                    cap_str = format_price_ref(price_cap);
                     fields.push((44, &cap_str)); // Price cap
                 }
                 send_new_order(conn, context, instrument, &fields)
@@ -1381,10 +1388,11 @@ pub(crate) fn drain_and_send_orders(
                     }
                 };
                 let bracket_key = context.bracket_keys.get(&order_id).map(|k| k.to_string());
+                let reported_stop = context.reported_stop.get(&order_id).copied();
                 let mut fields = modify_fields(
                     &clord_str, &orig_clord, account_id, qty, side_str, &symbol,
                     &sec_type_str, &con_id_str, kind, tif, &attrs, trail_limit_offset,
-                    bracket_key.as_deref(), context.price_mgmt_send);
+                    reported_stop, bracket_key.as_deref(), context.price_mgmt_send);
                 if let Some(combo) = context.combos.orders.get(&order_id) {
                     combo_modify_fields(&mut fields, combo);
                 }
@@ -1772,6 +1780,19 @@ fn send_new_order(
         }
     }
     out.extend(short_sale.iter().map(|(t, v)| (*t, v.as_str())));
+    // The default trigger method on the stop types, when the order did not
+    // carry its own (ibx#263).
+    if !out.iter().any(|&(t, _)| t == 6115) && has_trigger_method(&out) { out.push((6115, "0")); }
+    // The trail unit of a trailing type, amount (0) when the order did not
+    // carry percent (ibx#263).
+    if !out.iter().any(|&(t, _)| t == 6268) && trailing_type(&out) { out.push((6268, "0")); }
+    // The stop price in 6117: the stop trigger of every non-trailing stop
+    // type (`jclient.pe.j@1993-2152`, the adjustable stop included,
+    // captured ib-agent#192 B11), the touched trigger of MIT and LIT
+    // (ibx#263).
+    let stop_trigger = (touched_type(&out) || matches!(field(&out, 40), Some("3" | "4" | "SP")))
+        .then(|| field(&out, 99)).flatten();
+    if let Some(v) = stop_trigger.filter(|_| !out.iter().any(|&(t, _)| t == 6117)) { out.push((6117, v)); }
     if con_id > 0 { out.push((6008, &con_id_str)); }
     // A combo's block after its conId (ibx#470).
     if let Some(combo) = &context.combo_send {
@@ -1793,6 +1814,41 @@ fn send_new_order(
     conn.send_fix(&out)
 }
 
+/// Whether a new order of this frame's type writes the trigger method
+/// (6115), as the reference (ibx#263): it writes it on a new order whose
+/// type is a stop or touched type (`jattrib.attribs.TriggerMethod.b`, true
+/// for `jibtypes.s.aw()`): STP, STP LMT, STP PRT, TRAIL, TRAIL LIMIT, MIT,
+/// LIT, TRAIL MIT and TRAIL LIT (captured on all but STP PRT), never on a
+/// replace. A trailing stop is the pegged type with the trailing letter.
+fn has_trigger_method(fields: &[(u32, &str)]) -> bool {
+    matches!(field(fields, 40), Some("3" | "4" | "SP" | "J" | "LT")) || trailing_type(fields)
+}
+
+/// Whether the frame's type is a trailing one, which writes the trail
+/// unit (6268) on a new order and a replace (`jattrib.attribs.TrailingUnit.b`,
+/// true for `jibtypes.s.as()`): TRAIL, TRAIL LIMIT, TRAIL MIT, TRAIL LIT
+/// (ibx#263; captured with 6268 on all four, new orders and replaces).
+fn trailing_type(fields: &[(u32, &str)]) -> bool {
+    match field(fields, 40) {
+        Some("TSL" | "TMIT" | "TLIT") => true,
+        Some("P") => field(fields, 18).is_some_and(|v| v.split(' ').next() == Some("a")),
+        _ => false,
+    }
+}
+
+/// Whether the frame's type is a touched one, whose stop price the
+/// reference keeps as the touched trigger and writes in 6117 among the
+/// order attributes (`jclient.pe.D(double)` for `jibtypes.s.v()`,
+/// `jattrib.attribs.TouchedTrigger.b`): MIT and LIT (ibx#263, captured in
+/// ib-agent#199 on new orders and replaces).
+fn touched_type(fields: &[(u32, &str)]) -> bool {
+    matches!(field(fields, 40), Some("J" | "LT"))
+}
+
+fn field<'a>(fields: &[(u32, &'a str)], tag: u32) -> Option<&'a str> {
+    fields.iter().find(|&&(t, _)| t == tag).map(|&(_, v)| v)
+}
+
 /// Put new-order fields in the order of the reference's new-order writer
 /// (ibx#375; the writer read from the code, its order checked against the
 /// captured frames of ib-agent#192 B8 and B9). The sort is stable: the
@@ -1801,7 +1857,15 @@ fn send_new_order(
 /// reference in no fixed order; they get one fixed place each here, as
 /// seen in captured frames where it could be.
 fn in_reference_order(fields: &mut [(u32, &str)]) {
-    fields.sort_by_key(|&(tag, _)| reference_rank(tag));
+    let touched = touched_type(fields);
+    fields.sort_by_key(|&(tag, _)| rank_in_frame(tag, touched));
+}
+
+/// The place of a field, the touched trigger of MIT and LIT among the
+/// order attributes (after outside-RTH, as captured in ib-agent#199), the
+/// stop trigger of the other types before them.
+fn rank_in_frame(tag: u32, touched: bool) -> u16 {
+    if touched && tag == 6117 { 76 } else { reference_rank(tag) }
 }
 
 /// The place of a field in the reference's new-order writer (ibx#375).
@@ -1852,7 +1916,8 @@ pub(super) fn reference_rank(tag: u32) -> u16 {
         168 => 86,
         9813 => 87,
         6102 => 88,
-        5920 => 89,
+        // Cash quantity (`jattrib.attribs.holder.CashQuantityValue`).
+        152 => 89,
         6941 => 90,
         6938 => 91,
         6939 => 92,
@@ -1913,11 +1978,11 @@ fn adjustable_stop_tags(
     let mut tags = vec![
         (6257, "1".to_string()),                            // Has adjustable params flag
         (6261, adjusted_order_type.fix_code().to_string()), // Adjusted order type
-        (6258, format_price(trigger_price).to_string()),    // Trigger price
-        (6259, format_price(adjusted_stop_price).to_string()), // Adjusted stop price
+        (6258, format_price_ref(trigger_price).to_string()),    // Trigger price
+        (6259, format_price_ref(adjusted_stop_price).to_string()), // Adjusted stop price
     ];
     if adjusted_stop_limit_price > 0 {
-        tags.push((6262, format_price(adjusted_stop_limit_price).to_string())); // Adjusted stop limit price
+        tags.push((6262, format_price_ref(adjusted_stop_limit_price).to_string())); // Adjusted stop limit price
     }
     // When the stop converts to a trailing type, carry the trailing
     // amount (6260) and its unit (6269: 0=amount, 100=percent).
@@ -1926,7 +1991,7 @@ fn adjustable_stop_tags(
         crate::types::AdjustedOrderType::Trail
         | crate::types::AdjustedOrderType::TrailLimit)
     {
-        tags.push((6260, format_price(adjusted_trailing_amount).to_string()));
+        tags.push((6260, format_price_ref(adjusted_trailing_amount).to_string()));
         tags.push((6269, adjustable_trailing_unit.to_string()));
     }
     tags
@@ -2004,16 +2069,23 @@ fn modify_fields(
     tif: u8,
     attrs: &crate::types::OrderAttrs,
     trail_limit_offset: Option<crate::types::Price>,
+    reported_stop: Option<crate::types::Price>,
     bracket_key: Option<&str>,
     price_mgmt: bool,
 ) -> Vec<(u32, String)> {
     use crate::types::OrderKind as K;
-    let p = |v: crate::types::Price| format_price(v).to_string();
+    let p = |v: crate::types::Price| format_price_ref(v).to_string();
 
     // Prices go before the account; type-specific fields after the order
     // type. A trail value rides both the stop field and the trail field.
     let mut before_account: Vec<(u32, String)> = Vec::new();
     let mut stop_trigger: Option<String> = None; // restated for STP / STP LMT
+    // A trailing type restates its stop price only when it differs from the
+    // last one the server reported, and not before any report
+    // (`jclient.pe.j@2041-2152`: `dz()` null or `dz().e()` equal, not
+    // written; captured ib-agent#195 S2 with 6117, ib-agent#192 A3b without).
+    let trailing_stop = |stop: crate::types::Price| (stop > 0 && reported_stop.is_some_and(|r| r != stop)).then(|| p(stop));
+    let mut touched_trigger: Option<String> = None; // MIT / LIT, an attribute
     let mut trail_offset: Option<String> = None; // TRAIL LIMIT limit offset
     let mut trail_unit: Option<&str> = None;     // 0 = amount, 100 = percent
     let mut after_type: Vec<(u32, String)> = Vec::new();
@@ -2032,22 +2104,23 @@ fn modify_fields(
             stop_trigger = Some(p(stop_price));
             "4"
         }
-        K::TrailingStop { trail_amt, .. } => {
+        K::TrailingStop { trail_amt, trail_stop_price } => {
             before_account.push((99, p(trail_amt)));
+            stop_trigger = trailing_stop(trail_stop_price);
             trail_unit = Some("0");
             after_type.push((211, p(trail_amt)));
-            after_type.push((18, "a".to_string()));
             "P"
         }
-        K::TrailPct { trail_pct, .. } => {
-            let pct = format!("{:.2}", trail_pct as f64 / 100.0);
+        K::TrailPct { trail_percent, trail_stop_price } => {
+            let pct = format_price_ref(trail_percent).to_string();
             before_account.push((99, pct.clone()));
+            stop_trigger = trailing_stop(trail_stop_price);
             trail_unit = Some("100");
             after_type.push((211, pct));
-            after_type.push((18, "a".to_string()));
             "P"
         }
-        K::TrailingStopLimit { lmt_offset, lmt_price, trail_amt, .. } => {
+        K::TrailingStopLimit { lmt_offset, lmt_price, trail_amt, trail_stop_price } => {
+            stop_trigger = trailing_stop(trail_stop_price);
             // An absolute limit price: 44 with the order's offset, as the
             // reference restates both (ib-agent#194, ib-agent#195).
             if let Some(price) = lmt_price { before_account.push((44, p(price))); }
@@ -2062,15 +2135,24 @@ fn modify_fields(
         }
         K::Moc => "5",
         K::Loc { price } => { before_account.push((44, p(price))); "B" }
-        K::Mit { stop_price } => { before_account.push((99, p(stop_price))); "J" }
+        K::Mit { stop_price } => {
+            before_account.push((99, p(stop_price)));
+            touched_trigger = Some(p(stop_price));
+            "J"
+        }
         K::Lit { price, stop_price } => {
             before_account.push((44, p(price)));
             before_account.push((99, p(stop_price)));
+            touched_trigger = Some(p(stop_price));
             "LT"
         }
         K::Mtl => "K",
         K::MktPrt => "U",
-        K::StpPrt { stop_price } => { before_account.push((99, p(stop_price))); "SP" }
+        K::StpPrt { stop_price } => {
+            before_account.push((99, p(stop_price)));
+            stop_trigger = Some(p(stop_price));
+            "SP"
+        }
         K::MidPrice { price_cap } => {
             if price_cap > 0 { before_account.push((44, p(price_cap))); }
             "MIDPX"
@@ -2084,12 +2166,13 @@ fn modify_fields(
             let (prices, mut types) = pegged_tags(matches!(kind, K::PegMid { .. }), price, offset);
             before_account.extend(prices);
             types.remove(0); // the order type, pushed below
-            after_type.extend(types);
+            after_type.extend(types.into_iter().filter(|(t, _)| *t != 18));
             "P"
         }
-        K::Rel { offset } => {
+        K::Rel { price, offset } => {
+            // The price cap, restated (ib-agent#199).
+            if price > 0 { before_account.push((44, p(price))); }
             after_type.push((211, p(offset)));
-            after_type.push((18, "R".to_string()));
             "P"
         }
         K::AdjustableStop { stop_price, .. } => {
@@ -2104,10 +2187,14 @@ fn modify_fields(
             if starting_price > 0 { before_account.push((99, format_price_ref(starting_price).to_string())); }
             bench_attrs = peg_bench_attrs(stock_ref_price, ref_con_id, is_peg_decrease,
                 pegged_change_amount, ref_change_amount, "", false);
-            after_type.push((18, "R".to_string()));
             "PB"
         }
     };
+    // The instruction field as on the new order (`jclient.pe.gI()`, also
+    // written by the replace writer `jclient.pe.d`): the type letter, G for
+    // all-or-none, e for an algo (ibx#263).
+    let inst = exec_inst(&kind, attrs.all_or_none, attrs.algo.is_some());
+    if !inst.is_empty() { after_type.push((18, inst)); }
 
     let tif_str = tif_str(tif);
     let mut f: Vec<(u32, String)> = vec![
@@ -2135,10 +2222,15 @@ fn modify_fields(
     // Outside-RTH only when the order has it: a replace without it leaves
     // the order regular-hours only (ibx#247).
     if attrs.outside_rth { f.push((6433, "1".to_string())); }
+    // The touched trigger of MIT and LIT, restated (ib-agent#199, ibx#263).
+    if let Some(t) = touched_trigger { f.push((6117, t)); }
     if let Some(u) = trail_unit { f.push((6268, u.to_string())); }
     f.extend(bench_attrs);
     // The price management flag, last of the attributes (ibx#492).
     if price_mgmt && !crate::engine::price_mgmt::excluded_kind(&kind) { f.push((8339, "1".to_string())); }
+    // The algo block, restated as on the new order (`jclient.pe.d` writes
+    // it through the same `jclient.pe.j`; ibx#263).
+    if let Some(algo) = &attrs.algo { f.extend(algo_fields(algo)); }
     f.push((38, format_uint(qty as u64).to_string()));
     f.push((54, side.to_string()));
     f.push((40, ord_type.to_string()));
@@ -2174,9 +2266,9 @@ fn combo_modify_fields(fields: &mut Vec<(u32, String)>, combo: &crate::engine::c
     if combo.leg_prices.is_empty() { return; }
     if let Some(price) = combo.price {
         match fields.iter().position(|(t, _)| *t == 44) {
-            Some(i) => fields[i].1 = format_price(price).to_string(),
+            Some(i) => fields[i].1 = format_price_ref(price).to_string(),
             None => if let Some(i) = fields.iter().position(|(t, _)| *t == 41) {
-                fields.insert(i + 1, (44, format_price(price).to_string()));
+                fields.insert(i + 1, (44, format_price_ref(price).to_string()));
             },
         }
     }
@@ -2535,16 +2627,15 @@ fn push_extended_attrs(
         }
     }
     if attrs.discretionary_amt > 0 {
-        fields.push((9813, format_price(attrs.discretionary_amt).to_string()));
+        fields.push((9813, format_price_ref(attrs.discretionary_amt).to_string()));
     }
     if attrs.sweep_to_fill {
         fields.push((6102, "1".to_string()));
     }
-    if attrs.trigger_method > 0 {
-        fields.push((6115, attrs.trigger_method.to_string()));
-    }
     if attrs.cash_qty > 0 {
-        fields.push((5920, format_price(attrs.cash_qty).to_string()));
+        // Tag 152, the cash quantity attribute of the reference, written
+        // with its price formatter (ibx#263; 5920 is only its column id).
+        fields.push((152, format_price_ref(attrs.cash_qty).to_string()));
     }
     // Condition tags (6136+ framework). The reference always sends both
     // flags, 0 or 1, before the count: ignore-RTH rides 6128 and cancel-order
@@ -2601,7 +2692,7 @@ fn send_order_ex(
         K::SnapPri { offset } => (crate::types::ORD_SNAP_PRI, 0, offset),
         K::PegMkt { price, offset } => (crate::types::ORD_PEG_MKT, price, offset),
         K::PegMid { price, offset } => (crate::types::ORD_PEG_MID, price, offset),
-        K::Rel { offset } => (b'R', 0, offset),
+        K::Rel { price, offset } => (b'R', price, offset),
         K::AdjustableStop { stop_price, .. } => (b'3', 0, stop_price),
         K::PegBench { starting_price, .. } => (crate::types::ORD_PEG_BENCH, starting_price, 0),
     };
@@ -2637,84 +2728,84 @@ fn send_order_ex(
             // leg's price in leg order (ibx#470, captured 26/09/2026:
             // `44=-73.15|6879=721.35|6879=794.50`).
             let price = context.combo_send.as_ref().and_then(|c| c.price).unwrap_or(price);
-            fields.push((44, format_price(price).to_string()));
+            fields.push((44, format_price_ref(price).to_string()));
             if let Some(combo) = &context.combo_send {
                 fields.extend(combo.leg_prices.iter().map(|p| (6879, format_price_ref(*p).to_string())));
             }
         }
         K::Stop { stop_price } => {
             fields.push((40, "3".to_string()));
-            fields.push((99, format_price(stop_price).to_string()));
+            fields.push((99, format_price_ref(stop_price).to_string()));
             // Stop trigger, as the reference (ibx#466).
-            fields.push((6117, format_price(stop_price).to_string()));
+            fields.push((6117, format_price_ref(stop_price).to_string()));
         }
         K::StopLimit { price, stop_price } => {
             fields.push((40, "4".to_string()));
-            fields.push((44, format_price(price).to_string()));
-            fields.push((99, format_price(stop_price).to_string()));
+            fields.push((44, format_price_ref(price).to_string()));
+            fields.push((99, format_price_ref(stop_price).to_string()));
             // Stop trigger, as the reference (ibx#466).
-            fields.push((6117, format_price(stop_price).to_string()));
+            fields.push((6117, format_price_ref(stop_price).to_string()));
         }
         K::TrailingStop { trail_amt, trail_stop_price } => {
             // Per ib-agent#136 capture: amount-based trailing stop carries
             // the trail amount in both 99 and 211 and requires 18=a.
-            let t = format_price(trail_amt).to_string();
+            let t = format_price_ref(trail_amt).to_string();
             fields.push((40, "P".to_string()));
             fields.push((99, t.clone()));
             fields.push((211, t));
             // Optional initial stop trigger (tag 6117), only when set (ib-agent#173).
-            if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
+            if trail_stop_price > 0 { fields.push((6117, format_price_ref(trail_stop_price).to_string())); }
         }
         K::TrailingStopLimit { lmt_offset, lmt_price, trail_amt, trail_stop_price } => {
             // Per ib-agent#136 capture: TRAIL LIMIT uses OrdType=TSL, no
             // tag 18; trail amount in both 99 and 211; 6370 is the
             // limit-vs-trail offset. An absolute limit price goes in 44
             // instead, with no 6370 (ib-agent#194).
-            let t = format_price(trail_amt).to_string();
+            let t = format_price_ref(trail_amt).to_string();
             fields.push((40, "TSL".to_string()));
-            if let Some(price) = lmt_price { fields.push((44, format_price(price).to_string())); }
+            if let Some(price) = lmt_price { fields.push((44, format_price_ref(price).to_string())); }
             fields.push((99, t.clone()));
-            if lmt_price.is_none() { fields.push((6370, format_price(lmt_offset).to_string())); }
+            if lmt_price.is_none() { fields.push((6370, format_price_ref(lmt_offset).to_string())); }
             fields.push((211, t));
-            if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
+            if trail_stop_price > 0 { fields.push((6117, format_price_ref(trail_stop_price).to_string())); }
         }
-        K::TrailPct { trail_pct, trail_stop_price } => {
+        K::TrailPct { trail_percent, trail_stop_price } => {
             // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
             // percent in decimal form (1.00 for 1%), with 18=a. 6268 is the
             // trail unit, 100 = percent (ib-agent#192 B7, ibx#339).
-            let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
+            let pct_decimal = format_price_ref(trail_percent).to_string();
             fields.push((40, "P".to_string()));
             fields.push((99, pct_decimal.clone()));
             fields.push((211, pct_decimal));
             fields.push((6268, "100".to_string()));
-            if trail_stop_price > 0 { fields.push((6117, format_price(trail_stop_price).to_string())); }
+            if trail_stop_price > 0 { fields.push((6117, format_price_ref(trail_stop_price).to_string())); }
         }
         K::Moc => fields.push((40, "5".to_string())),
         K::Loc { price } => {
             fields.push((40, "B".to_string()));
-            fields.push((44, format_price(price).to_string()));
+            fields.push((44, format_price_ref(price).to_string()));
         }
         K::Mit { stop_price } => {
             fields.push((40, "J".to_string()));
-            fields.push((99, format_price(stop_price).to_string()));
+            fields.push((99, format_price_ref(stop_price).to_string()));
         }
         K::Lit { price, stop_price } => {
             fields.push((40, "LT".to_string())); // per ib-agent#138
-            fields.push((44, format_price(price).to_string()));
-            fields.push((99, format_price(stop_price).to_string()));
+            fields.push((44, format_price_ref(price).to_string()));
+            fields.push((99, format_price_ref(stop_price).to_string()));
         }
         K::Mtl => fields.push((40, "K".to_string())),
         K::MktPrt => fields.push((40, "U".to_string())),
         K::StpPrt { stop_price } => {
             fields.push((40, "SP".to_string()));
-            fields.push((99, format_price(stop_price).to_string()));
+            fields.push((99, format_price_ref(stop_price).to_string()));
             // Stop trigger, as the reference (ibx#466).
-            fields.push((6117, format_price(stop_price).to_string()));
+            fields.push((6117, format_price_ref(stop_price).to_string()));
         }
         K::MidPrice { price_cap } => {
             fields.push((40, "MIDPX".to_string()));
             if price_cap > 0 {
-                fields.push((44, format_price(price_cap).to_string()));
+                fields.push((44, format_price_ref(price_cap).to_string()));
             }
         }
         K::SnapMkt { offset } | K::SnapMid { offset } | K::SnapPri { offset } => {
@@ -2732,16 +2823,18 @@ fn send_order_ex(
             fields.extend(types.into_iter().filter(|(t, _)| *t != 18));
             fields.extend(prices);
         }
-        K::Rel { offset } => {
+        K::Rel { price, offset } => {
             // Per ib-agent#138 capture: Relative shares OrdType=P and is
-            // disambiguated by 18=R; peg offset on 211, no tag 44.
+            // disambiguated by 18=R; peg offset on 211; the price cap in 44
+            // when set (ib-agent#199, ibx#263).
             fields.push((40, "P".to_string()));
-            fields.push((211, format_price(offset).to_string()));
+            if price > 0 { fields.push((44, format_price_ref(price).to_string())); }
+            fields.push((211, format_price_ref(offset).to_string()));
         }
         // The adjustable tags themselves follow the common block below.
         K::AdjustableStop { stop_price, .. } => {
             fields.push((40, "3".to_string()));
-            fields.push((99, format_price(stop_price).to_string()));
+            fields.push((99, format_price_ref(stop_price).to_string()));
         }
         // As the reference (ibx#415): the starting price in the stop price
         // field, no limit price, the peg instruction; the benchmark
@@ -2791,7 +2884,11 @@ fn send_order_ex(
         fields.extend(algo_fields(algo));
     }
 
-    let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
+    let mut refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
+    // The caller's trigger method, only on the types that write it
+    // (ibx#263); the default is added when the order is sent.
+    let trigger_method = attrs.trigger_method.to_string();
+    if attrs.trigger_method > 0 && has_trigger_method(&refs) { refs.push((6115, &trigger_method)); }
     send_new_order(conn, context, instrument, &refs)
 }
 
@@ -3211,7 +3308,7 @@ mod tests {
         assert!(pos(&tags, 6269) > pos(&tags, 6260) && pos(&tags, 6269) < pos(&tags, 38));
         assert_eq!(tag(&tags, 59), Some("0"));
         assert_eq!(tag(&tags, 6261), Some("T"));
-        assert_eq!(tag(&tags, 6260), Some("0.5"));
+        assert_eq!(tag(&tags, 6260), Some("0.50"));
         assert!(tag(&tags, 6107).is_none() && tag(&tags, 583).is_none());
     }
 
@@ -3234,15 +3331,15 @@ mod tests {
             },
         });
         assert_eq!(tag(&tags, 40), Some("3"));
-        assert_eq!(tag(&tags, 99), Some("11"));
+        assert_eq!(tag(&tags, 99), Some("11.00"));
         assert_eq!(tag(&tags, 59), Some("1"));
         assert_eq!(tag(&tags, 6107), Some("100.0"));
         // A child's OCA group is its parent's id (ibx#329).
         assert_eq!(tag(&tags, 583), Some("100"));
         assert_eq!(tag(&tags, 6257), Some("1"));
         assert_eq!(tag(&tags, 6261), Some("3"));
-        assert_eq!(tag(&tags, 6258), Some("12"));
-        assert_eq!(tag(&tags, 6259), Some("10"));
+        assert_eq!(tag(&tags, 6258), Some("12.00"));
+        assert_eq!(tag(&tags, 6259), Some("10.00"));
         // Same placement as the plain path: right after the account,
         // before the attributes (ibx#375).
         assert_eq!(pos(&tags, 6257), pos(&tags, 1) + 1);
@@ -3336,11 +3433,7 @@ mod tests {
         let want_tags: Vec<u32> = want.iter().map(|(t, _)| *t).collect();
         assert_eq!(ours_tags, want_tags, "field order differs\n ours: {:?}\n want: {:?}", ours, want);
         for ((t, a), (_, b)) in ours.iter().zip(want.iter()) {
-            let same = match (a.parse::<f64>(), b.parse::<f64>()) {
-                (Ok(x), Ok(y)) => (x - y).abs() < 1e-9,
-                _ => a == b,
-            };
-            assert!(same, "field {}: ours {:?}, reference {:?}", t, a, b);
+            assert_eq!(a, b, "field {}: ours {:?}, reference {:?}", t, a, b);
         }
     }
 
@@ -3397,7 +3490,7 @@ mod tests {
     #[test]
     fn replace_trailing_percent_matches_reference() {
         let ours = replace_fields(9000000558, Side::Sell, 1,
-            crate::types::OrderKind::TrailPct { trail_pct: 3100, trail_stop_price: 0 }, b'0', attrs_rth(false));
+            crate::types::OrderKind::TrailPct { trail_percent: px(31.0), trail_stop_price: 0 }, b'0', attrs_rth(false));
         assert_same_replace(&ours, "35=G|11=9000000558.1|41=9000000558.0|99=31.00|1=DU1|6122=c|6268=100|38=1|54=2|40=P|211=31.00|18=a|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
     }
 
@@ -3422,13 +3515,16 @@ mod tests {
     // unit field, which only matched at exactly 1%.
     #[test]
     fn percent_trail_submit_matches_reference_at_every_percentage() {
-        for (bp, pct) in [(50u32, "0.50"), (100, "1.00"), (125, "1.25"), (200, "2.00")] {
+        // A percent with more decimals goes out as given (ibx#263): the
+        // reference writes it with its price formatter.
+        for (percent, pct) in [(0.5, "0.50"), (1.0, "1.00"), (1.25, "1.25"), (2.0, "2.00"), (1.239, "1.239"), (0.12345678, "0.12345678")] {
+            let bp = crate::api::types::price_from_f64(percent);
             let plain = wire_tags(OrderRequest::SubmitTrailingStopPct {
-                order_id: 7, instrument: 0, side: Side::Sell, qty: 1, trail_pct: bp, trail_stop_price: 0,
+                order_id: 7, instrument: 0, side: Side::Sell, qty: 1, trail_percent: bp, trail_stop_price: 0,
             });
             let ext = wire_tags(OrderRequest::SubmitEx {
                 order_id: 8, instrument: 0, side: Side::Sell, qty: 1,
-                kind: crate::types::OrderKind::TrailPct { trail_pct: bp, trail_stop_price: 0 },
+                kind: crate::types::OrderKind::TrailPct { trail_percent: bp, trail_stop_price: 0 },
                 tif: b'1', attrs: crate::types::OrderAttrs::default(),
             });
             for tags in [&plain, &ext] {
@@ -3896,7 +3992,9 @@ mod tests {
         });
         assert_eq!(tag(&ex, 6117), Some("235.14"));
         let mit = wire_tags(OrderRequest::SubmitMit { order_id: 14, instrument: 0, side: Side::Sell, qty: 1, stop_price: 235 * P });
-        assert_eq!(tag(&mit, 6117), None, "not on MIT");
+        // MIT writes its stop price in 6117 too, as its touched trigger
+        // among the attributes (ib-agent#199, ibx#263).
+        assert_eq!(tag(&mit, 6117), Some("235.00"));
     }
 
     // ib-agent#194, captured 25/09/2026: a TRAIL LIMIT with lmtPrice only
@@ -3928,7 +4026,7 @@ mod tests {
             order_id: 22, instrument: 0, side: Side::Sell, qty: 1, lmt_offset: P / 2,
             lmt_price: None, trail_amt: 20 * P, trail_stop_price: 75066 * P / 100,
         });
-        assert_eq!(tag(&offset, 6370), Some("0.5"));
+        assert_eq!(tag(&offset, 6370), Some("0.50"));
         assert_eq!(tag(&offset, 44), None);
     }
 
@@ -3950,7 +4048,7 @@ mod tests {
             OrderRequest::Modify { new_order_id: 23, order_id: 23, qty: 1, kind, tif: b'0', attrs: Default::default() },
         );
         assert_eq!(tag(&tags, 44), Some("745.76"));
-        assert_eq!(tag(&tags, 6370), Some("5"), "ibx writes prices without trailing zeros");
+        assert_eq!(tag(&tags, 6370), Some("5.00"), "the reference writes two decimals at least");
         assert!(pos(&tags, 44) < pos(&tags, 99));
     }
 
@@ -4023,9 +4121,9 @@ mod tests {
         };
         let sell = replace(Side::Sell, 74699 * P / 100, 75189 * P / 100);
         assert_eq!(tag(&sell, 44), Some("746.99"));
-        assert_eq!(tag(&sell, 6370), Some("4.9"));
+        assert_eq!(tag(&sell, 6370), Some("4.90"));
         let buy = replace(Side::Buy, 79699 * P / 100, 79189 * P / 100);
-        assert_eq!(tag(&buy, 6370), Some("5.1"));
+        assert_eq!(tag(&buy, 6370), Some("5.10"));
     }
 
     /// Every frame the engine sends for the queued requests, split per frame.
@@ -4623,14 +4721,14 @@ mod tests {
                 K::TrailingStop { trail_amt: P / 2, trail_stop_price: 90 * P }, b'0', Default::default()),
             (OrderRequest::SubmitTrailingStopLimit { order_id: id, instrument: 0, side, qty, lmt_offset: P / 10, lmt_price: None, trail_amt: P / 2, trail_stop_price: 90 * P },
                 K::TrailingStopLimit { lmt_offset: P / 10, lmt_price: None, trail_amt: P / 2, trail_stop_price: 90 * P }, b'0', Default::default()),
-            (OrderRequest::SubmitTrailingStopPct { order_id: id, instrument: 0, side, qty, trail_pct: 150, trail_stop_price: 90 * P },
-                K::TrailPct { trail_pct: 150, trail_stop_price: 90 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitTrailingStopPct { order_id: id, instrument: 0, side, qty, trail_percent: px(1.5), trail_stop_price: 90 * P },
+                K::TrailPct { trail_percent: px(1.5), trail_stop_price: 90 * P }, b'0', Default::default()),
             (OrderRequest::SubmitMoc { order_id: id, instrument: 0, side, qty }, K::Moc, b'0', Default::default()),
             (OrderRequest::SubmitLoc { order_id: id, instrument: 0, side, qty, price: 100 * P }, K::Loc { price: 100 * P }, b'0', Default::default()),
             (OrderRequest::SubmitMit { order_id: id, instrument: 0, side, qty, stop_price: 90 * P }, K::Mit { stop_price: 90 * P }, b'0', Default::default()),
             (OrderRequest::SubmitLit { order_id: id, instrument: 0, side, qty, price: 89 * P, stop_price: 90 * P },
                 K::Lit { price: 89 * P, stop_price: 90 * P }, b'0', Default::default()),
-            (OrderRequest::SubmitRel { order_id: id, instrument: 0, side, qty, offset: P / 10 }, K::Rel { offset: P / 10 }, b'0', Default::default()),
+            (OrderRequest::SubmitRel { order_id: id, instrument: 0, side, qty, offset: P / 10 }, K::Rel { price: 0, offset: P / 10 }, b'0', Default::default()),
             (OrderRequest::SubmitMtl { order_id: id, instrument: 0, side, qty }, K::Mtl, b'0', Default::default()),
             (OrderRequest::SubmitMktPrt { order_id: id, instrument: 0, side, qty }, K::MktPrt, b'0', Default::default()),
             (OrderRequest::SubmitStpPrt { order_id: id, instrument: 0, side, qty, stop_price: 90 * P }, K::StpPrt { stop_price: 90 * P }, b'0', Default::default()),
@@ -4659,7 +4757,8 @@ mod tests {
             let ours = order_body(wire_tags(plain));
             let ex = order_body(wire_tags(OrderRequest::SubmitEx { order_id: id, instrument: 0, side, qty, kind, tif, attrs }));
             assert_eq!(ours, ex, "{label}");
-            let ranks: Vec<u16> = ours.iter().map(|(t, _)| reference_rank(*t)).collect();
+            let touched = touched_type(&ours.iter().map(|(t, v)| (*t, v.as_str())).collect::<Vec<_>>());
+            let ranks: Vec<u16> = ours.iter().map(|(t, _)| rank_in_frame(*t, touched)).collect();
             assert!(ranks.windows(2).all(|w| w[0] <= w[1]), "{label}: {ours:?}");
             assert!(ranks.iter().all(|r| *r != u16::MAX), "{label}: a field with no place: {ours:?}");
         }
@@ -4765,10 +4864,9 @@ mod tests {
     // ib-agent captures/four-leg/20261002-b1 b1_263_algo_refusals, held
     // PreSubmitted by the server): an Adaptive STP goes out as a stop, its
     // stop price in the stop price field and the stop trigger, with the
-    // Adaptive block and the algo instruction; no limit price. The
-    // reference's ClOrdID is its own (1288736453.0 for API order 81) and
-    // it writes the default trigger method 6115=0 on the stop, which ibx
-    // does not write on any stop: both left out of the comparison.
+    // Adaptive block and the algo instruction, the default trigger
+    // method; no limit price. The reference's ClOrdID is its own
+    // (1288736453.0 for API order 81): left out of the comparison.
     #[test]
     fn adaptive_stop_is_the_captured_frame() {
         const STP: &str = "35=D|11=1288736453.0|99=495.48|1=DUXXXXXXX|6117=495.48|6115=0|6122=c|6010=fourleg|847=Adaptive|5957=1|5958=adaptivePriority|5960=Normal|6121=81|6119=198|38=1|40=3|18=e|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
@@ -4807,7 +4905,7 @@ mod tests {
             .collect());
         ours.retain(|(t, _)| !matches!(t, 35 | 11));
         let mut want = parse_frame(STP);
-        want.retain(|(t, _)| !matches!(t, 35 | 11 | 6115));
+        want.retain(|(t, _)| !matches!(t, 35 | 11));
         for (t, v) in want.iter_mut() {
             if *t == 1 { *v = "DU1".into(); }
         }
@@ -4827,13 +4925,13 @@ mod tests {
             order_id: 5, instrument: 0, side: Side::Sell, qty: 1, kind, tif: b'0', attrs };
         let stop_limit = wire_tags(ex(K::StopLimit { price: px(99.5), stop_price: px(100.0) }, adaptive()));
         assert_eq!((tag(&stop_limit, 40), tag(&stop_limit, 44), tag(&stop_limit, 99), tag(&stop_limit, 6117)),
-            (Some("4"), Some("99.5"), Some("100"), Some("100")));
+            (Some("4"), Some("99.50"), Some("100.00"), Some("100.00")));
         assert_eq!((tag(&stop_limit, 18), tag(&stop_limit, 847), tag(&stop_limit, 5960)), (Some("e"), Some("Adaptive"), Some("Urgent")));
         let market = wire_tags(ex(K::Market, adaptive()));
         assert_eq!((tag(&market, 40), tag(&market, 44), tag(&market, 18)), (Some("1"), None, Some("e")));
         let trail = wire_tags(ex(K::TrailingStop { trail_amt: px(1.0), trail_stop_price: 0 }, adaptive()));
-        assert_eq!((tag(&trail, 40), tag(&trail, 211), tag(&trail, 18)), (Some("P"), Some("1"), Some("a e")));
-        let rel = wire_tags(ex(K::Rel { offset: px(0.05) }, OrderAttrs { all_or_none: true, ..adaptive() }));
+        assert_eq!((tag(&trail, 40), tag(&trail, 211), tag(&trail, 18)), (Some("P"), Some("1.00"), Some("a e")));
+        let rel = wire_tags(ex(K::Rel { price: 0, offset: px(0.05) }, OrderAttrs { all_or_none: true, ..adaptive() }));
         assert_eq!((tag(&rel, 40), tag(&rel, 18)), (Some("P"), Some("R G e")));
         let bench = wire_tags(ex(K::PegBench { starting_price: px(100.0), stock_ref_price: 0, ref_con_id: 1,
             is_peg_decrease: false, pegged_change_amount: px(0.1), ref_change_amount: px(0.1) }, adaptive()));
@@ -4848,6 +4946,505 @@ mod tests {
         // price management flag.
         let trail: Vec<(u32, &str)> = trail.iter().map(|(t, v)| (*t, v.as_str())).collect();
         assert!(crate::engine::price_mgmt::excluded_frame(&trail));
+    }
+
+    // ibx#263 (captured 23/09/2026, ib-agent#192 A2a and A2b, and
+    // 28/09/2026, captures/0928; paper, AAPL, account masked): a new stop
+    // order is the reference's frame, the default trigger method 6115=0
+    // included, through both encoders. The ids (ClOrdID, account, API order
+    // and client ids) are left out.
+    #[test]
+    fn new_stop_orders_are_the_captured_frames() {
+        use crate::types::{OrderAttrs, OrderKind as K};
+        const STP: &str = "35=D|11=1626578555.0|99=237.82|1=DUXXXXXXX|6117=237.82|6115=0|6122=c|6121=7|6119=192|38=1|40=3|55=AAPL|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const STP_LMT: &str = "35=D|11=1626578556.0|44=234.43|99=237.82|1=DUXXXXXXX|6117=237.82|6115=0|6122=c|6121=8|6119=192|38=1|40=4|55=AAPL|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const TRAIL_PCT: &str = "35=D|11=1183455387.0|99=30.00|1=DUXXXXXXX|6010=c0928-a22_stp_trail|6115=0|6268=100|6122=c|6121=2|6119=261|38=1|40=P|211=30.00|18=a|55=AAPL|167=STK|231=1.00|54=2|59=1|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        let (id, side, qty) = (7, Side::Sell, 1);
+        let ex = |kind, tif, attrs| OrderRequest::SubmitEx { order_id: id, instrument: 0, side, qty, kind, tif, attrs };
+        let cases: Vec<(&str, OrderRequest)> = vec![
+            (STP, ex(K::Stop { stop_price: px(237.82) }, b'0', OrderAttrs::default())),
+            (STP, OrderRequest::SubmitStop { order_id: id, instrument: 0, side, qty, stop_price: px(237.82) }),
+            (STP_LMT, ex(K::StopLimit { price: px(234.43), stop_price: px(237.82) }, b'0', OrderAttrs::default())),
+            (STP_LMT, OrderRequest::SubmitStopLimit { order_id: id, instrument: 0, side, qty, price: px(234.43), stop_price: px(237.82) }),
+            (TRAIL_PCT, ex(K::TrailPct { trail_percent: px(30.0), trail_stop_price: 0 }, b'1',
+                OrderAttrs { order_ref: "c0928-a22_stp_trail".into(), ..Default::default() })),
+        ];
+        let not_id = |(t, _): &(u32, String)| !matches!(t, 35 | 11 | 1 | 6121 | 6119);
+        for (captured, req) in cases {
+            let label = format!("{req:?}");
+            let mut ours = order_body(wire_tags_with(|ctx| ctx.set_symbol(0, "AAPL".to_string()), req));
+            ours.retain(not_id);
+            let mut want = parse_frame(captured);
+            want.retain(not_id);
+            ours.sort();
+            want.sort();
+            assert_eq!(ours, want, "{label}");
+        }
+    }
+
+    // ibx#263: the trigger method goes on a new order of the stop and
+    // touched types only (`jattrib.attribs.TriggerMethod.b`, true for
+    // `jibtypes.s.aw()`), the caller's value or the default 0; never on the
+    // other types, whatever the caller set. Captured with 6115=0: STP,
+    // STP LMT, TRAIL, TRAIL LIMIT, MIT, LIT (and an Adaptive STP and a
+    // bracket's stop child); without: LMT, MKT, REL, PEG MID, PEG BENCH,
+    // MIDPX and the snap types.
+    #[test]
+    fn trigger_method_goes_with_the_stop_types_only() {
+        use crate::types::{AdjustedOrderType, OrderAttrs, OrderKind as K};
+        let stops = [
+            K::Stop { stop_price: px(90.0) },
+            K::StopLimit { price: px(89.0), stop_price: px(90.0) },
+            K::StpPrt { stop_price: px(90.0) },
+            K::TrailingStop { trail_amt: px(0.5), trail_stop_price: 0 },
+            K::TrailPct { trail_percent: px(1.5), trail_stop_price: 0 },
+            K::TrailingStopLimit { lmt_offset: px(0.1), lmt_price: None, trail_amt: px(0.5), trail_stop_price: px(90.0) },
+            K::Mit { stop_price: px(90.0) },
+            K::Lit { price: px(89.0), stop_price: px(90.0) },
+            K::AdjustableStop { stop_price: px(90.0), trigger_price: px(95.0), adjusted_order_type: AdjustedOrderType::Trail,
+                adjusted_stop_price: px(91.0), adjusted_stop_limit_price: 0, adjusted_trailing_amount: px(0.5), adjustable_trailing_unit: 0 },
+        ];
+        let others = [
+            K::Market,
+            K::Limit { price: px(100.0) },
+            K::Moc,
+            K::Loc { price: px(100.0) },
+            K::Mtl,
+            K::MktPrt,
+            K::MidPrice { price_cap: px(100.0) },
+            K::SnapMkt { offset: px(0.05) },
+            K::Rel { price: 0, offset: px(0.05) },
+            K::PegMkt { price: px(100.0), offset: px(0.05) },
+            K::PegMid { price: px(100.0), offset: 0 },
+            K::PegBench { starting_price: px(100.0), stock_ref_price: 0, ref_con_id: 1, is_peg_decrease: false,
+                pegged_change_amount: px(0.1), ref_change_amount: px(0.1) },
+        ];
+        let ex = |kind, attrs| OrderRequest::SubmitEx { order_id: 8, instrument: 0, side: Side::Sell, qty: 1, kind, tif: b'0', attrs };
+        let kinds = stops.iter().map(|k| (*k, true)).chain(others.iter().map(|k| (*k, false)));
+        for (kind, stop) in kinds {
+            for (trigger_method, want) in [(0u8, "0"), (2, "2"), (8, "8")] {
+                let tags = wire_tags(ex(kind, OrderAttrs { trigger_method, ..Default::default() }));
+                assert_eq!(tag(&tags, 6115), stop.then_some(want), "{kind:?} {trigger_method}");
+                assert!(tags.iter().filter(|(t, _)| *t == 6115).count() <= 1, "{kind:?}");
+            }
+        }
+        // All-or-none keeps a trailing stop a trailing stop.
+        let aon = OrderAttrs { all_or_none: true, ..Default::default() };
+        let trail = wire_tags(ex(K::TrailingStop { trail_amt: px(0.5), trail_stop_price: 0 }, aon.clone()));
+        assert_eq!((tag(&trail, 18), tag(&trail, 6115)), (Some("a G"), Some("0")));
+        let rel = wire_tags(ex(K::Rel { price: 0, offset: px(0.05) }, aon));
+        assert_eq!((tag(&rel, 18), tag(&rel, 6115)), (Some("R G"), None));
+    }
+
+    // ibx#263: a replace writes no trigger method (the reference writes it
+    // on a new order only; no captured 35=G has it) and restates the
+    // instruction field as the new order does (`jclient.pe.gI()` in the
+    // replace writer `jclient.pe.d`): the type letter, then G for
+    // all-or-none, after the trail field.
+    #[test]
+    fn replace_restates_all_or_none_and_no_trigger_method() {
+        use crate::types::{OrderAttrs, OrderKind as K};
+        let aon = OrderAttrs { all_or_none: true, trigger_method: 2, ..Default::default() };
+        let cases = [
+            (K::TrailingStop { trail_amt: px(1.0), trail_stop_price: 0 }, Some("a G")),
+            (K::TrailPct { trail_percent: px(1.5), trail_stop_price: 0 }, Some("a G")),
+            (K::Rel { price: 0, offset: px(0.05) }, Some("R G")),
+            (K::Limit { price: px(100.0) }, Some("G")),
+            (K::Stop { stop_price: px(90.0) }, Some("G")),
+            (K::PegMid { price: px(100.0), offset: 0 }, Some("M G")),
+        ];
+        for (kind, want) in cases {
+            let ours = replace_fields(61, Side::Sell, 1, kind, b'0', aon.clone());
+            assert_eq!((tag(&ours, 18), tag(&ours, 6115)), (want, None), "{kind:?}");
+            assert_eq!(ours.iter().filter(|(t, _)| *t == 18).count(), 1, "{kind:?}");
+            let at = |tag: u32| ours.iter().position(|(t, _)| *t == tag);
+            assert!(at(40) < at(18) && at(211) < at(18) && at(18) < at(55), "{kind:?}: {ours:?}");
+        }
+        // Without all-or-none, as before.
+        let rel = replace_fields(62, Side::Sell, 1, K::Rel { price: 0, offset: px(0.05) }, b'0', OrderAttrs::default());
+        assert_eq!(tag(&rel, 18), Some("R"));
+        let lmt = replace_fields(63, Side::Sell, 1, K::Limit { price: px(100.0) }, b'0', OrderAttrs::default());
+        assert_eq!(tag(&lmt, 18), None);
+    }
+
+    // ibx#263 (captured 23/09/2026, ib-agent#192 B8d and A3b, and
+    // 28/09/2026, ib-agent#199; paper, AAPL, account masked): the trail
+    // unit 6268=0 of an amount TRAIL and a TRAIL LIMIT, the touched trigger
+    // 6117 of MIT and LIT (their stop price, among the attributes), and the
+    // price cap 44 of a REL, through both encoders. The ids (ClOrdID,
+    // account, API order and client ids) are left out.
+    #[test]
+    fn new_trailing_touched_and_relative_orders_are_the_captured_frames() {
+        use crate::types::{OrderAttrs, OrderKind as K};
+        const TRAIL: &str = "35=D|11=1626578557.0|99=101.92|1=DUXXXXXXX|6115=0|6122=c|6268=0|6121=9|6119=192|38=1|40=P|211=101.92|18=a|55=AAPL|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const TRAIL_LIMIT: &str = "35=D|11=1626578568.0|99=101.92|1=DUXXXXXXX|6117=237.82|6115=0|6370=0.50|6122=c|6268=0|6121=29|6119=192|38=1|40=TSL|211=101.92|55=AAPL|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const MIT: &str = "35=D|11=117065670.0|99=450.00|1=DUXXXXXXX|6115=0|6010=c199-mit_gtc|6122=c|6117=450.00|6121=5|6119=199|38=1|40=J|55=AAPL|167=STK|231=1.00|54=2|59=1|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const LIT: &str = "35=D|11=117065671.0|44=450.00|99=450.00|1=DUXXXXXXX|6115=0|6010=c199-lit_gtc|6122=c|6433=1|6117=450.00|8339=1|6121=6|6119=199|38=1|40=LT|55=AAPL|167=STK|231=1.00|54=2|59=1|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        const REL: &str = "35=D|11=117065675.0|44=250.00|1=DUXXXXXXX|6010=c199-rel_day|6122=c|6433=1|8339=1|6121=10|6119=199|38=1|40=P|211=0.01|18=R|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
+        let qty = 1;
+        let ex = |side, kind, tif, attrs| OrderRequest::SubmitEx { order_id: 7, instrument: 0, side, qty, kind, tif, attrs };
+        let order_ref = |r: &str, outside_rth: bool| OrderAttrs { order_ref: r.into(), outside_rth, ..Default::default() };
+        let trail = K::TrailingStop { trail_amt: px(101.92), trail_stop_price: 0 };
+        let trail_limit = K::TrailingStopLimit { lmt_offset: px(0.5), lmt_price: None, trail_amt: px(101.92), trail_stop_price: px(237.82) };
+        let cases: Vec<(&str, bool, OrderRequest)> = vec![
+            (TRAIL, false, ex(Side::Sell, trail, b'0', OrderAttrs::default())),
+            (TRAIL, false, OrderRequest::SubmitTrailingStop { order_id: 7, instrument: 0, side: Side::Sell, qty, trail_amt: px(101.92), trail_stop_price: 0 }),
+            (TRAIL_LIMIT, false, ex(Side::Sell, trail_limit, b'0', OrderAttrs::default())),
+            (TRAIL_LIMIT, false, OrderRequest::SubmitTrailingStopLimit { order_id: 7, instrument: 0, side: Side::Sell, qty,
+                lmt_offset: px(0.5), lmt_price: None, trail_amt: px(101.92), trail_stop_price: px(237.82) }),
+            (MIT, false, ex(Side::Sell, K::Mit { stop_price: px(450.0) }, b'1', order_ref("c199-mit_gtc", false))),
+            (LIT, true, ex(Side::Sell, K::Lit { price: px(450.0), stop_price: px(450.0) }, b'1', order_ref("c199-lit_gtc", true))),
+            (REL, true, ex(Side::Buy, K::Rel { price: px(250.0), offset: px(0.01) }, b'0', order_ref("c199-rel_day", true))),
+        ];
+        let not_id = |(t, _): &(u32, String)| !matches!(t, 35 | 11 | 1 | 6121 | 6119);
+        for (captured, price_mgmt, req) in cases {
+            let label = format!("{req:?}");
+            let sent = order_body(wire_tags_with(|ctx| session(ctx, price_mgmt), req));
+            let (mine, theirs) = common_order(&sent, captured);
+            assert_eq!(mine, theirs, "{label}: field order");
+            let mut ours = sent;
+            ours.retain(not_id);
+            let mut want = parse_frame(captured);
+            want.retain(not_id);
+            ours.sort();
+            want.sort();
+            assert_eq!(ours, want, "{label}");
+        }
+        // The MIT's touched trigger is among the attributes, after
+        // outside-RTH, not after the account like a stop's.
+        let lit = wire_tags(ex(Side::Sell, K::Lit { price: px(450.0), stop_price: px(450.0) }, b'1', order_ref("x", true)));
+        let at = |tag: u32| lit.iter().position(|(t, _)| *t == tag);
+        assert!(at(6122) < at(6117) && at(6433) < at(6117), "{lit:?}");
+        // A REL without a price cap has no 44.
+        let rel = wire_tags(ex(Side::Buy, K::Rel { price: 0, offset: px(0.01) }, b'0', OrderAttrs::default()));
+        assert_eq!(tag(&rel, 44), None);
+    }
+
+    /// AAPL, and when asked a session with price management on and a
+    /// definition that keeps outside RTH.
+    fn session(ctx: &mut Context, price_mgmt: bool) {
+        ctx.set_symbol(0, "AAPL".to_string());
+        if price_mgmt {
+            price_mgmt_session(ctx);
+            ctx.rth_types.insert((265598, "BEST".to_string()), crate::engine::outside_rth::RthTypes {
+                rth: true, sec_type: "STK".into(), types_known: true, price_chk: true, ..Default::default()
+            });
+        }
+    }
+
+    /// Send one Modify as `replace_fields`, in `session`.
+    fn replace_fields_mgmt(order_id: OrderId, side: Side, kind: crate::types::OrderKind, tif: u8,
+                           attrs: crate::types::OrderAttrs, price_mgmt: bool) -> Vec<(u32, String)> {
+        wire_tags_with(
+            |ctx| {
+                session(ctx, price_mgmt);
+                ctx.insert_order(Order::new(order_id, 0, side, 1, 0, b'2', b'0', 0));
+            },
+            OrderRequest::Modify { new_order_id: order_id, order_id, qty: 1, kind, tif, attrs },
+        )
+        .into_iter()
+        .filter(|(t, _)| !matches!(t, 8 | 9 | 34 | 52 | 10))
+        .collect()
+    }
+
+    // ibx#263 (captured 28/09/2026, ib-agent#199, paper, AAPL, account
+    // masked): a replace of MIT and LIT restates the touched trigger 6117
+    // among the attributes, a replace of REL its price cap 44; field for
+    // field, in the captured order.
+    #[test]
+    fn replace_of_touched_and_relative_orders_matches_reference() {
+        use crate::types::{OrderAttrs, OrderKind as K};
+        const MIT: &str = "35=G|11=117065670.1|41=117065670.0|99=451.00|1=DUXXXXXXX|6010=c199-mit_gtc|6122=c|6117=451.00|38=1|54=2|40=J|55=AAPL|167=STK|6035=AAPL|59=1|6008=265598|6088=Socket|6211=|6238=";
+        const LIT: &str = "35=G|11=117065671.1|41=117065671.0|44=450.00|99=451.00|1=DUXXXXXXX|6010=c199-lit_gtc|6122=c|6433=1|6117=451.00|8339=1|38=1|54=2|40=LT|55=AAPL|167=STK|6035=AAPL|59=1|6008=265598|6088=Socket|6211=|6238=";
+        const REL: &str = "35=G|11=117065675.1|41=117065675.0|44=249.00|1=DUXXXXXXX|6010=c199-rel_day|6122=c|6433=1|8339=1|38=1|54=1|40=P|211=0.01|18=R|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=";
+        let attrs = |r: &str, outside_rth: bool| OrderAttrs { order_ref: r.into(), outside_rth, ..Default::default() };
+        let cases = [
+            (MIT, 117065670, Side::Sell, K::Mit { stop_price: px(451.0) }, b'1', attrs("c199-mit_gtc", false), false),
+            (LIT, 117065671, Side::Sell, K::Lit { price: px(450.0), stop_price: px(451.0) }, b'1', attrs("c199-lit_gtc", true), true),
+            (REL, 117065675, Side::Buy, K::Rel { price: px(249.0), offset: px(0.01) }, b'0', attrs("c199-rel_day", true), true),
+        ];
+        for (captured, id, side, kind, tif, attrs, price_mgmt) in cases {
+            let ours = replace_fields_mgmt(id, side, kind, tif, attrs, price_mgmt);
+            assert_same_replace(&ours, &captured.replace("DUXXXXXXX", "DU1"));
+        }
+    }
+
+    // ibx#263: a replace of an algo order restates the algo letter in 18
+    // and the algo block after the attributes, as the new order: the
+    // reference's replace writer `jclient.pe.d` writes them through the
+    // same `jclient.pe.j` and `jclient.pe.gI()`. Not captured.
+    #[test]
+    fn replace_of_an_algo_order_restates_the_algo() {
+        use crate::types::{AdaptivePriority, OrderAlgo, OrderAttrs, OrderKind as K};
+        let attrs = OrderAttrs { algo: Some(OrderAlgo::Adaptive(AdaptivePriority::Normal)), ..Default::default() };
+        let stop = replace_fields(64, Side::Buy, 1, K::Stop { stop_price: px(495.48) }, b'0', attrs.clone());
+        let tags: Vec<u32> = stop.iter().map(|(t, _)| *t).collect();
+        assert_eq!(tags, vec![35, 11, 41, 99, 1, 6117, 6122, 847, 5957, 5958, 5960, 38, 54, 40, 18, 55, 167, 6035, 59, 6008, 6088, 6211, 6238]);
+        assert_eq!((tag(&stop, 18), tag(&stop, 847), tag(&stop, 5958), tag(&stop, 5960)),
+            (Some("e"), Some("Adaptive"), Some("adaptivePriority"), Some("Normal")));
+        let aon = replace_fields(65, Side::Buy, 1, K::Limit { price: px(100.0) }, b'0', OrderAttrs { all_or_none: true, ..attrs });
+        assert_eq!(tag(&aon, 18), Some("G e"));
+    }
+
+    /// The API order a captured gateway order frame was placed from, read
+    /// back from the frame; None for a type or contract ibx does not
+    /// place (PEG BEST, TRAIL MIT, TRAIL LIT, combos).
+    fn api_order_of_frame(f: &[(u32, String)]) -> Option<crate::api::types::Order> {
+        use crate::api::types::{Order as ApiOrder, TagValue};
+        let get = |tag: u32| f.iter().find(|(t, _)| *t == tag).map(|(_, v)| v.as_str());
+        let num = |tag: u32| get(tag).and_then(|v| v.parse::<f64>().ok());
+        if get(167) != Some("STK") { return None; }
+        let inst = get(18).unwrap_or("");
+        let order_type = match (get(40)?, inst.split(' ').next().unwrap_or("")) {
+            ("1", _) => "MKT", ("2", _) => "LMT", ("3", _) => "STP", ("4", _) => "STP LMT",
+            ("5", _) => "MOC", ("B", _) => "LOC", ("K", _) => "MTL", ("U", _) => "MKT PRT",
+            ("J", _) => "MIT", ("LT", _) => "LIT", ("SP", _) => "STP PRT", ("TSL", _) => "TRAIL LIMIT",
+            ("MIDPX", _) => "MIDPRICE", ("SMKT", _) => "SNAP MKT", ("SMID", _) => "SNAP MID",
+            ("SREL", _) => "SNAP PRI", ("PB", _) => "PEG BENCH",
+            ("P", "a") => "TRAIL", ("P", "R") => "REL", ("P", "M") => "PEG MID", ("P", "P") => "PEG MKT",
+            _ => return None,
+        };
+        let mut o = ApiOrder {
+            action: match get(54)? { "1" => "BUY", "5" => "SSHORT", _ => "SELL" }.into(),
+            total_quantity: num(38)?,
+            order_type: order_type.into(),
+            tif: match get(59)? {
+                "0" => "DAY", "1" => "GTC", "2" => "OPG", "3" => "IOC", "4" => "FOK", "6" => "GTD", "8" => "AUC",
+                _ => return None,
+            }.into(),
+            outside_rth: get(6433) == Some("1"),
+            order_ref: get(6010).unwrap_or("").into(),
+            all_or_none: inst.split(' ').any(|p| p == "G"),
+            display_size: num(111).map_or(0, |v| v as i32),
+            hidden: get(6135) == Some("1"),
+            include_overnight: get(8534) == Some("1"),
+            what_if: get(6091) == Some("1"),
+            trigger_method: num(6115).map_or(0, |v| v as i32),
+            discretionary_amt: num(9813).unwrap_or(0.0),
+            ..Default::default()
+        };
+        if get(6436) == Some("1") { o.tif = "DTC".into(); }
+        if let Some(t) = get(126) { o.good_till_date = format!("{} UTC", t.replace('-', " ")); }
+        if let Some(t) = get(168) { o.good_after_time = format!("{} UTC", t.replace('-', " ")); }
+        match order_type {
+            "LMT" | "LOC" | "MIDPRICE" => o.lmt_price = num(44).unwrap_or(0.0),
+            "STP" | "MIT" | "STP PRT" => o.aux_price = num(99)?,
+            "STP LMT" | "LIT" => { o.lmt_price = num(44)?; o.aux_price = num(99)?; }
+            "TRAIL" => {
+                if get(6268) == Some("100") { o.trailing_percent = num(99)?; } else { o.aux_price = num(99)?; }
+                if let Some(v) = num(6117) { o.trail_stop_price = v; }
+            }
+            "TRAIL LIMIT" => {
+                o.aux_price = num(99)?;
+                match num(44) { Some(v) => o.lmt_price = v, None => o.lmt_price_offset = num(6370)? }
+                if let Some(v) = num(6117) { o.trail_stop_price = v; }
+            }
+            "REL" | "PEG MID" | "PEG MKT" => {
+                if let Some(v) = num(44) { o.lmt_price = v; }
+                o.aux_price = num(211).unwrap_or(0.0);
+            }
+            "SNAP MKT" | "SNAP MID" | "SNAP PRI" => o.aux_price = num(99).unwrap_or(0.0),
+            "PEG BENCH" => {
+                if let Some(v) = num(99) { o.starting_price = v; }
+                if let Some(v) = num(6580) { o.stock_ref_price = v; }
+                let change = num(6938).unwrap_or(0.0);
+                o.is_pegged_change_amount_decrease = change < 0.0;
+                o.pegged_change_amount = change.abs();
+                o.reference_change_amount = num(6939).unwrap_or(0.0);
+                o.reference_contract_id = num(6941).map_or(0, |v| v as i32);
+                o.reference_exchange_id = get(6942).unwrap_or("").into();
+            }
+            _ => {}
+        }
+        if get(6257) == Some("1") {
+            o.adjusted_order_type = match get(6261)? { "3" => "STP", "4" => "STP LMT", "T" => "TRAIL", _ => "TRAIL LIMIT" }.into();
+            o.trigger_price = num(6258)?;
+            o.adjusted_stop_price = num(6259).unwrap_or(0.0);
+            o.adjusted_stop_limit_price = num(6262).unwrap_or(0.0);
+            if let Some(v) = num(6260) { o.adjusted_trailing_amount = v; }
+            o.adjustable_trailing_unit = num(6269).map_or(0, |v| v as i32);
+        }
+        match (get(6107), get(583)) {
+            (Some(parent), _) => o.parent_id = parent.split('.').next()?.parse().ok()?,
+            (None, Some(group)) => {
+                o.oca_group = group.into();
+                o.oca_type = match get(6209) { Some("CancelOnFillWBlock") => 1, Some("ReduceOnFillWBlock") => 2, _ => 3 };
+            }
+            _ => {}
+        }
+        if let Some(strategy) = get(847) {
+            o.algo_strategy = strategy.into();
+            let keys = f.iter().filter(|(t, _)| *t == 5958).map(|(_, v)| v.clone());
+            let values = f.iter().filter(|(t, _)| *t == 5960).map(|(_, v)| v.clone());
+            o.algo_params = keys.zip(values).map(|(tag, value)| TagValue { tag, value }).collect();
+            if let Some(v) = get(849) { o.algo_params.push(TagValue { tag: "maxPctVol".into(), value: v.into() }); }
+        }
+        // A price condition; the other kinds carry no price and are left out.
+        if get(6136).is_some() && get(6222) == Some("1") {
+            o.conditions_ignore_rth = get(6128) == Some("1");
+            o.conditions_cancel_order = get(6151) == Some("1");
+            o.conditions = vec![OrderCondition::Price {
+                con_id: num(6123)? as i64,
+                exchange: match get(6124)? { "BEST" => "SMART", e => e }.into(),
+                price: crate::api::types::price_from_f64(num(6125)?),
+                is_more: get(6126) == Some(">="),
+                trigger_method: num(6127).map_or(0, |v| v as u8),
+            }];
+        }
+        Some(o)
+    }
+
+    // ibx#263: the reference writes every price of its order messages with
+    // one formatter (`jutils.dO.F`, `#0.00######`, HALF_EVEN, US symbols):
+    // `0.50`, `450.00`, `-0.10`. Every gateway new order and replace on disk
+    // (tests/fixtures/gw1040/order_frames, from the ib-agent captures of
+    // 23/09 to 02/10/2026) is read back into its API order, encoded by ibx,
+    // and each price field compared as text. A trailing replace's stop
+    // price depends on the last server report and is checked on its own.
+    #[test]
+    fn every_captured_order_frame_has_the_reference_price_text() {
+        const PRICE_TAGS: [u32; 15] = [44, 99, 6117, 211, 6370, 9813, 6125, 6258, 6259, 6260, 6262, 6580, 6938, 6939, 231];
+        let path = format!("{}/tests/fixtures/gw1040/order_frames/frames.tsv", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let (mut checked, mut skipped) = (0, Vec::new());
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let (src, frame) = line.split_once('\t').unwrap();
+            let captured: Vec<(u32, String)> = frame.split('|')
+                .filter_map(|kv| { let (t, v) = kv.split_once('=')?; Some((t.parse().ok()?, v.to_string())) })
+                .collect();
+            let get = |tags: &[(u32, String)], tag: u32| tags.iter().find(|(t, _)| *t == tag).map(|(_, v)| v.clone());
+            let Some(order) = api_order_of_frame(&captured) else {
+                skipped.push(format!("{} {}", get(&captured, 40).unwrap_or_default(), get(&captured, 167).unwrap_or_default()));
+                continue;
+            };
+            let replace = get(&captured, 35).as_deref() == Some("G");
+            let id: OrderId = 70;
+            let req = if replace {
+                match crate::client_core::ClientCore::build_modify_request(&order, id, &order) {
+                    Ok(crate::client_core::ModifyPlan::Send(crate::types::ControlCommand::Order(r))) => r,
+                    Ok(crate::client_core::ModifyPlan::Refused { code, message }) => panic!("{src}: {frame}: {code} {message}"),
+                    Ok(_) => panic!("{src}: {frame}: not a replace"),
+                    Err(e) => panic!("{src}: {frame}: {e}"),
+                }
+            } else {
+                match crate::client_core::ClientCore::build_order_request(&order, id, 0) {
+                    Ok(crate::types::ControlCommand::Order(r)) => r,
+                    other => panic!("{src}: {frame}: {other:?}"),
+                }
+            };
+            let side = if order.action == "BUY" { Side::Buy } else { Side::Sell };
+            let symbol = get(&captured, 55).unwrap_or_default();
+            let limit_and_offset = (get(&captured, 44), get(&captured, 6370));
+            let ours = wire_tags_with(|ctx| {
+                ctx.set_symbol(0, symbol);
+                if replace {
+                    ctx.insert_order(Order::new(id, 0, side, 1, 0, b'2', b'0', 0));
+                    // A TRAIL LIMIT replace restates the offset the server
+                    // reported (ib-agent#194).
+                    if let (Some(limit), Some(offset)) = limit_and_offset {
+                        let px = |v: String| crate::api::types::price_from_f64(v.parse().unwrap());
+                        ctx.trail_limit_reported.insert(id, crate::engine::context::TrailLimitReported {
+                            offset: px(offset), limit: px(limit), stop: 0,
+                        });
+                    }
+                }
+            }, req);
+            let trailing = matches!(get(&captured, 40).as_deref(), Some("TSL"))
+                || get(&captured, 18).is_some_and(|v| v.starts_with('a'));
+            for t in PRICE_TAGS {
+                if replace && trailing && t == 6117 { continue; }
+                // A condition other than a price one (left out of the order).
+                if t == 6125 && get(&captured, 6222).as_deref() != Some("1") { continue; }
+                assert_eq!(get(&ours, t), get(&captured, t), "tag {t}, {src}:\n  captured {frame}\n  ours {ours:?}");
+            }
+            checked += 1;
+        }
+        println!("{checked} frames checked, skipped: {skipped:?}");
+        assert!(skipped.iter().all(|s| ["E2M", "TMIT", "TLIT"].iter().any(|t| s.starts_with(t)) || s.ends_with("BAG")), "{skipped:?}");
+        assert!(checked >= 210, "{checked}");
+    }
+
+    // ibx#263 (captured 25/09/2026, ib-agent#195 S2; account masked): a
+    // TRAIL LIMIT replace restates the stop price when the server last
+    // reported another one (it had moved the stop to 752.01, the order
+    // still had 751.89), and not when it is the same or before any report
+    // (`jclient.pe.j@2041-2152`, `pe.dz().e()`).
+    #[test]
+    fn trailing_replace_restates_the_stop_price_only_when_the_server_moved_it() {
+        use crate::types::{OrderAttrs, OrderKind as K};
+        const REPLACE: &str = "35=G|11=1941360730.1|41=1941360730.0|44=747.11|99=20.00|1=DU1|6117=751.89|6205=1|6268=0|6122=c|6370=5.00|38=1|54=2|40=TSL|211=20.00|55=SPY|167=STK|6035=SPY|59=0|6008=756733|6088=Socket|6211=|6238=";
+        let kind = K::TrailingStopLimit { lmt_offset: 0, lmt_price: Some(px(747.11)), trail_amt: px(20.0), trail_stop_price: px(751.89) };
+        let replace = |reported: Option<f64>| wire_tags_with(|ctx| {
+            ctx.market.register(756733);
+            ctx.set_symbol(1, "SPY".to_string());
+            ctx.insert_order(Order::new(1941360730, 1, Side::Sell, 1, 0, b'2', b'0', 0));
+            ctx.trail_limit_reported.insert(1941360730, crate::engine::context::TrailLimitReported {
+                offset: px(5.0), limit: px(746.89), stop: px(751.89),
+            });
+            if let Some(stop) = reported { ctx.reported_stop.insert(1941360730, px(stop)); }
+        }, OrderRequest::Modify { new_order_id: 1941360730, order_id: 1941360730, qty: 1, kind, tif: b'0', attrs: OrderAttrs::default() })
+            .into_iter().filter(|(t, _)| !matches!(t, 8 | 9 | 34 | 52 | 10)).collect::<Vec<_>>();
+        // The attributes come in the reference's hash order: compared as a
+        // set, the other fields in order.
+        let ours = replace(Some(752.01));
+        let (mine, theirs) = common_order(&ours, REPLACE);
+        assert_eq!(mine, theirs);
+        let sorted = |mut v: Vec<(u32, String)>| { v.sort(); v };
+        assert_eq!(sorted(ours), sorted(parse_frame(REPLACE)));
+        assert_eq!(tag(&replace(Some(751.89)), 6117), None, "same as the server's");
+        assert_eq!(tag(&replace(None), 6117), None, "before any report");
+        // A trailing amount and percent the same way; STP types always.
+        let trail = |kind, reported: f64| wire_tags_with(|ctx| {
+            ctx.insert_order(Order::new(5, 0, Side::Sell, 1, 0, b'2', b'0', 0));
+            ctx.reported_stop.insert(5, px(reported));
+        }, OrderRequest::Modify { new_order_id: 5, order_id: 5, qty: 1, kind, tif: b'0', attrs: OrderAttrs::default() });
+        let amount = K::TrailingStop { trail_amt: px(1.0), trail_stop_price: px(99.0) };
+        assert_eq!(tag(&trail(amount, 98.5), 6117), Some("99.00"));
+        assert_eq!(tag(&trail(amount, 99.0), 6117), None);
+        let pct = K::TrailPct { trail_percent: px(1.5), trail_stop_price: px(99.0) };
+        assert_eq!(tag(&trail(pct, 98.5), 6117), Some("99.00"));
+        assert_eq!(tag(&trail(K::StpPrt { stop_price: px(90.0) }, 0.0), 6117), Some("90.00"));
+    }
+
+    // ibx#263: the cash quantity is the reference's attribute 152
+    // (`jattrib.attribs.holder.CashQuantityValue`, a double attribute
+    // written with the price formatter); 5920 is only its column id.
+    #[test]
+    fn cash_quantity_goes_out_in_152() {
+        let tags = wire_tags(OrderRequest::SubmitEx {
+            order_id: 9, instrument: 0, side: Side::Buy, qty: 0, kind: crate::types::OrderKind::Market, tif: b'0',
+            attrs: crate::types::OrderAttrs { cash_qty: px(1000.0), ..Default::default() },
+        });
+        assert_eq!(tag(&tags, 152), Some("1000.00"));
+        assert_eq!(tag(&tags, 5920), None);
+        assert!((70..100).contains(&reference_rank(152)), "an order attribute");
+    }
+
+    // ibx#263: a price off the contract's grid is refused with 110 and
+    // nothing is sent, as the reference (`jextend.dx.a(dy, boolean)@1961`,
+    // ib-agent#192 B5); ibx snapped it to the tick (ibx#216).
+    #[test]
+    fn a_price_off_the_grid_is_refused_with_110() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.market.set_min_tick(0, 0.01);
+        context.pending_orders.push(OrderRequest::SubmitLimit { order_id: 31, instrument: 0, side: Side::Buy, qty: 1, price: px(100.005) });
+        context.pending_orders.push(OrderRequest::SubmitEx { order_id: 32, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::Rel { price: 0, offset: px(-0.5) }, tif: b'0', attrs: Default::default() });
+        let shared = Arc::new(SharedState::new());
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        let mut buf = [0u8; 256];
+        assert!(server.read(&mut buf).is_err(), "nothing sent");
+        let errors = shared.orders.drain_order_errors();
+        let text = "The price does not conform to the minimum price variation for this contract.".to_string();
+        assert_eq!(errors, vec![(31, 110, text.clone()), (32, 110, text)]);
+        assert!(context.order(31).is_none() && context.order(32).is_none());
     }
 
     // ibx#466: the API order id is an int; a larger order id is not sent.
@@ -5059,7 +5656,7 @@ mod tests {
             (ex(2, K::Stop { stop_price: 90 * P }), false),
             (ex(3, K::Mit { stop_price: 90 * P }), false),
             (ex(4, K::TrailingStop { trail_amt: P, trail_stop_price: 0 }), false),
-            (ex(5, K::TrailPct { trail_pct: 100, trail_stop_price: 0 }), false),
+            (ex(5, K::TrailPct { trail_percent: px(1.0), trail_stop_price: 0 }), false),
             (ex(6, K::StopLimit { price: 89 * P, stop_price: 90 * P }), true),
             (ex(7, K::Moc), true),
         ];

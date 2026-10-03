@@ -2567,7 +2567,10 @@ pub(crate) fn format_price(price: Price) -> StackStr {
 }
 
 /// A price in the reference's number form for its price fields: at least
-/// two decimals, at most eight (`0.00`, `0.05`, `272.885`). Zero alloc.
+/// two decimals, at most eight (`0.00`, `0.05`, `272.885`, `-0.10`), the
+/// pattern `#0.00######` of its price formatter (`jutils.dO.F`, US
+/// symbols, no grouping), which writes every price tag of its order
+/// messages (ibx#263). Zero alloc.
 pub(crate) fn format_price_ref(price: Price) -> StackStr {
     let mut s = format_price(price);
     let len = s.len as usize;

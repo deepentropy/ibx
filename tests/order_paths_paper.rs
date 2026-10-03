@@ -269,7 +269,7 @@ fn modifies(paper: &mut Paper, base: i64) {
         action: "SELL".into(), order_type: "TRAIL LIMIT".into(), total_quantity: 1.0,
         aux_price: aux, lmt_price_offset: 0.50, trail_stop_price: 50.0, ..Default::default()
     };
-    let trail_pct = |p: f64| Order {
+    let trail_percent = |p: f64| Order {
         action: "SELL".into(), order_type: "TRAIL".into(), total_quantity: 1.0, trailing_percent: p, ..Default::default()
     };
     let gtd_stp = |aux: f64| Order {
@@ -285,7 +285,7 @@ fn modifies(paper: &mut Paper, base: i64) {
         ("STP LMT both prices", stp_lmt(194.0, 195.0), stp_lmt(189.0, 190.0), vec![(44, "189"), (99, "190")]),
         ("TRAIL amount", trail(100.0), trail(110.0), vec![(40, "P"), (99, "110")]),
         ("TRAIL LIMIT amount", trail_lmt(100.0), trail_lmt(110.0), vec![(40, "TSL"), (99, "110")]),
-        ("TRAIL percent (not 1%)", trail_pct(5.25), trail_pct(6.0), vec![(99, "6"), (6268, "100")]),
+        ("TRAIL percent (not 1%)", trail_percent(5.25), trail_percent(6.0), vec![(99, "6"), (6268, "100")]),
         ("LMT DAY -> GTC", lmt(200.0, false, "DAY"), lmt(200.0, false, "GTC"), vec![(59, "1")]),
         ("GTD STP trigger", gtd_stp(200.0), gtd_stp(195.0), vec![(99, "195"), (59, "6")]),
     ];

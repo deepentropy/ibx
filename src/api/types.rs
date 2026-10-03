@@ -6,6 +6,15 @@
 use crate::types::*;
 
 pub const PRICE_SCALE_F: f64 = PRICE_SCALE as f64;
+
+/// An API price (a double) as a fixed-point price: rounded half to even at
+/// the eighth decimal, as the reference's price formatter rounds the
+/// double it writes (`jutils.dO.F`, `#0.00######`, Java's HALF_EVEN). A
+/// cast truncated, so 0.29 went out as 0.28999999 (ibx#263).
+#[inline]
+pub fn price_from_f64(v: f64) -> crate::types::Price {
+    (v * PRICE_SCALE_F).round_ties_even() as crate::types::Price
+}
 /// Fixed-point quantities (fills, positions) to decimal shares.
 pub const QTY_SCALE_F: f64 = QTY_SCALE as f64;
 
@@ -464,19 +473,19 @@ impl Order {
                 String::new()
             },
             parent_id: self.parent_id.max(0),
-            discretionary_amt: (self.discretionary_amt * PRICE_SCALE_F) as Price,
+            discretionary_amt: price_from_f64(self.discretionary_amt),
             sweep_to_fill: self.sweep_to_fill,
             all_or_none: self.all_or_none,
             // Valid trigger-method codes only (ibx#223): the raw `as u8`
             // cast wrapped the gateway's -1 (Unknown) to 255, and
-            // out-of-range codes went to the wire verbatim. Anything
-            // unrecognized coerces to 0 (default = not emitted), matching
-            // the gateway's unknown->default handling.
+            // out-of-range codes went to the wire verbatim. The reference
+            // refuses an unknown code before sending (321, ibx#263); here
+            // it coerces to 0, the default.
             trigger_method: match self.trigger_method {
                 0..=4 | 7 | 8 => self.trigger_method as u8,
                 _ => 0,
             },
-            cash_qty: (self.cash_qty * PRICE_SCALE_F) as Price,
+            cash_qty: price_from_f64(self.cash_qty),
             conditions: self.conditions.clone(),
             conditions_cancel_order: self.conditions_cancel_order,
             conditions_ignore_rth: self.conditions_ignore_rth,
@@ -1344,6 +1353,20 @@ mod tests {
         let cd = ContractDetails::default();
         assert_eq!(cd.contract.con_id, 0);
         assert_eq!(cd.min_tick, 0.0);
+    }
+
+    // ibx#263: an API price becomes the fixed-point price the reference's
+    // formatter writes: rounded at the eighth decimal, half to even, not
+    // truncated (0.29 was 0.28999999).
+    #[test]
+    fn price_from_f64_rounds_half_to_even() {
+        assert_eq!(price_from_f64(0.29), 29_000_000);
+        assert_eq!(price_from_f64(1.13), 113_000_000);
+        assert_eq!(price_from_f64(-0.1), -10_000_000);
+        assert_eq!(price_from_f64(0.001953125), 195_312);
+        assert_eq!(price_from_f64(0.000000001), 0);
+        let bad = (0..100_000).filter(|c| price_from_f64(*c as f64 / 100.0) != *c as i64 * 1_000_000).count();
+        assert_eq!(bad, 0);
     }
 
     // ibx#223: the raw cast wrapped -1 to 255 and forwarded out-of-range

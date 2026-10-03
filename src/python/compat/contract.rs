@@ -1917,7 +1917,7 @@ impl PriceCondition {
         OrderCondition::Price {
             con_id: self.con_id,
             exchange: self.exchange.clone(),
-            price: (self.price * PRICE_SCALE_F) as Price,
+            price: crate::api::types::price_from_f64(self.price),
             is_more: self.is_more,
             trigger_method: self.trigger_method as u8,
         }

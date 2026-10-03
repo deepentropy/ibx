@@ -2541,3 +2541,98 @@ fn api_option_chains_live() {
     assert!(!es_rows.is_empty() && es_rows.iter().all(|r| r.1 == "CME"), "{es_rows:?}");
 }
 
+
+// ── Stop orders and all-or-none (ibx#263), focused ──
+
+#[derive(Default)]
+struct StopsWrapper {
+    events: Vec<String>,
+    closes: Vec<f64>,
+    bars_done: bool,
+    statuses: Vec<(i64, String)>,
+}
+
+impl Wrapper for StopsWrapper {
+    fn error(&mut self, req_id: i64, code: i64, text: &str, _: &str) { self.events.push(format!("error {req_id} {code} {text}")); }
+    fn historical_data(&mut self, _: i64, bar: &BarData) { self.closes.push(bar.close); }
+    fn historical_data_end(&mut self, _: i64, _: &str, _: &str) { self.bars_done = true; }
+    fn order_status(
+        &mut self, order_id: i64, status: &str, _: f64, _: f64,
+        _: f64, _: i64, _: i64, _: f64, _: i64, _: &str, _: f64,
+    ) {
+        self.events.push(format!("status {order_id} {status}"));
+        self.statuses.push((order_id, status.into()));
+    }
+}
+
+/// As the reference: a STP (sent with the default trigger method), a
+/// TRAIL with all-or-none and a REL with all-or-none (sent with the
+/// instruction field "a G" and "R G"), each far from the market (AAPL BUY
+/// 1: stop at 1.5 times the last daily close, trailing amount half of it
+/// with the first stop at 1.5 times, relative with a price cap at half),
+/// then cancelled. Each must be held by the server (PreSubmitted or
+/// Submitted) with no refusal, then Cancelled. Works with the market open
+/// or closed (closed: the orders wait for the next session).
+/// Run with: cargo test --test rust_api_gt api_stops_all_or_none_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_stops_all_or_none_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = StopsWrapper::default();
+    let wait = |client: &EClient, w: &mut StopsWrapper, secs: u64, done: &dyn Fn(&StopsWrapper) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while !done(w) && Instant::now() < deadline {
+            client.process_msgs(w);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    std::thread::sleep(Duration::from_secs(3));
+    client.req_historical_data(9630, &aapl(), "", "5 D", "1 day", "TRADES", true, 1, false).unwrap();
+    wait(&client, &mut w, 30, &|w| w.bars_done);
+    let last = *w.closes.last().expect("no daily close for AAPL");
+    let cents = |v: f64| (v * 100.0).round() / 100.0;
+    let base = || Order { action: "BUY".into(), total_quantity: 1.0, ..Default::default() };
+    let orders = [
+        ("STP", Order { order_type: "STP".into(), aux_price: cents(last * 1.5), ..base() }),
+        ("TRAIL AON", Order { order_type: "TRAIL".into(), aux_price: cents(last * 0.5),
+            trail_stop_price: cents(last * 1.5), all_or_none: true, ..base() }),
+        ("REL AON", Order { order_type: "REL".into(), lmt_price: cents(last * 0.5), aux_price: 0.01,
+            all_or_none: true, ..base() }),
+    ];
+    let mut ids = Vec::new();
+    for (label, order) in &orders {
+        let oid = client.next_order_id();
+        client.place_order(oid, &aapl(), order).expect("place_order failed");
+        ids.push((oid, *label));
+    }
+    let held = |w: &StopsWrapper, oid: i64| w.statuses.iter().any(|(id, s)| *id == oid && (s == "PreSubmitted" || s == "Submitted"));
+    let ended = |w: &StopsWrapper, oid: i64| w.statuses.iter().any(|(id, s)| *id == oid && (s == "Cancelled" || s == "Inactive" || s == "ApiCancelled"));
+    wait(&client, &mut w, 30, &|w| ids.iter().all(|(oid, _)| held(w, *oid) || ended(w, *oid)));
+    let held_before_cancel: Vec<(i64, bool, bool)> = ids.iter().map(|(oid, _)| (*oid, held(&w, *oid), ended(&w, *oid))).collect();
+    for (oid, _) in &ids {
+        client.cancel_order(*oid, "").unwrap();
+    }
+    wait(&client, &mut w, 30, &|w| ids.iter().all(|(oid, _)| w.statuses.iter().any(|(id, s)| id == oid && s == "Cancelled")));
+    client.disconnect();
+    println!("  AAPL last daily close {last}");
+    for e in &w.events {
+        println!("  {e}");
+    }
+    for ((oid, label), (_, was_held, was_ended)) in ids.iter().zip(held_before_cancel) {
+        let refusals: Vec<&String> = w.events.iter()
+            .filter(|e| e.starts_with(&format!("error {oid} ")) && !e.starts_with(&format!("error {oid} 399 ")))
+            .collect();
+        assert!(was_held && !was_ended, "{label} ({oid}) not held: {:?}", w.events);
+        assert!(refusals.is_empty(), "{label} ({oid}): {refusals:?}");
+        assert!(w.statuses.iter().any(|(id, s)| id == oid && s == "Cancelled"), "{label} ({oid}) not cancelled");
+    }
+}

@@ -89,6 +89,10 @@ pub struct Context {
     /// The last limit offset, limit price and stop price the server
     /// reported for a TRAIL LIMIT order (ib-agent#194, ibx#491).
     pub(crate) trail_limit_reported: HashMap<OrderId, TrailLimitReported>,
+    /// The last stop price (6117) the server reported for an order, the
+    /// reference's last known value a trailing replace compares with
+    /// (`jclient.pe.dz().e()`, ibx#263). A replace does not change it.
+    pub(crate) reported_stop: HashMap<OrderId, crate::types::Price>,
     /// What decides outside-RTH, by conId and order exchange (ibx#465).
     pub(crate) rth_types: HashMap<(i64, String), crate::engine::outside_rth::RthTypes>,
     /// Definition lookups in flight for `rth_types`: (320 id, key, deadline).
@@ -185,6 +189,7 @@ impl Context {
             cancel_clord: HashMap::new(),
             status_queries: std::collections::HashSet::new(),
             trail_limit_reported: HashMap::new(),
+            reported_stop: HashMap::new(),
             rth_types: HashMap::new(),
             rth_lookups: Vec::new(),
             rth_parked: Vec::new(),
@@ -531,7 +536,7 @@ impl Context {
         instrument: InstrumentId,
         side: Side,
         qty: u32,
-        trail_pct: u32,
+        trail_percent: Price,
     ) -> OrderId {
         let id = self.next_order_id;
         self.next_order_id += 1;
@@ -540,7 +545,7 @@ impl Context {
             instrument,
             side,
             qty,
-            trail_pct,
+            trail_percent,
             trail_stop_price: 0,
         });
         id
@@ -1202,6 +1207,7 @@ impl Context {
         self.cancel_clord.remove(&order_id);
         self.status_queries.remove(&order_id);
         self.trail_limit_reported.remove(&order_id);
+        self.reported_stop.remove(&order_id);
         self.bracket_keys.remove(&order_id);
         self.bracket_next_child.remove(&order_id);
         if self.finished_orders.insert(order_id, status).is_none() {
