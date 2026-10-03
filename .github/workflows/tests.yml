@@ -1,0 +1,70 @@
+name: Tests
+
+# Offline tests on every push and pull request: no secret, no network to the
+# servers. The tests that log in are #[ignore] (Rust) or skipped without
+# credentials (Python), so they show as ignored / skipped, never as passed.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The test build of the largest modules needs a large compiler stack.
+  RUST_MIN_STACK: 134217728
+  # No credentials: the live tests must not run.
+  IB_USERNAME: ""
+  IB_PASSWORD: ""
+
+jobs:
+  rust:
+    name: cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build every target
+        run: cargo test --all-targets --locked --no-run
+
+      - name: Run the tests (live tests listed as ignored)
+        run: cargo test --all-targets --locked --no-fail-fast
+
+  python:
+    name: maturin build and pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the Python module
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --quiet maturin pytest
+          maturin develop --locked
+
+      - name: Run the Python tests (live tests skipped)
+        run: |
+          . .venv/bin/activate
+          python -m pytest tests/python -q -rs -p no:cacheprovider
