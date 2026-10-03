@@ -2634,6 +2634,22 @@ pub(crate) mod tests {
         assert_eq!(def.schedule_expiry, Some(("20261005".to_string(), String::new())));
     }
 
+    // An option reply without a last trading time (the weekend replies,
+    // captured 26/09/2026 and 03/10/2026) whose expiry is past the
+    // schedule: the date alone and no time, as the reference's rows of
+    // 26/09/2026. The record's 8583 / 8584 are not read for it.
+    #[test]
+    fn no_last_trading_time_past_the_schedule_is_the_date_alone() {
+        let msg = pipe_msg("35=d|320=1|55=SPY|167=OPT|207=BEST|6008=9|541=20261218|200=202612|6614=20261218|201=1|202=200|\
+            8583=20261218|8584=150000|231=100|146=0|6344=1|6008=9|6346=756733|310=STK|6855=SPY|6659=1|6660=D");
+        let mut def = super::parse_secdef_response(&msg).unwrap();
+        assert_eq!(def.last_trade_time, "");
+        apply_schedule(&mut def, &option_week(), at("20261003-08:00:00"));
+        assert_eq!(def.schedule_expiry, Some(("20261218".to_string(), String::new())));
+        let d = crate::api::types::ContractDetails::from_definition(&def);
+        assert_eq!((d.contract.last_trade_date_or_contract_month.as_str(), d.last_trade_time.as_str()), ("20261218", ""));
+    }
+
     // A contract past its last trading instant gets no schedule (the
     // captured matured bonds).
     #[test]

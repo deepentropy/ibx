@@ -2,7 +2,7 @@
 
 Golden test: ibx's rows of the captured definition replies, field by field
 against the rows the official client received from the gateway (paper,
-28/09/2026 and 02/10/2026; fixture tests/fixtures/contract_details)."""
+26/09/2026, 28/09/2026 and 02/10/2026; fixture tests/fixtures/contract_details)."""
 
 import json
 import re

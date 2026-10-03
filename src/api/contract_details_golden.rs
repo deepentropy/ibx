@@ -1,7 +1,7 @@
 //! Golden test of contract details rows (ibx#436): ibx's rows of the
 //! captured definition replies, field by field against the rows the
-//! official client received from the gateway (paper, 28/09/2026 and
-//! 02/10/2026; fixture made from the four-leg captures).
+//! official client received from the gateway (paper, 26/09/2026,
+//! 28/09/2026 and 02/10/2026; fixture made from the four-leg captures).
 
 use std::collections::HashMap;
 

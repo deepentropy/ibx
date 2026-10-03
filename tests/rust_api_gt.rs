@@ -1930,7 +1930,7 @@ impl Wrapper for DetailsWrapper {
 /// hours from today, fractional sizes 0.0001. MNQ futures: date and time
 /// of the last trade (08:30:00), month, underlying MNQ IND, long name on
 /// every row. An AAPL call: right C, underlying 265598 STK, last trade time
-/// 16:00:00. IBM bonds: bond rows, local symbol as CUSIP, a description
+/// 16:00:00 (none on a weekend reply). IBM bonds: bond rows, local symbol as CUSIP, a description
 /// append, ISIN and CUSIP ids.
 /// Run with: cargo test --test rust_api_gt api_contract_details_fields_live -- --ignored --nocapture
 #[test]
@@ -2041,7 +2041,10 @@ fn api_contract_details_fields_live() {
     let d = &rows[0].1;
     assert_eq!((d.contract.right.as_str(), d.contract.multiplier.as_str()), ("C", "100"));
     assert_eq!((d.under_con_id, d.under_symbol.as_str(), d.under_sec_type.as_str()), (265598, "AAPL", "STK"));
-    assert_eq!(d.last_trade_time, "16:00:00");
+    // 16:00:00 when the reply carries the last trading time; a weekend
+    // reply has none and the reference then gives no time (its rows of
+    // 26/09/2026, ibx's of 03/10/2026).
+    assert!(matches!(d.last_trade_time.as_str(), "16:00:00" | ""), "{}", d.last_trade_time);
     assert_eq!(d.contract.last_trade_date_or_contract_month, call.last_trade_date_or_contract_month);
 
     let rows = of(9606);
