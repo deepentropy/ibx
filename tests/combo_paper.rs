@@ -9,7 +9,8 @@
 //!   symbols in 55, the leg block and NonGuaranteed;
 //! - openOrder shows the combo contract (conId, symbol and local symbol
 //!   QQQ,SPY, trading class COMB, comboLegsDescrip, two legs);
-//! - the price change is accepted with the new price, then the cancel;
+//! - the price change goes out as a 35=G and the server reports the
+//!   replace with the new price, then the cancel;
 //! - a second order on the same combo sends no set-up request.
 //!
 //! Requires IB_USERNAME and IB_PASSWORD (paper account) in the environment.
@@ -57,6 +58,15 @@ fn sent(msg_type: &str) -> Vec<String> {
     let mark = format!("|35={msg_type}|");
     wire().lines.lock().unwrap().iter()
         .filter(|l| l.starts_with("WIRE>") && l.contains(&mark))
+        .cloned()
+        .collect()
+}
+
+/// The frames received with the given message type, as text.
+fn received(msg_type: &str) -> Vec<String> {
+    let mark = format!("|35={msg_type}|");
+    wire().lines.lock().unwrap().iter()
+        .filter(|l| l.starts_with("WIRE<") && l.contains(&mark))
         .cloned()
         .collect()
 }
@@ -167,9 +177,30 @@ fn combo_order_on_paper() {
     }
     if up {
         client.place_order(id, &combo(), &order(-50.10)).expect("modify");
-        let moved = pump(&client, &mut probe, 20, |s| s.open.iter().any(|(o, _, ord)| *o == id && (ord.lmt_price - -50.10).abs() < 1e-9));
-        check(moved, "the price change is accepted with the new price");
-        check(sent("G").iter().any(|l| l.contains("|44=-50.1|") && !l.contains("|6079=")), "35=G with the new price and no leg block");
+        // The server's report of the replace (11 = the order's version 1,
+        // 150=5), not ibx's own openOrder echo of the tracked order.
+        let replace = format!("|11={id}.1|");
+        let replaced = || received("8").into_iter()
+            .find(|l| l.contains(&replace) && l.contains("|150=5|"));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while replaced().is_none() && Instant::now() < deadline {
+            client.process_msgs(&mut probe);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let report = replaced();
+        for l in sent("G") {
+            println!("    35=G: {l}");
+        }
+        for l in received("8").iter().filter(|l| l.contains(&replace)) {
+            println!("    35=8: {l}");
+        }
+        check(report.as_deref().is_some_and(|l| ["|44=-50.1|", "|44=-50.10|"].iter().any(|p| l.contains(p))),
+            "the server reports the replace with the new price");
+        check(sent("G").iter().any(|l| l.contains(&format!("|11={id}.1|")) && l.contains("|44=-50.10|") && !l.contains("|6079=")),
+            "35=G with the new price and no leg block");
+        pump(&client, &mut probe, 2, |_| false);
+        check(state.lock().unwrap().open.iter().any(|(o, _, ord)| *o == id && (ord.lmt_price - -50.10).abs() < 1e-9),
+            "openOrder shows the new price");
         client.cancel_order(id, "").ok();
         let gone = pump(&client, &mut probe, 20, |s| last_status(s, id).as_deref() == Some("Cancelled"));
         check(gone, "the cancel ends the order");

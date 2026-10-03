@@ -506,3 +506,38 @@ fn option_vertical_set_up_is_the_captured_one() {
     let combo = s.engine.context.combos.built_for_test().expect("built");
     assert_eq!((combo.category(), combo.multiplier, combo.symbol()), (0, 100.0, "SPY".to_string()));
 }
+
+// ibx#470 (paper 03/10/2026, combo_paper): the price change of the first
+// combo order of a session, made as soon as the order works, while the
+// server's first reports still come, goes out as a 35=G with the new
+// price and no leg block, and the server's replace report reaches
+// openOrder.
+#[test]
+fn modify_of_the_first_combo_order_of_a_session_goes_out() {
+    let first = fixture("20260926/i105_combo_stock_smart.jsonl");
+    let reports = fixture("20260926b/i105_combo_stock_smart.jsonl");
+    let mut s = Session::new();
+    let mut order = combo_lmt("BUY", -50.00);
+    s.client.place_order(28, &spy_qqq("QQQ,SPY"), &order).unwrap();
+    s.run();
+    s.play(&first, is("c", "SecDefReqMsgReqByConid"), |_| false);
+    s.run();
+    let d = s.next_sent();
+    assert_eq!((tag(&d, 35), tag(&d, 11), tag(&d, 44)), (Some("D"), Some("28.0"), Some("-50.00")), "{d:?}");
+    // The first report of the order (150=A), then the change at once.
+    s.ids.insert("1770530845".into(), "28".into());
+    let first_report = std::cell::Cell::new(0);
+    s.play(&reports, |f| tag(f, 35) == Some("8"), |f| {
+        if tag(f, 35) == Some("8") { first_report.set(first_report.get() + 1); }
+        first_report.get() > 0
+    });
+    assert!(s.callbacks.0.iter().any(|l| l.starts_with("orderStatus 28 PreSubmitted")), "{:?}", s.callbacks.0);
+    order.lmt_price = -50.10;
+    s.client.place_order(28, &spy_qqq("QQQ,SPY"), &order).unwrap();
+    s.run();
+    let g = s.next_sent();
+    assert_eq!((tag(&g, 35), tag(&g, 11), tag(&g, 41)), (Some("G"), Some("28.1"), Some("28.0")), "{g:?}");
+    assert_eq!(tag(&g, 44).map(|p| p.parse::<f64>().unwrap()), Some(-50.10), "{g:?}");
+    assert!(tag(&g, 6079).is_none() && tag(&g, 6248) == Some("1") && tag(&g, 55) == Some("QQQ,SPY"), "{g:?}");
+    s.assert_nothing_sent();
+}

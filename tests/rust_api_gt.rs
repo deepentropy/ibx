@@ -1961,7 +1961,7 @@ fn api_contract_details_fields_live() {
     let mnq = Contract { symbol: "MNQ".into(), sec_type: "FUT".into(), exchange: "CME".into(), currency: "USD".into(), ..Default::default() };
     client.req_contract_details(9602, &mnq).unwrap();
     wait_end(&client, &mut w, 9602);
-    // An AAPL call of the chain: the first expiry, a strike in the middle.
+    // An AAPL call of the chain: the middle expiry, the middle strike of its calls.
     client.req_sec_def_opt_params(9603, "AAPL", "", "STK", 265598).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     while !w.chain_end && Instant::now() < deadline {
@@ -1971,13 +1971,20 @@ fn api_contract_details_fields_live() {
     let chain = w.chains.iter().find(|c| c.0 == "SMART").cloned().expect("an AAPL chain on SMART");
     let mut expiries = chain.1.clone();
     expiries.sort();
-    let mut strikes = chain.2.clone();
-    strikes.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let call = Contract {
+    // The chain's strikes are those of every expiry: the strike comes from
+    // the calls of the chosen expiry, asked with no strike first.
+    let expiry = expiries[expiries.len() / 2].clone();
+    let calls = Contract {
         symbol: "AAPL".into(), sec_type: "OPT".into(), exchange: "SMART".into(), currency: "USD".into(),
-        last_trade_date_or_contract_month: expiries[expiries.len() / 2].clone(), strike: strikes[strikes.len() / 2],
-        right: "C".into(), multiplier: "100".into(), ..Default::default()
+        last_trade_date_or_contract_month: expiry.clone(), right: "C".into(), multiplier: "100".into(), ..Default::default()
     };
+    client.req_contract_details(9607, &calls).unwrap();
+    wait_end(&client, &mut w, 9607);
+    let mut strikes: Vec<f64> = w.rows.iter().filter(|r| r.0 == 9607).map(|r| r.2.contract.strike).collect();
+    strikes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    strikes.dedup();
+    assert!(!strikes.is_empty(), "no AAPL call for {expiry} (chain strikes {:?})", chain.2);
+    let call = Contract { strike: strikes[strikes.len() / 2], ..calls.clone() };
     client.req_contract_details(9604, &call).unwrap();
     wait_end(&client, &mut w, 9604);
     client.req_matching_symbols(9605, "IBM").unwrap();
@@ -2628,8 +2635,10 @@ fn api_stops_all_or_none_live() {
         println!("  {e}");
     }
     for ((oid, label), (_, was_held, was_ended)) in ids.iter().zip(held_before_cancel) {
+        // 399 is the outside-hours warning, 202 the answer to the test's own cancel.
         let refusals: Vec<&String> = w.events.iter()
-            .filter(|e| e.starts_with(&format!("error {oid} ")) && !e.starts_with(&format!("error {oid} 399 ")))
+            .filter(|e| e.starts_with(&format!("error {oid} ")) && !e.starts_with(&format!("error {oid} 399 "))
+                && !e.starts_with(&format!("error {oid} 202 ")))
             .collect();
         assert!(was_held && !was_ended, "{label} ({oid}) not held: {:?}", w.events);
         assert!(refusals.is_empty(), "{label} ({oid}): {refusals:?}");
