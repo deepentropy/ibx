@@ -7,13 +7,20 @@
 //! - `writer`: a field of the new order (35=D), replace (35=G) and cancel
 //!   (35=F) messages, as the gateway's writers emit them;
 //! - `order_request`: a variant of `OrderRequest`;
-//! - `eclient`: a public `EClient` method.
+//! - `eclient`: a public `EClient` method;
+//! - `local_rule`: a local order refusal of the gateway catalog
+//!   (`tests/fixtures/gw1040/catalog/order_local_rules.csv`, ibx#485);
+//! - `attribute`: an order attribute of the gateway catalog
+//!   (`order_attributes.csv`, ibx#485).
 //!
 //! The `test` column holds up to three `<path>::<test fn>` joined by ` ; `
-//! (an ignored live test marked `live:`), or `no test`. It was filled from
-//! the code: a test is named when it cites the spec section, asserts the
-//! error code, holds a captured frame of that message with the field,
-//! builds the request variant, or calls the client method.
+//! (an ignored live test marked `live:`), `no test`, or `open #N` for a
+//! gateway rule ibx does not implement yet, with its issue. It was filled
+//! from the code: a test is named when it cites the spec section or the
+//! rule, asserts the error code, holds a captured frame of that message
+//! with the field, builds the request variant, or calls the client method;
+//! the layer A table tests (ibx#485) cover every error code ibx raises,
+//! every writer row, every request variant and the attributes ibx writes.
 //!
 //! This test fails when a row has no entry, names a test that does not
 //! exist, or when a request variant or client method has no row.
@@ -21,7 +28,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-const KINDS: &[&str] = &["rule", "error", "writer", "order_request", "eclient"];
+const KINDS: &[&str] = &["rule", "error", "writer", "order_request", "eclient", "local_rule", "attribute"];
 
 /// The fields of one CSV line (quotes and doubled quotes handled).
 fn csv_fields(line: &str) -> Vec<String> {
@@ -92,6 +99,12 @@ fn every_row_names_its_test_or_says_no_test() {
             continue;
         }
         if test == "no test" {
+            continue;
+        }
+        if let Some(issue) = test.strip_prefix("open #") {
+            if kind != "local_rule" || issue.is_empty() || !issue.bytes().all(|b| b.is_ascii_digit()) {
+                problems.push(format!("line {line}: {test:?}: \"open #N\" is for a local rule, with its issue"));
+            }
             continue;
         }
         entry.0 += 1;
@@ -171,4 +184,39 @@ fn every_public_client_method_has_a_row() {
     }
     assert!(count > 80, "client methods found: {count}");
     assert!(missing.is_empty(), "EClient methods with no row in matrix.csv: {missing:?}");
+}
+
+/// The rows of a gateway catalog file (`tests/fixtures/gw1040/catalog/`)
+/// as maps of column name to value.
+fn catalog(name: &str) -> Vec<std::collections::HashMap<String, String>> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gw1040/catalog").join(name);
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let header = csv_fields(lines.next().unwrap());
+    lines.map(|l| header.iter().cloned().zip(csv_fields(l)).collect()).collect()
+}
+
+/// Every row of the four gateway catalogs (ibx#485) has its row: each
+/// error code, each local rule, each tag of the three order writers, each
+/// order attribute.
+#[test]
+fn every_catalog_row_has_a_row() {
+    let mut missing = Vec::new();
+    let errors = matrix_ids("error");
+    missing.extend(catalog("error_codes.csv").iter().map(|r| r["code"].clone())
+        .filter(|c| !errors.contains(c)).map(|c| format!("error {c}")));
+    let rules = matrix_ids("local_rule");
+    missing.extend(catalog("order_local_rules.csv").iter().map(|r| r["id"].clone())
+        .filter(|id| !rules.contains(id)).map(|id| format!("local_rule {id}")));
+    let writers = matrix_ids("writer");
+    missing.extend(catalog("order_writers.csv").iter()
+        .filter(|r| r["block"].is_empty() && !r["tag"].is_empty())
+        .map(|r| format!("35={} {}", r["msg"], r["tag"]))
+        .filter(|id| !writers.contains(id)).map(|id| format!("writer {id}")));
+    let attributes = matrix_ids("attribute");
+    missing.extend(catalog("order_attributes.csv").iter().map(|r| format!("{} {}", r["tag"], r["attribute"]))
+        .filter(|id| !attributes.contains(id)).map(|id| format!("attribute {id}")));
+    missing.sort();
+    missing.dedup();
+    assert!(missing.is_empty(), "catalog rows with no row in matrix.csv: {missing:?}");
 }

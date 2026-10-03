@@ -655,14 +655,14 @@ rule,SCANNER 2.10,"Updates, cadence, disconnects",no test
 rule,SCANNER 3,cancelScannerSubscription (message 23),no test
 error,0,Warning: Approaching max rate of %s messages per second (%s),no test
 error,100,Max rate of messages per second has been exceeded,no test
-error,101,Max number of tickers has been reached,no test
-error,102,Duplicate ticker id,src/client_core.rs::pnl_request_checks ; src/engine/hot_loop/hmds.rs::historical_ticks_duplicate_and_zone_refusals
-error,103,Duplicate order id,src/api/client/tests.rs::what_if_on_an_unanswered_order_id_is_a_duplicate
-error,104,Can't modify a filled order,src/client_core.rs::place_on_a_cancelled_order_id_is_refused ; src/engine/hot_loop/order_builder.rs::modify_of_an_order_the_engine_no_longer_holds_is_refused
-error,105,Order being modified does not match original order,no test
+error,101,Max number of tickers has been reached,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::past_the_ticker_limit_a_stream_gets_101_and_waits_for_a_line
+error,102,Duplicate ticker id,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/client_core.rs::pnl_request_checks ; src/engine/hot_loop/hmds.rs::historical_ticks_duplicate_and_zone_refusals
+error,103,Duplicate order id,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::what_if_on_an_unanswered_order_id_is_a_duplicate ; src/client_core.rs::what_if_on_an_order_not_answered_yet_and_known_ids
+error,104,Can't modify a filled order,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/client_core.rs::place_on_a_cancelled_order_id_is_refused ; src/engine/hot_loop/order_builder.rs::modify_of_an_order_the_engine_no_longer_holds_is_refused
+error,105,Order being modified does not match original order,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,106,Can't transmit order id,no test
 error,107,Cannot transmit incomplete order,no test
-error,110,The price does not conform to the minimum price variation for this contract.,src/api/client/tests.rs::algo_refusals_of_20261002_through_place_order ; src/engine/hot_loop/order_builder.rs::a_price_off_the_grid_is_refused_with_110
+error,110,The price does not conform to the minimum price variation for this contract.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::algo_refusals_of_20261002_through_place_order ; src/engine/hot_loop/order_builder.rs::a_price_off_the_grid_is_refused_with_110
 error,117,The block order size must be at least 50.,no test
 error,132,This order cannot be transmitted without a clearing account.,no test
 error,133,Submit new order failed,no test
@@ -673,7 +673,7 @@ error,140,The size value should be an integer,no test
 error,141,The price value should be a double,no test
 error,142,Institutional customer account does not have account info,no test
 error,144,"Order size does not match total share allocation. To adjust the share allocation, right-click on the order and select ""Modify->Share Allocat",no test
-error,145,Error in validating entry fields,src/api/client/tests.rs::customer_account_needs_the_account_config
+error,145,Error in validating entry fields,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::customer_account_needs_the_account_config
 error,146,Invalid trigger method,no test
 error,148,"Conditional submission of orders is supported for Limit, Market, MidPrice, Relative and Snap order types only. Conditional cancellation of o",no test
 error,151,This order cannot be transmitted without a user name.,no test
@@ -683,30 +683,30 @@ error,158,You must specify an offset amount or a percent offset value.,no test
 error,159,The percent offset value must be between 0% and 100%,no test
 error,160,The size value cannot be zero,no test
 error,161,Cancel attempted when order is not in a cancellable state. Order permId =,no test
-error,162,Historical Market Data Service error message,src/api/client/tests.rs::a_negative_request_id_round_trips_through_the_engine_queues ; src/engine/hot_loop/hmds.rs::bid_ask_each_failed_leg_reports_its_own_error_and_no_end ; src/engine/hot_loop/hmds.rs::query_error_releases_head_timestamp_without_sentinel
+error,162,Historical Market Data Service error message,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::a_negative_request_id_round_trips_through_the_engine_queues ; src/engine/hot_loop/hmds.rs::bid_ask_each_failed_leg_reports_its_own_error_and_no_end
 error,163,n/a,no test
-error,165,Historical Market Data Service query message,no test
+error,165,Historical Market Data Service query message,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,166,HMDS Expired Contract Violation,no test
 error,168,Discretionary amount does not conform to the minimum price variation for this contract,no test
-error,200,No security definition has been found for the request,src/engine/hot_loop/ccp.rs::sweep_times_out_a_negative_request_id_as_the_callers ; src/engine/hot_loop/ccp.rs::empty_secdef_reply_gives_error_200_and_no_end ; src/engine/hot_loop/ccp.rs::empty_reply_to_a_strike_lookup_retries_once_then_gives_error_200
-error,201,Order rejected - reason,src/api/client/tests.rs::refused_what_if_gives_open_order_then_201 ; src/api/client/tests.rs::process_msgs_delivers_a_reject_error_before_the_status ; src/api/client/tests.rs::negative_ids_round_trip
-error,202,Order Canceled - reason,src/engine/hot_loop/ccp.rs::a_cancel_gives_202_with_the_reason
+error,200,No security definition has been found for the request,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/ccp.rs::sweep_times_out_a_negative_request_id_as_the_callers ; src/engine/hot_loop/ccp.rs::empty_secdef_reply_gives_error_200_and_no_end
+error,201,Order rejected - reason,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::refused_what_if_gives_open_order_then_201 ; src/api/client/tests.rs::process_msgs_delivers_a_reject_error_before_the_status
+error,202,Order Canceled - reason,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/ccp.rs::a_cancel_gives_202_with_the_reason
 error,203,The security (security) is not available or allowed for this account,no test
-error,300,Can't find EId with tickerId,src/api/client/tests.rs::market_data_duplicate_id_and_unknown_cancel ; src/api/client/tests.rs::regulatory_snapshot_delivers_one_batch_then_the_end ; src/api/client/tests.rs::plain_snapshot_sends_each_tick_type_once_then_the_end
+error,300,Can't find EId with tickerId,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::market_data_duplicate_id_and_unknown_cancel ; src/api/client/tests.rs::regulatory_snapshot_delivers_one_batch_then_the_end
 error,301,Invalid ticker action,no test
 error,303,Invalid action,no test
 error,307,Invalid request topic,no test
-error,309,Max number (%s) of market depth requests has been reached,no test
-error,310,Can't find the subscribed market depth with tickerId,no test
+error,309,Max number (%s) of market depth requests has been reached,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,310,Can't find the subscribed market depth with tickerId,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,311,The origin is invalid.,no test
 error,313,The combo details for leg '%s' are invalid.,no test
 error,314,Security type 'BAG' requires combo leg details.,no test
-error,317,Market depth data has been RESET. Please empty deep book contents before applying any new entries.,src/engine/hot_loop/mod.rs::refused_entry_resets_the_book
+error,317,Market depth data has been RESET. Please empty deep book contents before applying any new entries.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/mod.rs::refused_entry_resets_the_book
 error,318,Invalid ICS spread,no test
 error,319,Invalid Log level {%s}.,no test
-error,320,Error reading request,src/api/client/tests.rs::req_scanner_subscription_refusals
-error,321,Error validating request,src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals ; src/api/client/tests.rs::place_order_unknown_trigger_method_is_refused ; src/api/client/tests.rs::fa_requests_on_a_non_fa_session_are_refused
-error,322,Error processing request,src/api/client/tests.rs::market_data_duplicate_id_and_unknown_cancel ; src/api/client/tests.rs::req_market_rule_answers_known_rules_and_refuses_others ; src/api/client/tests.rs::account_summary_refusals_and_limit
+error,320,Error reading request,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::req_scanner_subscription_refusals
+error,321,Error validating request,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals ; src/api/client/tests.rs::place_order_unknown_trigger_method_is_refused
+error,322,Error processing request,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::market_data_duplicate_id_and_unknown_cancel ; src/api/client/tests.rs::req_market_rule_answers_known_rules_and_refuses_others
 error,323,'%s' : cause - %s,no test
 error,326,Unable connect as the client id is already in use. Retry with a unique client id.,no test
 error,327,Only API connections with clientId set to 0 can set the auto bind orders property.,no test
@@ -716,9 +716,9 @@ error,330,Only FA or STL customers can request managed accounts list.,no test
 error,331,Internal error. FA or STL does not have any managed accounts.,no test
 error,333,Invalid share allocation syntax.,no test
 error,336,The time entered is invalid. The correct format is hh:mm:ss E.g.: 15:59:00 Time zone associated with the financial instrument is assumed.,no test
-error,337,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",src/api/client/tests.rs::place_order_bad_good_after_time_is_refused
+error,337,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::place_order_bad_good_after_time_is_refused
 error,341,"The delta is invalid. Valid values are from 1 to 100. You can set the delta from the ""Pegged to Stock"" section of the Order Ticket Panel, or",no test
-error,343,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",src/api/client/tests.rs::place_order_bad_good_till_date_is_refused ; src/client_core.rs::good_till_date_zone_rule
+error,343,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::place_order_bad_good_till_date_is_refused ; src/client_core.rs::good_till_date_zone_rule
 error,346,"Not an institutional account, or an away clearing order",no test
 error,347,Short sale slot value must be 1 (broker holds shares) or 2 (delivered from elsewhere),no test
 error,348,Order not a short sale -- type must be SSHORT to specify short sale slot.,no test
@@ -726,7 +726,7 @@ error,349,"Generic combo does not support ""Good After"" attribute.",no test
 error,350,Minimum quantity is not supported for best combo order.,no test
 error,352,Short sale slot value of 2 (delivered from elsewhere) requires location.,no test
 error,353,Short sale slot value of 1 requires no location be specified.,no test
-error,354,Requested market data is not subscribed.,src/api/client/tests.rs::market_data_rejects_are_reported ; src/api/client/tests.rs::a_top_reject_keeps_the_news_of_a_request
+error,354,Requested market data is not subscribed.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::market_data_rejects_are_reported ; src/api/client/tests.rs::a_top_reject_keeps_the_news_of_a_request
 error,355,Order size does not conform to market rule.,no test
 error,357,Your client version is too low for,no test
 error,359,Combo order only supports reduce on fill without block(OCA),no test
@@ -735,8 +735,8 @@ error,361,Invalid Trigger Price,no test
 error,362,Invalid Adjusted Stop Price,no test
 error,363,Invalid Adjusted Stop Limit Price,no test
 error,364,Invalid Adjusted Trailing Amount,no test
-error,365,No scanner subscription found for ticker id,no test
-error,366,No historical data query found for ticker id,no test
+error,365,No scanner subscription found for ticker id,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,366,No historical data query found for ticker id,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,367,Volatility Type must be 1 or 2 for VOL orders. Do not set it for other order types.,no test
 error,368,Reference Price Type must be 1 or 2 for volatility order management. Do not set it for non-VOL orders.,no test
 error,371,VOL order requires non-negative floating point value for volatility. Do not set it for other order types.,no test
@@ -752,14 +752,14 @@ error,382,n/a,no test
 error,383,n/a,no test
 error,385,Duplicate ticker ID for API scanner subscription,no test
 error,386,Duplicate ticker ID for API historical data query,no test
-error,387,Unsupported order type for this exchange and security type.,src/engine/hot_loop/order_builder.rs::pegged_types_not_in_the_list_are_refused_with_387
+error,387,Unsupported order type for this exchange and security type.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/order_builder.rs::pegged_types_not_in_the_list_are_refused_with_387
 error,388,Order size %s is smaller than the minimum required size of %s.,no test
 error,391,The time entered is invalid. The correct format is hh:mm:ss E.g.: 15:59:00 Time zone associated with the financial instrument is assumed.,no test
 error,392,Invalid Order: contract expired,no test
 error,393,Short sale slot may be specified for delta hedge orders only.,no test
 error,394,Invalid Process Time: must be integer number of milliseconds between 100 and 2000. Found,no test
 error,398,Condition trigger error: %s,no test
-error,399,Order Message,no test
+error,399,Order Message,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,400,Algorithmic Order Error,no test
 error,401,n/a,no test
 error,402,Conditions are not allowed for this financial instrument,no test
@@ -778,8 +778,8 @@ error,416,RFQ is not applicable for the contract. Order ID,no test
 error,417,Scale order component sizes must be smaller than the Maximum Position.,no test
 error,418,Invalid scale order profit offset,no test
 error,419,Missing required Scale order field.,no test
-error,420,Invalid Real-time Query,src/engine/hot_loop/hmds.rs::rtbar_ack_matches_the_exact_window_id_and_refuses_ticker_zero
-error,421,Invalid Route,src/engine/hot_loop/hmds.rs::rtbar_requests_share_a_router
+error,420,Invalid Real-time Query,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/hmds.rs::rtbar_ack_matches_the_exact_window_id_and_refuses_ticker_zero
+error,421,Invalid Route,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/hmds.rs::rtbar_requests_share_a_router
 error,422,The account and clearing attributes on this order may not be changed.,no test
 error,424,FA Order requires allocation to be specified,no test
 error,425,FA Order requires per-account manual allocations because there is no common clearing instruction. Please use order dialog Adviser tab to ent,no test
@@ -787,7 +787,7 @@ error,426,None of the accounts have enough securities.,no test
 error,427,Mutual Fund order requires monetary value to be specified.,no test
 error,428,Mutual Fund Sell order requires shares to be specified.,no test
 error,429,Delta neutral orders are only supported for combos (BAG security type),no test
-error,430,"We are sorry, but fundamentals data for the security specified is not available.",no test
+error,430,"We are sorry, but fundamentals data for the security specified is not available.",tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,431,What to show field is missing or incorrect.,no test
 error,432,Commission must not be negative.,no test
 error,433,"""Restore size after taking profit"" option is currently not supported",no test
@@ -796,11 +796,11 @@ error,435,You must specify an account.,no test
 error,436,"You must specify an allocation (either a single account, group, or profile).",no test
 error,437,Order can have only one flag Outside RTH or Allow PreOpen,no test
 error,438,The application is now locked,no test
-error,439,Order processing failed. Algorithm definition not found,no test
+error,439,Order processing failed. Algorithm definition not found,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,440,Order modify failed. Algorithm cannot be modified.,no test
-error,441,Algo attributes validation failed,src/control/algo.rs::refusals_follow_the_definitions
-error,442,Specified algorithm is not allowed for this order.,no test
-error,443,Order processing failed. Unknown algo attribute,src/control/algo.rs::refusals_follow_the_definitions ; src/control/algo.rs::overnight_and_number_rules
+error,441,Algo attributes validation failed,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/control/algo.rs::refusals_follow_the_definitions
+error,442,Specified algorithm is not allowed for this order.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,443,Order processing failed. Unknown algo attribute,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/control/algo.rs::refusals_follow_the_definitions ; src/control/algo.rs::overnight_and_number_rules
 error,444,Volatility Combo order is not yet acknowledged. Cannot submit changes at this time.,no test
 error,445,The RFQ for this order is no longer valid,no test
 error,446,Missing scale order profit offset,no test
@@ -812,13 +812,13 @@ error,452,Missing order exchange,no test
 error,453,Not enough data to check underlying price conditions,no test
 error,454,Underlying price is out of range,no test
 error,455,Volatility order price is required but cannot be calculated,no test
-error,456,Max number of real time requests has been reached,no test
+error,456,Max number of real time requests has been reached,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,457,Individual account is required,no test
 error,458,Auto-routed blotter order '%s' can't be modified or canceled.,no test
 error,459,No clearing rule selected,no test
 error,460,No trading permissions,no test
 error,461,Order size is not correct; it must be a multiple of the lot size.,no test
-error,462,Order modify failed. Cannot change to the new Time in Force,src/api/client/tests.rs::modify_must_restate_the_held_overnight_time_in_force
+error,462,Order modify failed. Cannot change to the new Time in Force,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::modify_must_restate_the_held_overnight_time_in_force
 error,463,You must enter a valid price.,no test
 error,464,Invalid exchange,no test
 error,465,Order not confirmed,no test
@@ -832,7 +832,7 @@ error,474,Delta Hedging is supported for volatility orders only. Please change m
 error,475,Bond disclaimer not confirmed,no test
 error,476,Invalid leg ratio.,no test
 error,477,Pseudo FX destination is not allowed,no test
-error,478,Parameters in request conflicts with contract parameters received by contract id,no test
+error,478,Parameters in request conflicts with contract parameters received by contract id,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,479,Starting price can be only increased for buy scale order.,no test
 error,480,Starting price can be only decreased for sell scale order.,no test
 error,481,Order size was reduced.,no test
@@ -853,33 +853,33 @@ error,496,"The Post-Only attribute cannot be used with order type ""%s"".",no te
 error,497,Post-Only and Sweep-to-Fill attributes cannot be used together.,no test
 error,498,SSHORTX orders are not supported,no test
 error,499,'PctChange' allocation won't allow size modification,no test
-error,1100,Connectivity between %SHORT_COMPNAME% and %SHORT_PRODNAME% has been lost.,src/api/client/tests.rs::link_notices_are_errors_and_keep_the_client_connected ; src/engine/hot_loop/mod.rs::silent_auth_link_is_reset_after_the_send_pause ; src/engine/hot_loop/mod.rs::a_stalled_farm_does_not_block_the_other_links
+error,1100,Connectivity between %SHORT_COMPNAME% and %SHORT_PRODNAME% has been lost.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::link_notices_are_errors_and_keep_the_client_connected ; src/engine/hot_loop/mod.rs::silent_auth_link_is_reset_after_the_send_pause
 error,1101,Connectivity between %SHORT_COMPNAME% and %SHORT_PRODNAME% has been restored - data lost.,no test
-error,1102,Connectivity between %SHORT_COMPNAME% and %SHORT_PRODNAME% has been restored - data maintained.,src/api/client/tests.rs::link_notices_are_errors_and_keep_the_client_connected
+error,1102,Connectivity between %SHORT_COMPNAME% and %SHORT_PRODNAME% has been restored - data maintained.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::link_notices_are_errors_and_keep_the_client_connected
 error,1103,FA data saved,no test
 error,1104,Pending to create %s orders: %s,no test
 error,1105,Pending to submit %s orders: %s,no test
 error,1106,Pending to create %s what-if orders: %s,no test
 error,1300,Socket port has been reset and this connection is being dropped. Please reconnect on the new port,no test
-error,2100,API client has been unsubscribed from account data.,src/api/client/tests.rs::an_unsubscribe_answers_2100_and_a_new_subscribe_gets_the_image_again
+error,2100,API client has been unsubscribed from account data.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::an_unsubscribe_answers_2100_and_a_new_subscribe_gets_the_image_again
 error,2101,Unable subscribe to account as the following clients are subscribed to a different account.,no test
 error,2102,Unable to modify this order as its still being processed.,no test
-error,2103,Market data farm connection is broken,src/api/client/tests.rs::link_notices_are_errors_and_keep_the_client_connected ; src/engine/hot_loop/mod.rs::farm_test_request_every_minute_and_reset_without_answer
-error,2104,Market data farm connection is OK,no test
-error,2105,HMDS data farm connection is broken,src/engine/hot_loop/mod.rs::farm_test_request_every_minute_and_reset_without_answer
-error,2106,HMDS data farm connection is OK,no test
-error,2107,HMDS data farm connection is inactive but should be available upon demand.,no test
-error,2108,Market data farm connection is inactive but should be available upon demand.,no test
-error,2109,Order Event Warning,src/engine/hot_loop/order_builder.rs::outside_rth_waits_for_the_definition_then_follows_the_rule ; src/engine/hot_loop/order_builder.rs::outside_rth_without_a_definition_uses_the_empty_list
+error,2103,Market data farm connection is broken,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::link_notices_are_errors_and_keep_the_client_connected ; src/engine/hot_loop/mod.rs::farm_test_request_every_minute_and_reset_without_answer
+error,2104,Market data farm connection is OK,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,2105,HMDS data farm connection is broken,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/mod.rs::farm_test_request_every_minute_and_reset_without_answer
+error,2106,HMDS data farm connection is OK,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,2107,HMDS data farm connection is inactive but should be available upon demand.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,2108,Market data farm connection is inactive but should be available upon demand.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,2109,Order Event Warning,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/order_builder.rs::outside_rth_waits_for_the_definition_then_follows_the_rule ; src/engine/hot_loop/order_builder.rs::outside_rth_without_a_definition_uses_the_empty_list
 error,2110,Connectivity between %SHORT_PRODNAME% and server is broken. It will be restored automatically.,no test
 error,2111,Warning: algo orders will be charged new commission minimum and maximum per %s of trade value.,no test
 error,2113,"Warning: the order size for Bonds (Bills) is entered as a nominal par value of the order, and must be a multiple of the Minimum Size Increme",no test
-error,2114,Calculation of Implied Volatility supported for option securities only,no test
-error,2116,Calculation of Option Price supported for option securities only,no test
-error,2117,Requested top market data is not subscribed. Subscription-independent ticks are still active.,src/api/client/tests.rs::a_top_reject_keeps_the_news_of_a_request
+error,2114,Calculation of Implied Volatility supported for option securities only,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,2116,Calculation of Option Price supported for option securities only,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,2117,Requested top market data is not subscribed. Subscription-independent ticks are still active.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::a_top_reject_keeps_the_news_of_a_request
 error,2118,The Start and/or End Time for algo order %s were not adjusted for the following reason: the trading schedule is not available,no test
-error,2119,Market data farm is connecting,no test
-error,2120,HMDS data farm is connecting,no test
+error,2119,Market data farm is connecting,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,2120,HMDS data farm is connecting,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,2121,Warning: %s product is trading on the basis other than currency price,no test
 error,2122,Warning: %s order(s) are for products trading on the basis other than currency price,no test
 error,2123,Warning: %s trade(s) are for products trading on the basis other than currency price,no test
@@ -907,8 +907,8 @@ error,2147,Duplicated order ids are found: fix orders %s have same id %s,no test
 error,2148,n/a,no test
 error,2149,Number of accounts has changed. New tracked accounts: %s,no test
 error,2150,Invalid position trade derived value,no test
-error,2151,Positions info is not available yet,src/api/client/tests.rs::req_positions_gives_2151_when_the_data_never_comes
-error,2152,n/a,no test
+error,2151,Positions info is not available yet,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::req_positions_gives_2151_when_the_data_never_comes
+error,2152,n/a,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/mod.rs::requests_share_a_book
 error,2153,"Warning: %s is a CFE TAS contract that trades at settlement. It is quoted in, and trades in, a premium equal to the daily settlement price p",no test
 error,2154,"Warning: %s position(s) are for CFE TAS contracts that trade at settlement. It is quoted in, and trades in, a premium equal to the daily set",no test
 error,2155,"Warning: %s order(s) is for a CFE TAS contract(s) that trade(s) at settlement. It is quoted in, and trades in, a premium equal to the daily ",no test
@@ -929,7 +929,7 @@ error,2169,The 'FirmQuoteOnly' order attribute is not supported.,no test
 error,2170,The 'NbboPriceCap' order attribute is not supported.,no test
 error,2172,"<html>The version of the application you are running, %s, needs to be upgraded, as it will be desupported on %s.<br>The minimum supported ve",src/api/client/tests.rs::version_cutoff_warning_reaches_the_client ; src/gateway.rs::first_logon_values_reach_the_api
 error,2173,Precaution of type %sPrice Percentage Value was capped at 100% for %s,no test
-error,2174,You submitted request with date-time attributes without explicit time zone. Please switch to use yyyymmdd-hh:mm:ss in UTC or use instrument ,src/api/client/tests.rs::time_condition_through_place_order
+error,2174,You submitted request with date-time attributes without explicit time zone. Please switch to use yyyymmdd-hh:mm:ss in UTC or use instrument ,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::time_condition_through_place_order
 error,2175,Fixed Income size increment is now using multiples of $1K.,no test
 error,2176,Your API version does not support fractional share size rules. Please upgrade to a minimum version 163. Trimmed value %s to %s,no test
 error,2177,Round allocation to exchange board lot,no test
@@ -939,9 +939,9 @@ error,2180,,no test
 error,2181,The 'OptOutFromSmartRouting' order attribute is not supported.,no test
 error,2182,Algorithm end time is in the past for order %s,no test
 error,2183,Algorithm end time precedes algorithm start time for %s,no test
-error,10000,Cross-currency combo order is not supported.,src/engine/combo.rs::non_guaranteed_needs_two_legs_and_one_currency
+error,10000,Cross-currency combo order is not supported.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/combo.rs::non_guaranteed_needs_two_legs_and_one_currency
 error,10001,Cross-currency VOL order is not supported.,no test
-error,10002,Non-guaranteed order should only have two legs,src/engine/combo.rs::non_guaranteed_needs_two_legs_and_one_currency
+error,10002,Non-guaranteed order should only have two legs,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/combo.rs::non_guaranteed_needs_two_legs_and_one_currency
 error,10005,You are not authorized to trade for a Model.,no test
 error,10006,Missing parent order,no test
 error,10007,"Invalid hedge type. Valid values are D, B, F, or P.",no test
@@ -991,7 +991,7 @@ error,10055,Only LMT or REL+LMT order allows using per-leg prices.,no test
 error,10056,All leg prices are needed when specifying per-leg prices.,no test
 error,10057,Mismatch per-leg price number with combo leg specification.,no test
 error,10058,"Combo per-leg prices are only supported for non-guaranteed smart combo with two legs and feature ""IECOMBOPERLEGPRICE"" enabled.",no test
-error,10059,Mismatch leg contract.,no test
+error,10059,Mismatch leg contract.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10060,Cannot specify Trailing Amount and Trailing Percent at the same time,no test
 error,10061,Invalid Trailing Percent value. Valid values are greater than 0 and less than 100.,no test
 error,10063,Invalid FX hedge order. Hedging contract can only be a currency pair where one of the currencies is the same as in parent order.,no test
@@ -1015,10 +1015,10 @@ error,10083,Display size is smaller than the minimum requirement.,no test
 error,10084,Min. quantity is smaller than the minimum requirement.,no test
 error,10086,Option Exercise can only be cancelled,no test
 error,10087,Manual scale orders are not supported.,no test
-error,10089,Requested market data requires additional subscription for API. || Requested market data requires additional subscription for API. See link ,no test
+error,10089,Requested market data requires additional subscription for API. || Requested market data requires additional subscription for API. See link ,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/mod.rs::requests_share_a_book
 error,10090,Part of requested market data is not subscribed. Subscription-independent ticks are still active.,no test
 error,10091,Part of requested market data requires additional subscription for API. || Part of requested market data requires additional subscription fo,no test
-error,10092,Deep market data is not supported for this combination of security type/exchange,no test
+error,10092,Deep market data is not supported for this combination of security type/exchange,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10093,Order cannot be created because supported order types are not available for conid %s on %s.,no test
 error,10094,API News error,src/api/client/tests.rs::news_tick_refusals_of_a_known_contract ; src/api/client/tests.rs::news_refusal_after_the_lookup_is_reported
 error,10095,ApiVerify error,no test
@@ -1049,7 +1049,7 @@ error,10121,Trading through this Gateway is not allowed.,no test
 error,10122,The the reference/Gateway process is running in Read-Only mode. Trading actions are not allowed.,no test
 error,10123,"For each leg in a combination order, the action (buy or sell) plus the open/close tag must ultimately impact the same type of position: long",no test
 error,10124,Open/Close flag is required,no test
-error,10125,Combos with STK legs are only supported on SMART. Please change the exchange for your BAG contract from '%s' to '%s'.,no test
+error,10125,Combos with STK legs are only supported on SMART. Please change the exchange for your BAG contract from '%s' to '%s'.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10126,<html>The entered offset leads to invalid volatility limit. <br>Please change offset and resubmit.</html>,no test
 error,10127,You can only submit this order by specifying IBALGO destination with an algorithm supporting SEC Rule 10b18. You can only trade through one ,no test
 error,10128,User-defined dividends or interest rates are not supported for PEGSURFVOL orders.,no test
@@ -1066,8 +1066,8 @@ error,10141,Paper trading disclaimer must first be accepted for API connection.,
 error,10142,Real paper-trading has been rejected.,no test
 error,10144,Trading %s for a Model is not supported.,no test
 error,10145,No algorithm is selected. Please select a valid algorithm strategy from the list.,no test
-error,10147,OrderId %s that needs to be cancelled is not found.,src/engine/hot_loop/order_builder.rs::cancel_of_an_unknown_order_is_refused_with_10147
-error,10148,"OrderId %s that needs to be cancelled can not be cancelled, state: %s.",src/engine/hot_loop/order_builder.rs::cancel_of_an_order_with_a_pending_cancel_is_refused_with_10148
+error,10147,OrderId %s that needs to be cancelled is not found.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/order_builder.rs::cancel_of_an_unknown_order_is_refused_with_10147
+error,10148,"OrderId %s that needs to be cancelled can not be cancelled, state: %s.",tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/order_builder.rs::cancel_of_an_order_with_a_pending_cancel_is_refused_with_10148
 error,10149,Invalid order id: %s,no test
 error,10150,Child orders stack is too big. New child orders can't be added.,no test
 error,10151,Market Order Confirmation,no test
@@ -1078,20 +1078,20 @@ error,10155,Invalid soft dollar tier,no test
 error,10156,<html>Unable to transmit an order for contract: %s<br><br>Available position size cannot be validated because other orders for this security,no test
 error,10157,n/a,no test
 error,10158,Offset ammount should be zero,no test
-error,10159,Failed to request matching symbols,no test
+error,10159,Failed to request matching symbols,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10160,"Balances shown includes cash in Sweep Bank Account. To compute the balances in your brokerage account, deduct any balances in the Sweep Bank",no test
 error,10161,"Balances shown includes cash in FDIC Sweep Bank Account. To compute the balances in your brokerage account, deduct any balances in the FDIC ",no test
 error,10162,"* Includes cash in Sweep Bank Account. To compute the balances in your brokerage account, deduct any balances in the Sweep Bank Account.",no test
 error,10163,"* Includes cash in FDIC Sweep Bank Account. To compute the balances in your brokerage account, deduct any balances in the FDIC Sweep Bank Ac",no test
 error,10164,Cash Quantity Order Warning,no test
 error,10166,No valid auto-routing destination was found for this ticket.,no test
-error,10167,Requested market data is not subscribed. Displaying delayed market data...,src/api/client/tests.rs::market_data_rejects_are_reported ; src/api/client/tests.rs::joining_a_delayed_subscription
-error,10168,Requested market data is not subscribed. Delayed market data is not enabled,src/api/client/tests.rs::joining_a_delayed_subscription
-error,10169,%s for %s is already being fetched in ticker id=%s,src/api/client/tests.rs::regulatory_snapshot_delivers_one_batch_then_the_end
-error,10170,No permissions on %s for %s,src/api/client/tests.rs::regulatory_snapshot_without_permission_and_cancel
-error,10171,Unable to fetch %: %s,no test
-error,10172,Failed to request news article,no test
-error,10173,Failed to request historical news,no test
+error,10167,Requested market data is not subscribed. Displaying delayed market data...,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::market_data_rejects_are_reported ; src/api/client/tests.rs::joining_a_delayed_subscription
+error,10168,Requested market data is not subscribed. Delayed market data is not enabled,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::joining_a_delayed_subscription ; src/api/client/tests.rs::a_contract_known_delayed_available_gives_10168_or_goes_delayed
+error,10169,%s for %s is already being fetched in ticker id=%s,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::regulatory_snapshot_delivers_one_batch_then_the_end
+error,10170,No permissions on %s for %s,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::regulatory_snapshot_without_permission_and_cancel
+error,10171,Unable to fetch %: %s,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,10172,Failed to request news article,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,10173,Failed to request historical news,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10174,You must submit all orders from either Manual Ticket Entry panel in Blotter or Create Ticket window.,no test
 error,10175,Duplicate histogram query for tickid,no test
 error,10176,Duplicate head time stamp query for tickid,no test
@@ -1103,12 +1103,12 @@ error,10181,Failed to request live updates (no listener),no test
 error,10182,Failed to request live updates (disconnected),no test
 error,10183,Failed to request PNL,no test
 error,10184,Failed to request PNL single,no test
-error,10185,Failed to cancel PNL (not subscribed),no test
-error,10186,Failed to cancel PNL single (not subscribed),no test
-error,10187,Failed to request historical ticks,src/engine/hot_loop/hmds.rs::historical_ticks_as_recorded
+error,10185,Failed to cancel PNL (not subscribed),tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,10186,Failed to cancel PNL single (not subscribed),tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,10187,Failed to request historical ticks,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/hmds.rs::historical_ticks_as_recorded
 error,10188,Failed to request histogram data,src/engine/hot_loop/hmds.rs::head_timestamp_and_histogram_time_out
-error,10189,Failed to request tick-by-tick data,src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals ; src/api/client/tests.rs::tick_by_tick_reports_by_request_type ; src/engine/hot_loop/mod.rs::a_refused_query_ends_only_its_request
-error,10190,Max number of tick-by-tick requests has been reached,no test
+error,10189,Failed to request tick-by-tick data,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals ; src/api/client/tests.rs::tick_by_tick_reports_by_request_type
+error,10190,Max number of tick-by-tick requests has been reached,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10191,"Manual Order Time is not allowed for %s orders, but required for %s",no test
 error,10192,"Manual Route Time is not allowed for %s orders, but required for done-away orders for '%s'",no test
 error,10193,Chameleon Manual Order Time is not supported for %s orders,no test
@@ -1130,7 +1130,7 @@ error,10208,For stocks non-zero Order Size cannot contain more than %s decimals.
 error,10210,Midprice orders are not supported outside of regular trading hours.,no test
 error,10211,Order Preview,no test
 error,10212,Please review your Order parameters.,no test
-error,10213,API access is restricted on %s for %s,no test
+error,10213,API access is restricted on %s for %s,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10214,Cash Quantity is not allowed for Clear Away or Sell Long orders,no test
 error,10215,n/a,no test
 error,10217,%s is not allowed,no test
@@ -1159,7 +1159,7 @@ error,10239,This order will affect one or more accounts that are flagged because
 error,10240,You must enter a valid Price Cap.,no test
 error,10241,Order Quantity is expressed in monetary terms. Modification is not supported via API. Please use desktop version to revise this order.,no test
 error,10242,Fractional-sized order cannot be modified via API. Please use desktop version to revise this order.,no test
-error,10243,Fractional-sized order cannot be placed via API. Please use desktop version to place this order.,src/api/client/tests.rs::fractional_quantity_is_refused_before_sending ; src/api/client/tests.rs::fractional_quantity_on_a_modify_is_refused_and_keeps_the_order ; src/engine/hot_loop/order_builder.rs::fractional_quantity_is_refused_with_10243
+error,10243,Fractional-sized order cannot be placed via API. Please use desktop version to place this order.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::fractional_quantity_is_refused_before_sending ; src/api/client/tests.rs::fractional_quantity_on_a_modify_is_refused_and_keeps_the_order
 error,10244,Cash Quantity cannot be used for this order,no test
 error,10245,This financial instrument does not support fractional shares trading: %s,no test
 error,10246,This order doesn't support fractional shares trading,no test
@@ -1215,7 +1215,7 @@ error,10295,Only daily resolution supported for Schedule requests,no test
 error,10296,"<html>The Smart Routing features ""Seek Price Improvement"" (aka ""Route to Dark Pools"") and ""Do not route to Dark Pools"" are mutually exclusiv",no test
 error,10297,Not Held attribute is invalid for this order.,no test
 error,10298,Cannot trade an instrument with currency different from model currency,no test
-error,10299,"Expected what to show is %s, please use that instead of %s.",no test
+error,10299,"Expected what to show is %s, please use that instead of %s.",tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10300,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",no test
 error,10301,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",no test
 error,10302,Min trade trade quantity is not allowed for this order,no test
@@ -1229,7 +1229,7 @@ error,10309,Invalid WSH event data request.,no test
 error,10310,"The Solicited field should be used for orders initiated or recommended by the broker or advisor that were approved by the client (by phone, ",no test
 error,10311,This order will be directly routed to %s. Direct routed orders may result in higher trade fees.,no test
 error,10312,The order type Volatility is currently not supported for this combination of financial instrument and account type,no test
-error,10314,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",src/api/client/tests.rs::req_historical_data_refuses_unknown_what_to_show_and_format_date ; src/api/client/tests.rs::time_condition_through_place_order ; src/control/historical.rs::tick_request_checks_as_captured
+error,10314,"%s: The date, time, or time-zone entered is invalid. The correct format is yyyymmdd hh:mm:ss xx/xxxx where yyyymmdd and xx/xxxx are optional",tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::req_historical_data_refuses_unknown_what_to_show_and_format_date ; src/api/client/tests.rs::time_condition_through_place_order
 error,10315,"%s: The time entered is invalid. The correct format is hh:mm:ss. E.g.: 15:00:00 in UTC. No date should be specified, current date is assumed",no test
 error,10316,Trigger Outside RTH was deprecated. Please upgrade your API Client software to submit order with Outside RTH attribute instead.,no test
 error,10317,The Cash Quantity size of %s does not conform to minimum variation of %s for this contract,no test
@@ -1241,8 +1241,8 @@ error,10322,This API request for All is not supported for Dynamic Account Additi
 error,10323,This API request for All is not supported for Dynamic Account Addition,no test
 error,10324,Invalid parameters for OCA group for exchange %s. Overfill Protection is implied.,no test
 error,10325,OCA group is not supported,no test
-error,10326,OCA group revision is not allowed,no test
-error,10327,OCA group type revision is not allowed,no test
+error,10326,OCA group revision is not allowed,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
+error,10327,OCA group type revision is not allowed,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
 error,10328,"Connection lost, order data could not be resolved",no test
 error,10329,This order will be directly routed to %s.,no test
 error,10330,"The expiry date/time format is invalid. The correct format is yyyyMM, yyyyMMdd HH:mm:ss <time-zone> (operator or instrument time zone) or yy",no test
@@ -1252,8 +1252,8 @@ error,10333,Option Exercise at-the-money warning,no test
 error,10334,,no test
 error,10335,,no test
 error,10336,Per-leg executing broker configuration is not supported,no test
-error,10337,Misc options key=%s is invalid in %s request. Valid keys are: %s,src/api/client/tests.rs::req_scanner_subscription_refusals
-error,10338,Misc options value=%s is invalid for key=%s in %s request. Valid values are: %s,src/api/client/tests.rs::req_scanner_subscription_refusals
+error,10337,Misc options key=%s is invalid in %s request. Valid keys are: %s,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::req_scanner_subscription_refusals
+error,10338,Misc options value=%s is invalid for key=%s in %s request. Valid values are: %s,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::req_scanner_subscription_refusals
 error,10339,Setting end date/time for continuous future security type is not allowed,no test
 error,10340,The following order attribute is not supported: %s,no test
 error,10341,Parent order id cannot be modified,no test
@@ -1265,235 +1265,733 @@ error,10346,Market data for %s cannot be delivered because ticker for the same f
 error,10347,"<html>This security has limited liquidity. If you choose to trade this security,<br> there is a heightened risk that you may not be able to ",no test
 error,10348,The 'OptOutFromSmartRouting' order attribute is not supported.,no test
 error,2147483647,,no test
-writer,35=D 131,,no test
-writer,35=D 11,ClOrdID,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 8476,,no test
-writer,35=D 44,Price,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::overnight_orders_are_sent_like_the_reference
-writer,35=D 6879,,no test
-writer,35=D 8262,,no test
-writer,35=D 8019,,no test
-writer,35=D 99,StopPx,src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference ; src/engine/hot_loop/order_builder.rs::peg_bench_request_matches_the_reference_and_signs_a_decrease ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
-writer,35=D 6700,ModelCode,no test
-writer,35=D 8065,PTA allocation flag,no test
-writer,35=D 6160,AccountGroup,no test
-writer,35=D 6159,,no test
-writer,35=D 6240,StrictCreditCheck,no test
-writer,35=D 6164,,no test
-writer,35=D 8303,FA proportional allocation,no test
-writer,35=D 6806,FA auto close off,no test
-writer,35=D 6894,,no test
-writer,35=D 6895,,no test
-writer,35=D 6834,,no test
-writer,35=D 6835,,no test
-writer,35=D 6836,,no test
-writer,35=D 6936,,no test
-writer,35=D 8291,,no test
-writer,35=D 126,ExpireTime,no test
-writer,35=D 432,ExpireDate,no test
-writer,35=D 114,,no test
-writer,35=D 5700,,no test
-writer,35=D 6086,,no test
-writer,35=D 1688,,no test
-writer,35=D 97,,no test
-writer,35=D 6257,AdjustableFlag,no test
-writer,35=D 6261,AdjOrderType,no test
-writer,35=D 6258,AdjTriggerPrice,no test
-writer,35=D 6259,AdjStopPrice,no test
-writer,35=D 6262,AdjStopLimitPrice,no test
-writer,35=D 6260,,no test
-writer,35=D 6117,TrailStopPrice,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame ; src/engine/hot_loop/order_builder.rs::new_stop_orders_are_the_captured_frames
-writer,35=D 8294,,no test
-writer,35=D 5960,AlgoParamValue,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame
-writer,35=D 5958,AlgoParamKey,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame
-writer,35=D 5957,AlgoParamCount,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame
-writer,35=D 9816,Volatility,no test
-writer,35=D 6516,,no test
-writer,35=D 6858,,no test
-writer,35=D 8425,,no test
-writer,35=D 6270,,no test
-writer,35=D 6271,,no test
-writer,35=D 6661,,no test
-writer,35=D 6121,OrderId,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 6119,ClientId,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 6981,,no test
-writer,35=D 6982,,no test
-writer,35=D 6989,,no test
-writer,35=D 38,OrderQty,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 40,OrdType,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 211,PegDifference,src/engine/hot_loop/order_builder.rs::peg_mid_matches_the_reference ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::new_stop_orders_are_the_captured_frames
-writer,35=D 18,ExecInst,src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference ; src/engine/hot_loop/order_builder.rs::peg_bench_request_matches_the_reference_and_signs_a_decrease ; src/engine/hot_loop/order_builder.rs::peg_mid_matches_the_reference
-writer,35=D 55,Symbol,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 200,MaturityMonthYear,no test
-writer,35=D 201,PutOrCall,no test
-writer,35=D 202,StrikePrice,no test
-writer,35=D 167,SecurityType,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 48,SecurityID,no test
-writer,35=D 22,SecurityIDSource,no test
-writer,35=D 231,ContractMultiplier,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 54,Side,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 59,TimeInForce,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 6436,,no test
-writer,35=D 47,,no test
-writer,35=D 8032,,no test
-writer,35=D 6287,,no test
-writer,35=D 100,ExDestination,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 6210,RoutingDest,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 6008,ConId,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 6147,,no test
-writer,35=D 6079,,no test
-writer,35=D 6080,,no test
-writer,35=D 6081,,no test
-writer,35=D 6082,,no test
-writer,35=D 6209,OcaType,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
-writer,35=D 6088,Source,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 6091,WhatIf,src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
-writer,35=D 6406,,no test
-writer,35=D 6107,ParentId,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
-writer,35=D 6128,CondIgnoreRTH,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
-writer,35=D 6151,CondCancelOrder,src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
-writer,35=D 6156,,no test
-writer,35=D 9823,,no test
-writer,35=D 15,Currency,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 6211,OrderRef,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 6238,,src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference
-writer,35=D 6251,,no test
-writer,35=D 207,SecurityExchange,no test
-writer,35=D 6899,,no test
-writer,35=D 6239,,no test
-writer,35=D 6407,,no test
-writer,35=D 6958,,no test
-writer,35=D 8441,,no test
-writer,35=D 8442,,no test
-writer,35=G 11,ClOrdID,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 41,OrigClOrdID,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 8476,,no test
-writer,35=G 44,Price,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_limit_moves_both_prices_like_reference
-writer,35=G 6879,,no test
-writer,35=G 8262,,no test
-writer,35=G 8019,,no test
-writer,35=G 99,StopPx,src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_limit_moves_both_prices_like_reference ; src/engine/hot_loop/order_builder.rs::replace_trailing_amount_matches_reference
-writer,35=G 6700,ModelCode,no test
-writer,35=G 8065,PTA allocation flag,no test
-writer,35=G 6160,AccountGroup,no test
-writer,35=G 6159,,no test
-writer,35=G 6240,StrictCreditCheck,no test
-writer,35=G 6164,,no test
-writer,35=G 8303,FA proportional allocation,no test
-writer,35=G 6806,FA auto close off,no test
-writer,35=G 6894,,no test
-writer,35=G 6895,,no test
-writer,35=G 6834,,no test
-writer,35=G 6835,,no test
-writer,35=G 6836,,no test
-writer,35=G 6936,,no test
-writer,35=G 8291,,no test
-writer,35=G 126,ExpireTime,src/engine/hot_loop/order_builder.rs::replace_good_till_stop_matches_reference ; src/test_support/normalise.rs::order_times_are_kept
-writer,35=G 432,ExpireDate,no test
-writer,35=G 114,,no test
-writer,35=G 5700,,no test
-writer,35=G 6086,,no test
-writer,35=G 1688,,no test
-writer,35=G 97,,no test
-writer,35=G 6257,AdjustableFlag,no test
-writer,35=G 6261,AdjOrderType,no test
-writer,35=G 6258,AdjTriggerPrice,no test
-writer,35=G 6259,AdjStopPrice,no test
-writer,35=G 6262,AdjStopLimitPrice,no test
-writer,35=G 6260,,no test
-writer,35=G 6117,TrailStopPrice,src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_limit_moves_both_prices_like_reference ; src/engine/hot_loop/order_builder.rs::replace_good_till_stop_matches_reference
-writer,35=G 8294,,no test
-writer,35=G 5960,AlgoParamValue,no test
-writer,35=G 5958,AlgoParamKey,no test
-writer,35=G 5957,AlgoParamCount,no test
-writer,35=G 9816,Volatility,no test
-writer,35=G 6516,,no test
-writer,35=G 6858,,no test
-writer,35=G 8425,,no test
-writer,35=G 6121,OrderId,no test
-writer,35=G 6119,ClientId,no test
-writer,35=G 6981,,no test
-writer,35=G 6982,,no test
-writer,35=G 6989,,no test
-writer,35=G 38,OrderQty,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 54,Side,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 40,OrdType,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 211,PegDifference,src/engine/hot_loop/order_builder.rs::replace_trailing_amount_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_trailing_limit_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_trailing_percent_matches_reference
-writer,35=G 18,ExecInst,src/engine/hot_loop/order_builder.rs::replace_trailing_amount_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_trailing_percent_matches_reference ; src/engine/hot_loop/order_builder.rs::peg_bench_replace_restates_the_starting_price
-writer,35=G 55,Symbol,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 200,MaturityMonthYear,no test
-writer,35=G 201,PutOrCall,no test
-writer,35=G 202,StrikePrice,no test
-writer,35=G 167,SecurityType,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 6035,Underlying,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 59,TimeInForce,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 6436,,no test
-writer,35=G 6008,ConId,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 6147,,no test
-writer,35=G 6079,,no test
-writer,35=G 6080,,no test
-writer,35=G 6081,,no test
-writer,35=G 6082,,no test
-writer,35=G 6088,Source,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 6211,OrderRef,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 6238,,src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference
-writer,35=G 8441,,no test
-writer,35=G 8442,,no test
-writer,35=F 11,ClOrdID,no test
-writer,35=F 41,OrigClOrdID,no test
-writer,35=F 8476,,no test
-writer,35=F 38,OrderQty,no test
-writer,35=F 54,Side,no test
-writer,35=F 1,Account,no test
-writer,35=F 6700,ModelCode,no test
-writer,35=F 6008,ConId,no test
-writer,35=F 6088,Source,no test
-writer,35=F 97,,no test
-writer,35=F 6516,,no test
-writer,35=F 6901,NoLegPriceChange,no test
-writer,35=F 6944,CancelSource,no test
-writer,35=F 8187,,no test
-order_request,SubmitLimit,,src/api/client/tests.rs::place_order_limit ; src/engine/context.rs::submit_limit_drains_correctly ; src/engine/context.rs::submit_limit_uses_current_bid
-order_request,SubmitMarket,,src/api/client/tests.rs::place_order_market ; src/api/client/tests.rs::place_order_sell_side ; src/api/client/tests.rs::place_order_short_sell_side
-order_request,SubmitStop,,src/api/client/tests.rs::place_order_empty_tif_stays_plain ; src/api/client/tests.rs::place_order_stop ; src/api/client/tests.rs::stp_order_with_valid_aux_price_succeeds
-order_request,SubmitStopLimit,,src/api/client/tests.rs::place_order_stop_limit ; src/engine/hot_loop/order_builder.rs::stop_orders_carry_the_stop_trigger ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitLimitGtc,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference ; src/engine/hot_loop/order_builder.rs::option_orders_carry_the_option_terms
-order_request,SubmitStopGtc,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitStopLimitGtc,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitLimitIoc,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitLimitFok,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitTrailingStop,,src/api/client/tests.rs::place_order_trailing_stop_carries_initial_trigger ; src/api/client/tests.rs::place_order_trailing_stop_without_trigger_is_unset ; src/api/client/tests.rs::place_order_trailing_stop_amount
-order_request,SubmitTrailingStopLimit,,src/api/client/tests.rs::place_order_trailing_stop_limit ; src/engine/hot_loop/order_builder.rs::trail_limit_with_a_limit_price_sends_44_and_no_offset ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitTrailingStopPct,,src/api/client/tests.rs::place_order_trailing_stop_percent ; src/api/client/tests.rs::trail_order_with_trailing_percent_succeeds ; src/api/client/tests.rs::percent_trail_rounds_to_basis_points
-order_request,SubmitTrailingStopPctEx,,no test
-order_request,SubmitMoc,,src/api/client/tests.rs::place_order_moc ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitLoc,,src/api/client/tests.rs::place_order_loc ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitMit,,src/api/client/tests.rs::place_order_mit ; src/engine/hot_loop/order_builder.rs::stop_orders_carry_the_stop_trigger ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitLit,,src/api/client/tests.rs::place_order_lit ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitBracket,,src/engine/hot_loop/order_builder.rs::bracket_children_link_to_the_parent_like_the_reference ; src/engine/hot_loop/order_builder.rs::new_orders_carry_the_contract_id_after_the_routing_field ; src/engine/hot_loop/order_builder.rs::bracket_stop_child_carries_the_stop_trigger
-order_request,SubmitLimitEx,,src/api/client/tests.rs::place_order_limit_gtc_uses_limit_ex ; src/api/client/tests.rs::place_order_limit_hidden_uses_limit_ex ; src/api/client/tests.rs::customer_account_is_sent_when_the_account_config_allows_it
-order_request,SubmitEx,,src/api/client/tests.rs::place_order_adjustable_stop_child_keeps_parent_oca_and_tif ; src/api/client/tests.rs::place_order_stop_with_parent_and_gtc_uses_submit_ex ; src/api/client/tests.rs::place_order_market_outside_rth_uses_submit_ex
-order_request,SubmitRel,,src/api/client/tests.rs::place_order_rel ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitLimitOpg,,src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitAdaptive,,src/engine/hot_loop/order_builder.rs::adaptive_bracket_child_carries_parent_oca_and_gtc
-order_request,SubmitMtl,,src/api/client/tests.rs::place_order_mtl ; src/api/client/tests.rs::place_order_box_top ; src/engine/context.rs::submit_box_top_reuses_mtl
-order_request,SubmitMktPrt,,src/api/client/tests.rs::place_order_mkt_prt ; src/engine/hot_loop/order_builder.rs::pegged_types_not_in_the_list_are_refused_with_387 ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitStpPrt,,src/api/client/tests.rs::place_order_stp_prt ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitMidPrice,,src/api/client/tests.rs::place_order_midprice ; src/engine/hot_loop/order_builder.rs::midprice_keeps_the_contract_routing ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitSnapMkt,,src/api/client/tests.rs::place_order_snap_mkt ; src/client_core.rs::snap_orders_take_the_offset_from_aux_price ; src/engine/hot_loop/order_builder.rs::snap_orders_carry_the_offset_in_both_price_fields_like_the_reference
-order_request,SubmitSnapMid,,src/api/client/tests.rs::place_order_snap_mid ; src/engine/hot_loop/order_builder.rs::snap_orders_carry_the_offset_in_both_price_fields_like_the_reference ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitSnapPri,,src/api/client/tests.rs::place_order_snap_pri ; src/engine/hot_loop/order_builder.rs::snap_orders_carry_the_offset_in_both_price_fields_like_the_reference ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitPegMkt,,src/api/client/tests.rs::place_order_peg_mkt ; src/engine/hot_loop/order_builder.rs::peg_mkt_is_written_like_the_reference ; src/engine/hot_loop/order_builder.rs::pegged_types_not_in_the_list_are_refused_with_387
-order_request,SubmitPegMid,,src/api/client/tests.rs::place_order_peg_mid ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitAlgo,,src/engine/hot_loop/order_builder.rs::algo_bracket_child_carries_parent_oca_and_gtc ; src/engine/hot_loop/order_builder.rs::plain_algo_order_sends_no_attribute_fields ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
-order_request,SubmitPegBench,,src/engine/context.rs::submit_peg_bench_drains_correctly ; src/engine/hot_loop/order_builder.rs::peg_bench_request_matches_the_reference_and_signs_a_decrease ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitLimitAuc,,src/engine/context.rs::submit_limit_auc_drains_correctly ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitMtlAuc,,src/engine/context.rs::submit_mtl_auc_drains_correctly ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
-order_request,SubmitWhatIf,,src/api/client/tests.rs::place_order_what_if ; src/api/client/tests.rs::what_if_on_a_working_order_id_is_a_preview_not_a_modify ; src/api/client/tests.rs::algo_what_if_is_a_preview
-order_request,SubmitLimitFractional,,src/engine/context.rs::submit_limit_fractional_drains_correctly ; src/engine/hot_loop/order_builder.rs::fractional_quantity_is_refused_with_10243
-order_request,SubmitAdjustableStop,,src/api/client/tests.rs::place_order_adjustable_trail_carries_trailing_amount_and_unit ; src/api/client/tests.rs::place_order_adjustable_trail_percent_unit_passes_through ; src/engine/context.rs::submit_adjustable_stop_drains_correctly
-order_request,Cancel,,src/api/client/tests.rs::cancel_order_sends_cancel_command ; src/api/client/tests.rs::cancel_during_modify_no_panic ; src/api/client/tests.rs::negative_ids_round_trip
-order_request,CancelAll,,src/api/client/tests.rs::req_global_cancel_sends_cancel_all_for_each_instrument ; src/engine/context.rs::cancel_all_drains_correctly ; src/engine/hot_loop/ccp.rs::recovered_order_is_inside_the_global_cancel_range
-order_request,Modify,,src/api/client/tests.rs::place_order_type_aliases ; src/api/client/tests.rs::what_if_on_a_working_order_id_is_a_preview_not_a_modify ; src/api/client/tests.rs::modify_limit_order_price_via_resubmit
+writer,35=D 131,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 11,ClOrdID,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 8476,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 44,Price,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6879,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 8262,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 8019,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 99,StopPx,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference ; src/engine/hot_loop/order_builder.rs::peg_bench_request_matches_the_reference_and_signs_a_decrease
+writer,35=D 6700,ModelCode,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 8065,PTA allocation flag,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6160,AccountGroup,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6159,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6240,StrictCreditCheck,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6164,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 8303,FA proportional allocation,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6806,FA auto close off,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6894,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6895,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6834,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6835,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6836,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6936,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 8291,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 126,ExpireTime,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 432,ExpireDate,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 114,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 5700,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6086,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 1688,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 97,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6257,AdjustableFlag,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6261,AdjOrderType,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6258,AdjTriggerPrice,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6259,AdjStopPrice,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6262,AdjStopLimitPrice,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6260,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6117,TrailStopPrice,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame
+writer,35=D 8294,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 5960,AlgoParamValue,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame
+writer,35=D 5958,AlgoParamKey,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame
+writer,35=D 5957,AlgoParamCount,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order ; src/engine/hot_loop/order_builder.rs::adaptive_stop_is_the_captured_frame
+writer,35=D 9816,Volatility,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6516,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6858,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 8425,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6270,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6271,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6661,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6121,OrderId,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6119,ClientId,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6981,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6982,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6989,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 38,OrderQty,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 40,OrdType,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 211,PegDifference,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::peg_mid_matches_the_reference ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
+writer,35=D 18,ExecInst,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::peg_bench_from_the_api_matches_the_reference ; src/engine/hot_loop/order_builder.rs::peg_bench_request_matches_the_reference_and_signs_a_decrease
+writer,35=D 55,Symbol,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 200,MaturityMonthYear,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 201,PutOrCall,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 202,StrikePrice,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 167,SecurityType,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 48,SecurityID,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 22,SecurityIDSource,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 231,ContractMultiplier,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 54,Side,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 59,TimeInForce,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6436,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 47,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 8032,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6287,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 100,ExDestination,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6210,RoutingDest,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6008,ConId,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6147,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6079,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6080,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6081,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6082,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6209,OcaType,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
+writer,35=D 6088,Source,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6091,WhatIf,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6406,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6107,ParentId,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
+writer,35=D 6128,CondIgnoreRTH,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
+writer,35=D 6151,CondCancelOrder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::new_orders_follow_the_captured_field_order
+writer,35=D 6156,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 9823,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 15,Currency,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6211,OrderRef,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6238,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::a_bracket_child_without_an_oca_type_gets_the_default_one ; src/engine/hot_loop/order_builder.rs::what_if_is_the_real_order_plus_the_preview_flag
+writer,35=D 6251,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 207,SecurityExchange,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6899,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6239,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6407,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 6958,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 8441,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 8442,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 11,ClOrdID,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 41,OrigClOrdID,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 8476,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 44,Price,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 6879,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 8262,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 8019,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 99,StopPx,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_limit_moves_both_prices_like_reference
+writer,35=G 6700,ModelCode,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 8065,PTA allocation flag,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6160,AccountGroup,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6159,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6240,StrictCreditCheck,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6164,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 8303,FA proportional allocation,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6806,FA auto close off,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6894,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6895,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6834,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6835,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6836,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6936,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 8291,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 126,ExpireTime,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_good_till_stop_matches_reference ; src/test_support/normalise.rs::order_times_are_kept
+writer,35=G 432,ExpireDate,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 114,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 5700,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6086,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 1688,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 97,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6257,AdjustableFlag,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6261,AdjOrderType,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6258,AdjTriggerPrice,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6259,AdjStopPrice,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6262,AdjStopLimitPrice,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6260,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6117,TrailStopPrice,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_stop_moves_the_trigger_like_reference ; src/engine/hot_loop/order_builder.rs::replace_stop_limit_moves_both_prices_like_reference
+writer,35=G 8294,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 5960,AlgoParamValue,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 5958,AlgoParamKey,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 5957,AlgoParamCount,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 9816,Volatility,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6516,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6858,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 8425,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6121,OrderId,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6119,ClientId,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6981,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6982,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6989,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 38,OrderQty,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 54,Side,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 40,OrdType,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 211,PegDifference,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_trailing_amount_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_trailing_limit_matches_reference
+writer,35=G 18,ExecInst,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_trailing_amount_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_trailing_percent_matches_reference
+writer,35=G 55,Symbol,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 200,MaturityMonthYear,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 201,PutOrCall,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 202,StrikePrice,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 167,SecurityType,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 6035,Underlying,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 59,TimeInForce,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 6436,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6008,ConId,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 6147,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6079,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6080,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6081,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6082,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 6088,Source,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 6211,OrderRef,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 6238,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::replace_limit_without_outside_rth_matches_reference ; src/engine/hot_loop/order_builder.rs::replace_limit_with_outside_rth_matches_reference
+writer,35=G 8441,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 8442,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 11,ClOrdID,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 41,OrigClOrdID,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 8476,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 38,OrderQty,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 54,Side,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 1,Account,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 6700,ModelCode,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 6008,ConId,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 6088,Source,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 97,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 6516,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 6901,NoLegPriceChange,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 6944,CancelSource,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=F 8187,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=D 1,Account,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+writer,35=G 1,Account,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+order_request,SubmitLimit,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_limit ; src/engine/context.rs::submit_limit_drains_correctly
+order_request,SubmitMarket,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_market ; src/api/client/tests.rs::place_order_sell_side
+order_request,SubmitStop,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_empty_tif_stays_plain ; src/api/client/tests.rs::place_order_stop
+order_request,SubmitStopLimit,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_stop_limit ; src/engine/hot_loop/order_builder.rs::stop_orders_carry_the_stop_trigger
+order_request,SubmitLimitGtc,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference ; src/engine/hot_loop/order_builder.rs::option_orders_carry_the_option_terms
+order_request,SubmitStopGtc,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitStopLimitGtc,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitLimitIoc,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitLimitFok,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitTrailingStop,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_trailing_stop_carries_initial_trigger ; src/api/client/tests.rs::place_order_trailing_stop_without_trigger_is_unset
+order_request,SubmitTrailingStopLimit,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_trailing_stop_limit ; src/engine/hot_loop/order_builder.rs::trail_limit_with_a_limit_price_sends_44_and_no_offset
+order_request,SubmitTrailingStopPct,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_trailing_stop_percent ; src/api/client/tests.rs::trail_order_with_trailing_percent_succeeds
+order_request,SubmitTrailingStopPctEx,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+order_request,SubmitMoc,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_moc ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitLoc,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_loc ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitMit,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_mit ; src/engine/hot_loop/order_builder.rs::stop_orders_carry_the_stop_trigger
+order_request,SubmitLit,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_lit ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitBracket,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::bracket_children_link_to_the_parent_like_the_reference ; src/engine/hot_loop/order_builder.rs::new_orders_carry_the_contract_id_after_the_routing_field
+order_request,SubmitLimitEx,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_limit_gtc_uses_limit_ex ; src/api/client/tests.rs::place_order_limit_hidden_uses_limit_ex
+order_request,SubmitEx,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_adjustable_stop_child_keeps_parent_oca_and_tif ; src/api/client/tests.rs::place_order_stop_with_parent_and_gtc_uses_submit_ex
+order_request,SubmitRel,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_rel ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitLimitOpg,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitAdaptive,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::adaptive_bracket_child_carries_parent_oca_and_gtc
+order_request,SubmitMtl,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_mtl ; src/api/client/tests.rs::place_order_box_top
+order_request,SubmitMktPrt,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_mkt_prt ; src/engine/hot_loop/order_builder.rs::pegged_types_not_in_the_list_are_refused_with_387
+order_request,SubmitStpPrt,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_stp_prt ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitMidPrice,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_midprice ; src/engine/hot_loop/order_builder.rs::midprice_keeps_the_contract_routing
+order_request,SubmitSnapMkt,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_snap_mkt ; src/client_core.rs::snap_orders_take_the_offset_from_aux_price
+order_request,SubmitSnapMid,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_snap_mid ; src/engine/hot_loop/order_builder.rs::snap_orders_carry_the_offset_in_both_price_fields_like_the_reference
+order_request,SubmitSnapPri,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_snap_pri ; src/engine/hot_loop/order_builder.rs::snap_orders_carry_the_offset_in_both_price_fields_like_the_reference
+order_request,SubmitPegMkt,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_peg_mkt ; src/engine/hot_loop/order_builder.rs::peg_mkt_is_written_like_the_reference
+order_request,SubmitPegMid,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_peg_mid ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitAlgo,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/hot_loop/order_builder.rs::algo_bracket_child_carries_parent_oca_and_gtc ; src/engine/hot_loop/order_builder.rs::plain_algo_order_sends_no_attribute_fields
+order_request,SubmitPegBench,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/context.rs::submit_peg_bench_drains_correctly ; src/engine/hot_loop/order_builder.rs::peg_bench_request_matches_the_reference_and_signs_a_decrease
+order_request,SubmitLimitAuc,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/context.rs::submit_limit_auc_drains_correctly ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitMtlAuc,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/context.rs::submit_mtl_auc_drains_correctly ; src/engine/hot_loop/order_builder.rs::both_encoders_write_one_order_like_the_reference
+order_request,SubmitWhatIf,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_what_if ; src/api/client/tests.rs::what_if_on_a_working_order_id_is_a_preview_not_a_modify
+order_request,SubmitLimitFractional,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/context.rs::submit_limit_fractional_drains_correctly ; src/engine/hot_loop/order_builder.rs::fractional_quantity_is_refused_with_10243
+order_request,SubmitAdjustableStop,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_adjustable_trail_carries_trailing_amount_and_unit ; src/api/client/tests.rs::place_order_adjustable_trail_percent_unit_passes_through
+order_request,Cancel,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::cancel_order_sends_cancel_command ; src/api/client/tests.rs::cancel_during_modify_no_panic
+order_request,CancelAll,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::req_global_cancel_sends_cancel_all_for_each_instrument ; src/engine/context.rs::cancel_all_drains_correctly
+order_request,Modify,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_type_aliases ; src/api/client/tests.rs::what_if_on_a_working_order_id_is_a_preview_not_a_modify
+local_rule,"110 dx.a(dy,boolean)@1961",110 build: the absolute price is off the tick of the contract's market rule (server data),src/api/client/tests.rs::algo_refusals_of_20261002_through_place_order ; src/engine/hot_loop/order_builder.rs::a_price_off_the_grid_is_refused_with_110
+local_rule,"145 algo.a.a(pe,OrderCreator)@212",145 build: an algo parameter value is not one of the legal strings of the algo definition (server data); text = the bad value,src/control/algo.rs::refusals_follow_the_definitions
+local_rule,343 bH.q@2674,"343 read: goodTillDate not empty and not a date and time, or its zone is not UTC, the machine's or the contract's trading-hours zone",tests/gw_catalog/refusals.rs::good_till_date_not_a_date
+local_rule,337 bH.q@2497,337 read: goodAfterTime not a date and time (same pattern as 343),tests/gw_catalog/refusals.rs::good_after_time_not_a_date
+local_rule,387 aN.a@5352,"387 rules: order type key not in the type list of the contract and exchange (server data); PEG MID needs PEGMID, PEG BEST needs REL2MID",src/engine/hot_loop/order_builder.rs::pegged_types_not_in_the_list_are_refused_with_387
+local_rule,"441 algo.a.a(AlgoExchanges,...)@649",441 build: algo parameter value refused by the definition (min / max of the server's algo definition),src/control/algo.rs::refusals_follow_the_definitions
+local_rule,"443 algo.a.a(AlgoExchanges,...)@376",443 build: algo parameter name not in the definition's parameter map,src/control/algo.rs::refusals_follow_the_definitions
+local_rule,460 aN.a@13933,460 rules: no trading permission for the account and contract (server data),open #485
+local_rule,2109 a0.c(pe)@190,"2109 rules: warning, order still sent: outsideRth does not apply to the order type and destination; the attribute is removed",src/engine/hot_loop/order_builder.rs::outside_rth_waits_for_the_definition_then_follows_the_rule ; src/engine/hot_loop/order_builder.rs::outside_rth_without_a_definition_uses_the_empty_list
+local_rule,"10243 dx.a(dy,boolean)@244","10243 build: account can trade fractions, STK or WAR, and the quantity is not whole",tests/gw_catalog/refusals.rs::fractional_quantity
+local_rule,10256 aN.a@12583,10256 rules: minQty set and the contract's type list has no PAON,open #485
+local_rule,152 aN.a@12443,152 rules: hidden set and the type list has no HID,open #485
+local_rule,10255 aN.a@12513,10255 rules: display size set and the type list has no ICE,open #485
+local_rule,10257 aN.a@12650,10257 rules: allOrNone set and the type list has no AON,open #485
+local_rule,10266 aN.a@12717,10266 rules: blockOrder set and the type list has no BLOCK,open #485
+local_rule,10267 aN.a@12784,10267 rules: sweepToFill set and the type list has no SWEEP,open #485
+local_rule,10342 aN.a@12851,10342 rules: imbalanceOnly set and the type list has no IMB,open #485
+local_rule,10274 aN.a@12921,10274 rules: postToAts set and the type list has no POSTATS,open #485
+local_rule,168 bH.q@2411,320 read: discretionaryAmt < 0,tests/gw_catalog/refusals.rs::negative_discretionary_amount
+local_rule,313 bH.q@2027,320 read: exception while reading combo leg i,open #485
+local_rule,409 bH.q@5988,320 read: message versions 22 to 25 only: old scaleNumComponents > 0,open #485
+local_rule,429 bH.q@8106,320 read: deltaNeutralContract given without combo legs,open #485
+local_rule,10027 bH.q@2254,320 read: smartComboRoutingParams tag not allowed,tests/gw_catalog/refusals.rs::unknown_combo_routing_tag
+local_rule,10057 bH.q@2126,320 read: numberOfPerLegPrices not 0 and not the number of legs,tests/gw_catalog/refusals.rs::per_leg_prices_not_one_per_leg
+local_rule,10060 bH.q@5607,320 read: trailingPercent and auxPrice both set (for trailing types auxPrice 0 counts as unset),tests/gw_catalog/refusals.rs::trailing_percent_with_a_trailing_amount
+local_rule,10105 bH.q@3586,320 read: side SELL LONG and shortSaleSlot not -100,open #485
+local_rule,10300 bH.q@10407,320 read: manualOrderTime not parseable,open #485
+local_rule,10314 am.a@103,10314 read: time condition string not parseable,tests/gw_catalog/refusals.rs::time_condition_not_a_time
+local_rule,10315 bH.q@6652,320 read: activeStartTime / activeStopTime format,open #485
+local_rule,10316 bH.q@1493,320 read: message version < 24 with the old outsideRth / trigger flag,open #485
+local_rule,10340 bH.q@10972,320 read: externalUserId / manualOrderIndicator from client versions 187 to 189,open #485
+local_rule,321 bH.S@1380,"321 check: side unknown, or SSHORT when the session has neither the institutional flag nor an away clearing",tests/gw_catalog/refusals.rs::short_side_without_the_logon_flags
+local_rule,452 bH.S@449,321 check: exchange empty,open #485
+local_rule,10272 bH.S@232,321 check: duration with TIF not GTD,open #485
+local_rule,10273 bH.S@335,321 check: GTD with both date and duration,open #485
+local_rule,391 bH.S@411,321 check: GTD with neither date nor duration,open #485
+local_rule,10244 bH.S@642,321 check: CRYPTO cash-quantity rule,open #485
+local_rule,10289 bH.S@746,321 check: CRYPTO cash-quantity rule,open #485
+local_rule,10052 bH.S@825,321 check: CRYPTO TIF rule,open #485
+local_rule,10040 bH.S@926,321 check: the broker's ATS exchange with an unknown secType and no conId,open #485
+local_rule,477 bH.S@1031,321 check: CASH pseudo-FX destination not allowed for the account,open #485
+local_rule,498 bH.S@1152,"321 check: side SSHORTX or a short combo leg, feature off",open #485
+local_rule,160 bH.S@1572,"321 check: size 0 (not QUOTE, no FA sizing, not hedge child, no cash quantity)",open #485
+local_rule,355 bH.S@1606,"321 check: quantity out of range (> 999,999,999 or < 0)",tests/gw_catalog/refusals.rs::quantity_out_of_range
+local_rule,321 bH.S@1750,"321 check: STP, STP LMT, STP PRT, TRAIL LIMIT with the stop price unset (TRAIL LIMIT: trailStopPrice)",tests/gw_catalog/refusals.rs::trail_limit_without_a_stop_price ; tests/gw_catalog/refusals.rs::stop_order_without_a_stop_price
+local_rule,146 bH.S@2257,"321 check: triggerMethod not in 0, 1, 2, 3, 4, 7, 8",tests/gw_catalog/refusals.rs::trigger_method_not_the_gateways
+local_rule,314 bH.S@2319,321 check: BAG without legs,tests/gw_catalog/refusals.rs::combo_without_legs
+local_rule,10011 bH.S@2410,321 check: BAG SMART without a smart-combo conId for the currency,tests/gw_catalog/refusals.rs::smart_combo_in_a_currency_without_its_conid
+local_rule,347 bH.S@2548,321 check: SSHORT without a short sale slot object,open #485
+local_rule,347 bH.S@3088,321 check: short side with a slot not 1 or 2,tests/gw_catalog/refusals.rs::short_sale_slot_not_1_or_2
+local_rule,346 bH.S@2702,321 check: short sale slot on a non-institutional account without away clearing,tests/gw_catalog/refusals.rs::short_sale_slot_on_a_non_institutional_session
+local_rule,393 bH.S@2793,321 check: short sale slot on an order that is not a delta hedge,open #485
+local_rule,348 bH.S@2857,321 check: short sale slot on an order that is not SSHORT,open #485
+local_rule,494 bH.S@2921,321 check: exempt code on an order that is not SSHORTX,tests/gw_catalog/refusals.rs::short_sale_exempt_code_on_a_short_sale
+local_rule,353 bH.S@3146,321 check: slot 1 with a location,tests/gw_catalog/refusals.rs::short_sale_slot_1_with_a_location
+local_rule,352 bH.S@3204,321 check: slot 2 without a location,tests/gw_catalog/refusals.rs::short_sale_slot_2_without_a_location
+local_rule,495 bH.S@3272,321 check: exempt code not valid,open #485
+local_rule,411 bH.S@3344,321 check: outsideRth flag not valid for the order,open #485
+local_rule,371 bH.S@3429,"321 check: VOL: volatility missing or negative, or set on a non-VOL order",open #485
+local_rule,367 bH.S@3638,321 check: VOL: volatility type not 1 or 2,open #485
+local_rule,368 bH.S@4394,321 check: VOL: reference price type not 1 or 2,open #485
+local_rule,380 bH.S@3760,321 check: delta hedge order type not allowed,open #485
+local_rule,379 bH.S@3894,321 check: delta hedge order type with an aux price,open #485
+local_rule,372 bH.S@4166,321 check: VOL attribute on a non-VOL order,open #485
+local_rule,373 bH.S@4267,321 check: stock range on an order that is not VOL or relative to stock,open #485
+local_rule,375 bH.S@4561,321 check: negative stock range,open #485
+local_rule,374 bH.S@4681,321 check: low stock range not below the high one,open #485
+local_rule,413 bH.S@4745,321 check: whatIf true and transmit false,tests/gw_catalog/refusals.rs::what_if_without_transmit
+local_rule,457 bH.S@5061,321 check: FA / account rule,open #481
+local_rule,10136 bH.S@5127,321 check: account application not approved (non-FA session),open #481
+local_rule,10132 bH.S@5340,321 check: read-only account,open #485
+local_rule,10226 bH.S@5474,321 check: invalid FA method,open #481
+local_rule,435 bH.S@5567,321 check: multi-account non-FA session and no account,open #481
+local_rule,10265 bH.S@7758,321 check: FA group without a method,open #481
+local_rule,10030 bH.S@5718,321 check: discretionary amount and percent both set,open #485
+local_rule,10061 bH.S@5907,321 check: trailing unit percent and the value < 0 or > 100,tests/gw_catalog/refusals.rs::trailing_percent_above_100
+local_rule,10081 bH.S@5949,321 check: custom SMART strategy invalid,open #485
+local_rule,10087 bH.S@6007,321 check: manual scale order,open #485
+local_rule,10100 bH.S@6174,"321 check: combo hedging strategy, non-cleared account",open #485
+local_rule,10099 bH.S@6287,321 check: parent hedged with a combination order,open #485
+local_rule,10131 bH.S@6352,321 check: RTH flag on BAG or PDC,open #485
+local_rule,10075 bH.S@6455,321 check: PEG BENCH with referenceContractId <= 0,open #485
+local_rule,362 bH.S@6556,321 check: adjusted stop price invalid,open #485
+local_rule,363 bH.S@6626,321 check: adjusted stop-limit price invalid,open #485
+local_rule,403 bH.S@6696,"321 check: STP, STP PRT, STP LMT, TRAIL LIMIT with auxPrice invalid",tests/gw_catalog/refusals.rs::stop_order_with_a_stop_price_not_a_number
+local_rule,361 bH.S@6766,"321 check: MIT, LIT, TRAIL LIT with auxPrice invalid",tests/gw_catalog/refusals.rs::touched_order_without_a_trigger_price
+local_rule,10028 bH.S@6870,"321 check: trailing type, unit amount, trailing amount negative or unset",open #485
+local_rule,321 bH.S@7210,"321 check: TRAIL LIMIT family: both lmtPrice and lmtPriceOffset set, or neither",tests/gw_catalog/refusals.rs::trail_limit_with_both_limit_fields
+local_rule,10210 bH.S@7521,321 check: MIDPRICE with outsideRth true,tests/gw_catalog/refusals.rs::midprice_outside_regular_hours
+local_rule,10274 bH.S@8292,321 check: postToAts out of range,open #485
+local_rule,10315 bH.S@8434,321 check: time algo parameter bad value,open #485
+local_rule,10341 bH.S@8592,321 check: orderId already live with another parentId,open #485
+local_rule,135 bH.S@8805,321 check: parent order id not found,open #485
+local_rule,417 bH.S@5803,321 check: scale initial component size vs total size,open #485
+local_rule,145 bH.S@8849,145 check: customerAccount set and the account config has no CUSTACCT,tests/gw_catalog/refusals.rs::customer_account_without_the_account_config
+local_rule,145 bH.S@8892,145 check: professionalCustomer true and the account config has no CUSTACCT,tests/gw_catalog/refusals.rs::professional_customer_without_the_account_config
+local_rule,10007 bH.r@85,"321 check: hedge type not D, B, F or P",open #485
+local_rule,10006 bH.r@212,321 check: hedge order without a parent,open #485
+local_rule,10010 bH.r@425,321 check: invalid delta hedge,open #485
+local_rule,10009 bH.r@523,321 check: invalid hedge ratio,open #485
+local_rule,10033 bH.r@630,321 check: invalid beta hedge,open #485
+local_rule,10008 bH.r@714,321 check: invalid beta value,open #485
+local_rule,10149 bH.W@44,10149 flow: orderId 0 or unset,open #485
+local_rule,103 bH.W@222,103 flow: orderId not in the order table and not above the highest used,tests/gw_catalog/refusals.rs::a_new_order_id_below_the_highest_used
+local_rule,10268 bH.o@67,10268 flow: eTradeOnly set with the feature on,open #485
+local_rule,10269 bH.o@121,10269 flow: firmQuoteOnly set with the feature on,open #485
+local_rule,10270 bH.o@178,10270 flow: nbboPriceCap set with the feature on,open #485
+local_rule,10348 bH.o@234,10348 flow: optOutSmartRouting set with the feature on,open #485
+local_rule,2168 bH.o@75,"2168 flow: warning, order sent: eTradeOnly set, feature off, attribute cleared",open #485
+local_rule,2169 bH.o@129,"2169 flow: warning, order sent: firmQuoteOnly set, feature off",open #485
+local_rule,2170 bH.o@186,"2170 flow: warning, order sent: nbboPriceCap set, feature off",open #485
+local_rule,2181 bH.o@242,"2181 flow: warning, order sent: optOutSmartRouting set, feature off",open #485
+local_rule,2102 bH.Y@65,"2102 flow: a new order whose id is still pending: warning code, order not sent",open #485
+local_rule,2139 bH.Z@21,"2139 flow: warning, order sent",open #485
+local_rule,2146 bH.Z@56,"2146 flow: warning, order sent: order id too high",open #485
+local_rule,"10318 dx.a(dy,boolean)@462",10318 build: fractional quantity not supported for the contract / order,open #485
+local_rule,"10208 dx.a(dy,boolean)@908",10208 build: stock size with more decimals than allowed,open #485
+local_rule,"10286 dx.a(dy,boolean)@1089",10286 build: TotalQuantity with too many decimals,open #485
+local_rule,"10292 dx.a(dy,boolean)@361",10292 build: order not allowed for this instrument,open #485
+local_rule,"464 dx.a(dy,boolean)@1223",464 build: invalid exchange,open #485
+local_rule,"10080 dx.a(dy,boolean)@1390",10080 build: custom SMART strategy not supported,open #485
+local_rule,"10031 dx.a(dy,boolean)@1764",10031 build: hedge child with a limit price,open #485
+local_rule,"10032 dx.a(dy,boolean)@1803",10032 build: hedge child with a size,open #485
+local_rule,"10063 dx.a(dy,boolean)@1871",10063 build: invalid FX hedge,open #485
+local_rule,"10195 dx.a(dy,boolean)@2111",10195 build: use-parent-price parameters invalid,open #485
+local_rule,"463 dx.a(dy,boolean)@2226",463 build: no valid price,open #485
+local_rule,"388 dx.a(dy,boolean)@2430",388 build: size below the minimum size,open #485
+local_rule,"10083 dx.a(dy,boolean)@2532",10083 build: display size below the minimum,open #485
+local_rule,"10084 dx.a(dy,boolean)@2595",10084 build: min quantity below the minimum,open #485
+local_rule,"10155 dx.a(dy,boolean)@2997",10155 build: invalid soft dollar tier,open #485
+local_rule,"10244 dx.a(dy,boolean)@3153",10244 build: cash quantity not usable for the order,open #485
+local_rule,"10203 dx.a(dy,boolean)@3466",10203 build: FUND buy rule,open #485
+local_rule,"10204 dx.a(dy,boolean)@3864",10204 build: FUND sell rule,open #485
+local_rule,"10206 dx.a(dy,boolean)@4216",10206 build: cash quantity with more than 2 decimals,open #485
+local_rule,"10207 dx.a(dy,boolean)@3956",10207 build: FUND size with more than 3 decimals,open #485
+local_rule,"10302 dx.a(OC,dy,...)@312",10302 build: min trade quantity not allowed,open #485
+local_rule,"10303 dx.a(OC,dy,...)@351",10303 build: min trade quantity not a positive integer,open #485
+local_rule,"439 algo.a.a(AlgoExchanges,...)@36",439 build: no algo definition with this name for the exchanges,src/control/algo.rs::refusals_follow_the_definitions
+local_rule,"442 algo.a.a(AlgoExchanges,...)@150",442 build: algo not allowed for the order,src/control/algo.rs::overnight_and_number_rules
+local_rule,"10314 algo.a.a(AlgoExchanges,...)@596",10314 build: algo time parameter not parseable,open #485
+local_rule,10235 aN.i(pe)@216,10235 rules: MiFID account and no Decision Maker,open #425
+local_rule,402 aN.a@10570,402 rules: conditions not allowed for the instrument,open #485
+local_rule,148 aN.a@10652,"148 rules: conditions on an order type other than LMT, MKT, MIDPRICE, REL, SNAP",open #485
+local_rule,148 aN.a@10734,148 rules: conditionsCancelOrder on an order type other than LMT or MIDPRICE,open #485
+local_rule,398 aN.a@10801,"398 rules: condition trigger error (time condition without time, ...)",open #485
+local_rule,10051 aN.a@2901,10051 rules: unknown order type,open #485
+local_rule,10052 aN.a@2961,10052 rules: TIF not valid,open #485
+local_rule,10070 aN.a@3067,10070 rules: order type not in the type list (server data),open #485
+local_rule,464 aN.a@3478,464 rules: invalid exchange,open #485
+local_rule,10166 aN.a@3468,10166 rules: no auto-routing destination,open #485
+local_rule,412 aN.a@4375,412 rules: contract not tradable,open #485
+local_rule,154 aN.a@9411,154 rules: halted security,open #485
+local_rule,107 aN.a@9434,107 rules: incomplete order,open #485
+local_rule,328 aN.a@9339,328 rules: trailing child on a parent that is not LMT or STP LMT,open #485
+local_rule,401 aN.a@12279,401 rules: OCA name over 64 characters,open #485
+local_rule,461 aN.a,461 rules: size not a multiple of the lot,open #485
+local_rule,10098 aN.p(pe)@115,10098 rules: SNAP order with a negative offset,open #485
+local_rule,2137 OrderChecker$16@186,"2137 rules: closing order larger than the position: warning code, order refused",open #485
+local_rule,10132 aN.a@2163,10132 rules: read-only account,open #485
+local_rule,104 bH.d(pe)@121,"104 modify: modify of an order that is filled, cancelled or with a cancel pending",src/client_core.rs::place_on_a_cancelled_order_id_is_refused ; src/engine/hot_loop/order_builder.rs::modify_of_an_order_the_engine_no_longer_holds_is_refused
+local_rule,105 bH.d(pe)@165,105 modify: modified order does not match the original,tests/gw_catalog/refusals.rs::modify_of_the_side
+local_rule,329 aj.e(pe)@52,329 modify: modify to another order type,tests/gw_catalog/refusals.rs::modify_to_another_order_type
+local_rule,462 aj.f(pe)@62,462 modify: modify to another time in force,src/api/client/tests.rs::modify_must_restate_the_held_overnight_time_in_force
+local_rule,10326 bH.d(pe)@836,10326 modify: OCA group changed,tests/gw_catalog/refusals.rs::modify_of_the_oca_group
+local_rule,10327 bH.d(pe)@905,10327 modify: OCA type changed,tests/gw_catalog/refusals.rs::modify_of_the_oca_type
+local_rule,"10059 bH.c(pe,dl)@1067",10059 modify: combo modify with a leg the working order does not have,tests/gw_catalog/refusals.rs::combo_modify_with_another_leg
+local_rule,10147 bw.a(pe)@179,10147 cancel: cancel of an order id that is not found,tests/gw_catalog/refusals.rs::cancel_of_an_unknown_order
+local_rule,10148 bw.a(pe)@543,10148 cancel: cancel of an order in a state that cannot be cancelled,tests/gw_catalog/refusals.rs::cancel_of_an_order_with_a_cancel_pending
+attribute,1 AccountHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,12 ClientCommissionAmt,decimal,no test
+attribute,13 ClientCommissionType,enum,no test
+attribute,18 AllOrNone,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,22 IdType,custom,no test
+attribute,38 SizeHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,40 OCATypeHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,40 OrderTypeHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,44 LimitPriceHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,48 IdValue,custom,no test
+attribute,54 SideHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,59 TIFHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,63 SettlementTypeAttribute,custom,no test
+attribute,66 ListName,string,no test
+attribute,67 ListIndex,integer,no test
+attribute,68 ListTotal,integer,no test
+attribute,77 OpenCloseAttrib,custom,no test
+attribute,99 AuxPriceHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,99 RelativeOffsetHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,99 TrailingAmountHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,110 MinimumQuantity,integer,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,111 DisplaySize,integer,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,126 EndTimeHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,126 ExpireDateTimeHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,126 GoodTillDateHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,126 GoodTillTimeHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,152 CashQuantityValue,double,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,152 MonetaryValue,double,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,168 GoodAfterTimeAttrib,datetime,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,439 GiveupHolder,holder,no test
+attribute,440 ClearingAccount,string,no test
+attribute,583 OcaGroup,string,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,851 LastLiquidity,integer,no test
+attribute,1028 ManualOrderIndicator,string,no test
+attribute,3950 OptionExerciseSuggestion,custom,no test
+attribute,6004 ExchangeHolder,holder,no test
+attribute,6010 OrderRef,string,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6095 AllocAccount,custom,no test
+attribute,6102 SweepToFill,boolean,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6107 ParentOrderIdHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6115 TriggerMethod,enum,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6117 BarrierPriceHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6117 TouchedTrigger,double,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6122 OptionAcctAttrib,string,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6133 CommissionPolicy,enum,no test
+attribute,6135 Hidden,boolean,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6148 DeltaNeutralDeltaValue,double,no test
+attribute,6149 DeltaNeutralUnderlyingPrice,double,no test
+attribute,6150 DeltaNeutralUnderlyingConid,integer,no test
+attribute,6152 StockRangeLower,double,no test
+attribute,6153 StockRangeUpper,double,no test
+attribute,6154 Delta,double,no test
+attribute,6159 AllocationMethodHolder,holder,no test
+attribute,6160 AllocationGroupHolder,holder,no test
+attribute,6161 AllocationProfileHolder,holder,no test
+attribute,6164 AllocationPercentChangeHolder,holder,no test
+attribute,6205 Rth,boolean,no test
+attribute,6207 CustomerAccount,string,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6211 AlertIDHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6232 PreOpenReroute,boolean,no test
+attribute,6238 AlertActionHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6248 NonGuaranteed,boolean,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6258 AdjustedTriggerPriceHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6259 AdjustedStopPriceHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6260 AdjustedTrailingAmountHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6261 AdjustedOrderTypeHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6262 AdjustedStopLimitPriceHolder,holder,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6268 TrailingUnit,enum,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6269 AdjustableTrailingUnit,enum,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6275 ContinuousUpdate,custom,no test
+attribute,6279 ReferencePriceType,enum,no test
+attribute,6280 VolatilityType,enum,no test
+attribute,6281 TwoSidedCrossOrderId,custom,no test
+attribute,6282 CrossSettlingFirm,custom,no test
+attribute,6283 CrossSettlingAccount,custom,no test
+attribute,6284 CrossOpenClose,custom,no test
+attribute,6285 CrossOptionAccount,custom,no test
+attribute,6286 FacilitationPct,custom,no test
+attribute,6286 OmsFacilitationPct,integer,no test
+attribute,6287 NotHeld,boolean,no test
+attribute,6289 CurrentPrice,double,no test
+attribute,6290 DeltaNeutralOrderType,custom,no test
+attribute,6291 DeltaNeutralAuxPrice,double,no test
+attribute,6365 AllowedOrderQuantity,custom,no test
+attribute,6370 LimitPriceOffset,double,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6377 OldPrice,double,no test
+attribute,6390 CrossType,custom,no test
+attribute,6390 OmsCrossType,enum,no test
+attribute,6391 CrossQuantity,custom,no test
+attribute,6403 ScaleInitialComponentSize,integer,no test
+attribute,6405 ScaleIncrement,double,no test
+attribute,6406 OmsContainer,boolean,no test
+attribute,6407 OmsContainerId,custom,no test
+attribute,6408 TradingToolId,custom,no test
+attribute,6412 NoAllocs,custom,no test
+attribute,6433 OutsideRth,boolean,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6434 HedgeConid,custom,no test
+attribute,6437 IndicativeUnderlyingPrice,custom,no test
+attribute,6438 OverrideCreditCheck,boolean,no test
+attribute,6441 UserName,string,no test
+attribute,6445 ScaleSubsequentComponentSize,integer,no test
+attribute,6446 ScaleProfitOffset,double,no test
+attribute,6447 ScaleLevelPrice,custom,no test
+attribute,6448 ScaleLevelOrderQty,custom,no test
+attribute,6449 ScaleLevelCumQty,custom,no test
+attribute,6450 ScaleNoLevels,custom,no test
+attribute,6458 UserDividendSchedule,custom,no test
+attribute,6459 UserInterestRates,custom,no test
+attribute,6460 ChildHedgeOrder,boolean,no test
+attribute,6461 ScaleAutoReset,boolean,no test
+attribute,6467 PricePrecautionaryPct,double,no test
+attribute,6468 PricePrecautionaryTicks,integer,no test
+attribute,6480 DisableAutoReset,boolean,no test
+attribute,6485 ExistingPosition,integer,no test
+attribute,6486 FilledInitialComponentSize,integer,no test
+attribute,6487 WorkThisOrder,boolean,no test
+attribute,6488 Solicited,custom,no test
+attribute,6489 SolicitedCross,enum,no test
+attribute,6506 Commission,double,no test
+attribute,6516 Acked,integer,no test
+attribute,6519 SoftDollars,custom,no test
+attribute,6521 Deactivated,boolean,no test
+attribute,6524 AllowPreOpenForRth,boolean,no test
+attribute,6526 ScalePriceAdjustInterval,custom,no test
+attribute,6527 ScalePriceAdjustValue,double,no test
+attribute,6531 TrailingKeyAttrib,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6532 ReceiptTime,datetime,no test
+attribute,6534 ScaleMaxQty,integer,no test
+attribute,6535 CancelTicket,boolean,no test
+attribute,6547 AwayDestinationHolder,holder,no test
+attribute,6547 DoneAwayDestination,string,no test
+attribute,6551 OrderRoutedEntity,string,no test
+attribute,6557 FavorPriceImprovements,boolean,no test
+attribute,6559 RoutingStrategyAttribute,enum,no test
+attribute,6562 IgnoreOpeningAuctionForRth,boolean,no test
+attribute,6564 RefFuturesConid,custom,no test
+attribute,6570 AutoRouted,boolean,no test
+attribute,6571 RecentSubmitModifyTime,datetime,no test
+attribute,6580 StockRefPrice,double,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6590 BypassPriceCap,boolean,no test
+attribute,6591 MarketCapPrice,double,no test
+attribute,6595 NoDarkPools,custom,no test
+attribute,6596 AutoCancelDate,custom,no test
+attribute,6602 ClientDisplayOnlyTicketID,custom,no test
+attribute,6605 PostOnly,boolean,no test
+attribute,6609 TradeDisableOverride,boolean,no test
+attribute,6626 AddLiquidity,boolean,no test
+attribute,6628 SLBPositionID,string,no test
+attribute,6636 ProfessionalCustomer,boolean,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6637 ActiveSize,integer,no test
+attribute,6640 CrossPeerId,custom,no test
+attribute,6641 CrossOrderId,custom,no test
+attribute,6642 SLBOrderType,enum,no test
+attribute,6643 SLBRepricePrice,double,no test
+attribute,6644 SLBRepriceSize,integer,no test
+attribute,6645 SLBSettled,boolean,no test
+attribute,6646 SLBUnsolicitedRepriceId,string,no test
+attribute,6649 CrossLiquidityProvider,custom,no test
+attribute,6650 SLBRepriceStatus,enum,no test
+attribute,6664 AccDistFieldsAttrib,custom,no test
+attribute,6665 HedgingType,enum,no test
+attribute,6666 HedgingRatio,double,no test
+attribute,6670 ActiveStartTime,string,no test
+attribute,6671 ActiveEndTime,string,no test
+attribute,6678 Liquidation,boolean,no test
+attribute,6690 MaxHedgingSize,integer,no test
+attribute,6703 UserBeta,double,no test
+attribute,6704 UseParentTradePrice,custom,no test
+attribute,6707 FxConv,boolean,no test
+attribute,6708 AcceptLargeSize,boolean,no test
+attribute,6710 ComparableBonds,string,no test
+attribute,6715 IndicativePriceOrder,boolean,no test
+attribute,6722 ExternalUserId,string,no test
+attribute,6724 RatioFactor,double,no test
+attribute,6732 TicketOwnerEntity,string,no test
+attribute,6733 OrderRoutedEntityType,string,no test
+attribute,6734 TimeZoneAttrib,string,no test
+attribute,6736 AllowedAllocQty,custom,no test
+attribute,6737 ImbalanceOnly,boolean,no test
+attribute,6740 OneToOneComboExecPrice,double,no test
+attribute,6748 IndicativeOrder,boolean,no test
+attribute,6750 AllocQty,custom,no test
+attribute,6769 AcctWorkingIndicator,custom,no test
+attribute,6788 CrossUserName,string,no test
+attribute,6789 CurrentSize,decimal,no test
+attribute,6790 ChildCurrentPrice,double,no test
+attribute,6791 ChildCurrentSize,integer,no test
+attribute,6792 ChildScaleProfitOffset,double,no test
+attribute,6793 OldRoutedEntity,string,no test
+attribute,6794 CrossClearingIntent,custom,no test
+attribute,6795 ScaleRandomizeSize,double,no test
+attribute,6796 OldRoutedEntityType,string,no test
+attribute,6800 ParentRTHAttrib,integer,no test
+attribute,6809 OptionExercise,enum,no test
+attribute,6814 IgnoreNegativeYTW,integer,no test
+attribute,6816 FirstTradeTime,datetime,no test
+attribute,6817 OrigOrderReceiptTime,datetime,no test
+attribute,6819 FailedCreditCheck,boolean,no test
+attribute,6838 LastOBOSession,string,no test
+attribute,6851 LeginPrio,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6852 MaxSegmentSize,integer,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6860 ConvertLeg2ToMktTime1,integer,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6861 ConvertLeg2ToMktTime2,integer,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6862 DiscretionaryPercent,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6863 ComboExecSegmentId,custom,no test
+attribute,6866 ConvertLeg2ToMktOffset,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6867 DontLeginNext,boolean,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6874 DeskRouteDestination,string,no test
+attribute,6876 PriceConditionConid,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6877 ConditionPriceMin,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6878 ConditionPriceMax,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6880 MatchingParentOrderId,custom,no test
+attribute,6881 MatchingLegPriceFromCombo,custom,no test
+attribute,6901 NoLegPriceChange,boolean,no test
+attribute,6936 AllowMixedLots,boolean,no test
+attribute,6938 PeggedChangeAmount,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6939 ReferenceChangeAmount,double,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6941 ReferenceContractId,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6942 ReferenceContractExchange,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,6952 OrderSubmissionMidPrc,double,no test
+attribute,6965 AutoCancelParent,boolean,no test
+attribute,6975 CommissionType,enum,no test
+attribute,6979 OptionPrice,double,no test
+attribute,6998 CancelReasonText,custom,no test
+attribute,8012 OptionExerciseRevocable,enum,no test
+attribute,8015 %TM%AlgoId,string,no test
+attribute,8016 ApiAlgoId,string,no test
+attribute,8020 ReferenceBucketLabel,string,no test
+attribute,8021 DarkPoolOnly,boolean,no test
+attribute,8022 ArrivalBidAsk,custom,no test
+attribute,8023 ArrivalTime,custom,no test
+attribute,8024 ArrivalRTVolume,custom,no test
+attribute,8043 LastTradePrice,double,no test
+attribute,8047 SolicitedByIBroker,enum,no test
+attribute,8048 SolicitedByIBrokerCross,enum,no test
+attribute,8052 VolRandomizeSize,boolean,no test
+attribute,8053 VolRandomizePrice,boolean,no test
+attribute,8059 FAPostTradeAllocation,boolean,no test
+attribute,8060 ParentAllocationClientId,string,no test
+attribute,8061 ParentAllocationTrade,string,no test
+attribute,8062 AvgPriceTime,datetime,no test
+attribute,8083 PreOpenOnly,boolean,no test
+attribute,8086 BypassCreditCheckForTempModels,boolean,no test
+attribute,8089 ExtOperator,string,no test
+attribute,8090 HasCoTradingMatchingSize,boolean,no test
+attribute,8095 NoUnTriggerAfterClose,boolean,no test
+attribute,8111 CancelParentOrderId,string,no test
+attribute,8145 GuardRailsUserSelection,custom,no test
+attribute,8149 IndicativeEV,custom,no test
+attribute,8153 TicketNotes,string,no test
+attribute,8161 ElectronicBlotterTicket,character,no test
+attribute,8165 RelativeDiscretionary,boolean,no test
+attribute,8191 TraderNotes,string,no test
+attribute,8214 TransferredBy,custom,no test
+attribute,8215 TransferAckTime,custom,no test
+attribute,8218 AcceptActionHandling,string,no test
+attribute,8221 OrderAcceptTime,datetime,no test
+attribute,8229 AdvancedErrorOverride,string,no test
+attribute,8231 TicketActionType,custom,no test
+attribute,8232 BlotterAckedTicket,integer,no test
+attribute,8237 MIFIDDecisionMakerAttribute,string,no test
+attribute,8243 MIFIDDecisionAlgo,string,no test
+attribute,8245 CurrentBidAsk,custom,no test
+attribute,8246 CurrentRTVolume,custom,no test
+attribute,8248 RejectedBy,string,no test
+attribute,8252 ChameleonManualOrderTime,datetime,no test
+attribute,8253 ChameleonManualRouteTime,datetime,no test
+attribute,8254 MIFIDExecutionTrader,string,no test
+attribute,8255 MIFIDExecutionAlgo,string,no test
+attribute,8261 BrokerNotes,string,no test
+attribute,8262 UseParentTradePriceForHedgeLimitChild,custom,no test
+attribute,8265 RouteMarketableToBbo,boolean,no test
+attribute,8266 AlgoCurrentPrice,double,no test
+attribute,8267 AlgoCurrentLeavesQty,decimal,no test
+attribute,8268 AlgoNextSliceTime,datetime,no test
+attribute,8291 OptionRollClosingLeg,string,no test
+attribute,8294 ManualOrderType,enum,no test
+attribute,8302 ManualFakeReport,boolean,no test
+attribute,8320 ScaleAdjustmentCap,double,no test
+attribute,8326 TargetPercentOfNlv,double,no test
+attribute,8339 UsePriceMgmtAlgo,custom,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,8340 CommissionToAway,decimal,no test
+attribute,8341 CommissionToAwayType,enum,no test
+attribute,8352 ManualOrderCancelTime,custom,no test
+attribute,8354 ChameleonManualOrderCancelTime,custom,no test
+attribute,8355 ChameleonManualRouteCancelTime,custom,no test
+attribute,8378 PhysicalDeliveryType,enum,no test
+attribute,8402 Duration,integer,no test
+attribute,8403 MidOffsetAtWhole,double,no test
+attribute,8404 MidOffsetAtHalf,double,no test
+attribute,8405 PostToAts,custom,no test
+attribute,8409 TaxOptimizerId,string,no test
+attribute,8411 MinCompeteSize,integer,no test
+attribute,8412 CompeteAgainstBestOffset,custom,no test
+attribute,8415 MinTradeQtyAttribute,integer,no test
+attribute,8417 ChamOpenOverrideAttribute,boolean,no test
+attribute,8429 BrokerToClientAssignedNumber,string,no test
+attribute,8452 CustomerBondReportView,integer,no test
+attribute,8458 CustomerBondReportURL,string,no test
+attribute,8467 ReallocOptions,integer,no test
+attribute,8468 RelatedRequestCount,integer,no test
+attribute,8469 RelatedRequestAccount,string,no test
+attribute,8470 RelatedRequestId,string,no test
+attribute,8471 ModelRebalanceType,integer,no test
+attribute,8474 CreditCheckOnAccountLvl,boolean,no test
+attribute,8475 OLStrategyAttrib,custom,no test
+attribute,8479 ModelSubtype,integer,no test
+attribute,8485 EuCostReportData,string,no test
+attribute,8486 PdfTemplateMeta,string,no test
+attribute,8487 EuCostReportId,string,no test
+attribute,8488 EuCostReportWhatIfOrderId,string,no test
+attribute,8501 CompeteAgainstExternal,boolean,no test
+attribute,8506 OcaGroupTotalQuantity,integer,no test
+attribute,8513 DirectedByCustomer,boolean,no test
+attribute,8517 OLGlobalConfigurationAttrib,custom,no test
+attribute,8534 IncludeOvernight,boolean,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,8535 MuniBondDiscountDisclaimerView,integer,no test
+attribute,8536 MuniBondDiscountThreshold,string,no test
+attribute,8571 EUIlliqSecUserSelection,custom,no test
+attribute,8572 NoIdealModelChange,boolean,no test
+attribute,8582 JpMFundProspectusAck,boolean,no test
+attribute,8585 JpMFundProspectusData,string,no test
+attribute,9801 BlockOrder,custom,no test
+attribute,9813 DiscretionaryAmt,double,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers
+attribute,9816 Volatility,custom,no test
+attribute,9822 PercentOffset,double,no test
+attribute,99994 PostToAtsDurationUnit,custom,no test
+attribute,99995 DurationUnit,custom,no test
 eclient,req_positions,,src/api/client/tests.rs::req_positions_delivers_via_wrapper ; src/api/client/tests.rs::req_positions_empty_still_calls_position_end ; src/api/client/tests.rs::req_positions_sends_a_row_on_each_change
 eclient,req_pnl,,src/api/client/tests.rs::a_pnl_request_subscribes_the_quotes_it_needs_and_cancels_them_after ; src/api/client/tests.rs::a_pnl_quote_becomes_the_callers_subscription ; src/api/client/tests.rs::no_internal_quote_when_the_caller_has_one
 eclient,cancel_pnl,,src/api/client/tests.rs::a_pnl_request_subscribes_the_quotes_it_needs_and_cancels_them_after ; src/api/client/tests.rs::a_pnl_quote_becomes_the_callers_subscription ; tests/scenarios.rs::cancel_pnl_stops_dispatch
@@ -1544,7 +2042,7 @@ eclient,cancel_order_by_perm_id,,no test
 eclient,req_global_cancel,,src/api/client/tests.rs::req_global_cancel_sends_cancel_all_for_each_instrument ; src/api/client/tests.rs::req_global_cancel_no_instruments_no_commands ; tests/error_edge_concurrency.rs::req_global_cancel_no_instruments_no_commands
 eclient,req_ids,,src/api/client/tests.rs::req_ids_calls_wrapper
 eclient,next_order_id,,src/api/client/tests.rs::next_order_id_monotonic
-eclient,req_open_orders,,src/api/client/tests.rs::open_order_requests_wait_for_the_order_replay
+eclient,req_open_orders,,src/api/client/tests.rs::a_forgotten_order_leaves_without_callbacks ; src/api/client/tests.rs::open_order_requests_wait_for_the_order_replay
 eclient,req_all_open_orders,,src/api/client/tests.rs::open_order_requests_wait_for_the_order_replay
 eclient,req_completed_orders,,tests/scenarios.rs::req_completed_orders_drains_and_dispatches ; tests/scenarios.rs::req_completed_orders_empty_still_fires_end
 eclient,req_auto_open_orders,,no test
