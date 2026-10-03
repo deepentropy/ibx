@@ -1943,6 +1943,16 @@ pub enum ControlCommand {
     CancelHeadTimestamp { req_id: ReqId },
     /// Search for matching symbols via auth connection.
     FetchMatchingSymbols { req_id: ReqId, pattern: String },
+    /// Option chain parameters of an underlying via auth connection
+    /// (ibx#440), after the local checks.
+    FetchSecDefOptParams {
+        req_id: ReqId,
+        underlying_symbol: String,
+        fut_fop_exchange: String,
+        /// The type as the reference reads it: FUT, STK, IND or CASH.
+        underlying_sec_type: String,
+        underlying_con_id: i64,
+    },
     /// Request available exchanges for market depth.
     FetchMktDepthExchanges,
     /// Request scanner parameter XML via historical data connection.

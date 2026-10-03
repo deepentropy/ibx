@@ -443,6 +443,16 @@ impl EClient {
             wrapper.symbol_samples(req_id, &descriptions);
         }
 
+        // Option chains → one security_definition_option_parameter per row,
+        // then the end (ibx#440).
+        for (req_id, rows) in self.shared.reference.drain_option_chains() {
+            for r in &rows {
+                wrapper.security_definition_option_parameter(req_id, &r.exchange, r.underlying_con_id,
+                    &r.trading_class, &r.multiplier, &r.expirations, &r.strikes);
+            }
+            wrapper.security_definition_option_parameter_end(req_id);
+        }
+
         // Scanner params
         for xml in self.shared.reference.drain_scanner_params() {
             wrapper.scanner_parameters(&xml);

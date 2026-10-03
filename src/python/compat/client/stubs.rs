@@ -102,21 +102,6 @@ impl EClient {
         Ok(())
     }
 
-    // ── Option Chain Parameters (stub) ──
-
-    #[pyo3(signature = (req_id, underlying_symbol, fut_fop_exchange="", underlying_sec_type="STK", underlying_con_id=0))]
-    fn req_sec_def_opt_params(
-        &self,
-        req_id: i64,
-        underlying_symbol: &str,
-        fut_fop_exchange: &str,
-        underlying_sec_type: &str,
-        underlying_con_id: i64,
-    ) -> PyResult<()> {
-        let _ = (req_id, underlying_symbol, fut_fop_exchange, underlying_sec_type, underlying_con_id);
-        log::warn!("req_sec_def_opt_params: not yet implemented in engine");
-        Ok(())
-    }
 
     // ── News Bulletins ──
 

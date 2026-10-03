@@ -42,6 +42,7 @@ it always comes after the `fix_in` that caused it.
 | `20260928` | pre-open | premarket_order_types: STP / TRAIL with outsideRth, IOC / FOK, TIF values, customerAccount refusal, OPG, delayed market data, modify of a filled order |
 | `20260928` | RTH | rth_order_types: TRAIL MIT / TRAIL LIT / PASSV REL / RPI / PEG BEST / PEG BENCH, overnight cases in RTH, SPY call spread (combo, refused 460) |
 | `20260928` | RTH | depth_single_iex: AAPL depth on IEX alone, 5 rows (slice: the request, its farm entries, acknowledgements, definitions, depth frames and the first 610 depth callbacks) |
+| `20260928` | RTH | option_chain_aapl: reqSecDefOptParams AAPL STK (slice of i192_f2_option_future_lookup: the request, the derivative query, the stock leg lookup, the chain query and answer, the 41 rows and the end) |
 | `20260928` | RTH | depth_smart: AAPL SmartDepth, 50 rows (slice: first 862 callbacks, with tail deletes), then AXTI SmartDepth, 10 rows (whole) |
 | `20261002` | pre-open | b1_432_hist_ticks: historical ticks of AAPL and EUR.USD (start, end, both, no zone, refusals, AGGTRADES); b1_429_keep_up_to_date: four keepUpToDate requests, their updates, cancels and refusals; b1_431_hist_format: formatDate 1 and 2 bars, historicalDataEnd strings, head timestamps, cancel of an unknown request |
 

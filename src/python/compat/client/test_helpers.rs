@@ -468,6 +468,18 @@ impl EClient {
         Ok(())
     }
 
+    /// Push one option chain answer (ibx#440): rows of (exchange, conId,
+    /// trading class, multiplier, expirations, strikes).
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    fn _test_push_option_chain(&self, req_id: ReqId, rows: Vec<(String, i64, String, String, Vec<String>, Vec<f64>)>) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        shared.reference.push_option_chains(req_id, rows.into_iter().map(|(exchange, underlying_con_id, trading_class, multiplier, expirations, strikes)| {
+            crate::control::optparams::OptionChain { exchange, underlying_con_id, trading_class, multiplier, expirations, strikes }
+        }).collect());
+        Ok(())
+    }
+
     /// Push account state into SharedState.
     #[doc(hidden)]
     #[pyo3(signature = (net_liquidation=0.0, buying_power=0.0, daily_pnl=0.0, unrealized_pnl=0.0, realized_pnl=0.0))]

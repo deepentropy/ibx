@@ -655,6 +655,8 @@ pub struct ReferenceState {
     contract_details: Mutex<Vec<(ReqId, ContractDefinition)>>,
     contract_details_end: Mutex<Vec<ReqId>>,
     matching_symbols: Mutex<Vec<(ReqId, Vec<SymbolMatch>)>>,
+    /// Option chain answers (ibx#440): the rows of a request, then its end.
+    option_chains: Mutex<Vec<(ReqId, Vec<crate::control::optparams::OptionChain>)>>,
     scanner_params: Mutex<Vec<String>>,
     scanner_data: Mutex<Vec<(ReqId, ScannerResult)>>,
     historical_news: Mutex<Vec<(ReqId, Vec<NewsHeadline>, bool)>>,
@@ -727,6 +729,12 @@ pub struct ReferenceState {
     max_backfill_years: AtomicU32,
     /// The logon feature list has NIGHTLY: no years limit (ibx#421).
     nightly: AtomicBool,
+    /// The logon feature list has NOMAGNFIX: option chain strikes as the
+    /// server sends them (ibx#440).
+    no_magnifier_fix: AtomicBool,
+    /// The logon feature list has ISLAND2NASDAQ: NASDAQ is not left out of
+    /// the option chains (ibx#440).
+    island_to_nasdaq: AtomicBool,
 }
 
 impl ReferenceState {
@@ -776,6 +784,9 @@ impl ReferenceState {
             matching_symbols_allowed: AtomicBool::new(true),
             max_backfill_years: AtomicU32::new(0),
             nightly: AtomicBool::new(false),
+            no_magnifier_fix: AtomicBool::new(false),
+            island_to_nasdaq: AtomicBool::new(false),
+            option_chains: Mutex::new(Vec::new()),
         }
     }
 
@@ -801,6 +812,16 @@ impl ReferenceState {
 
     pub fn drain_matching_symbols(&self) -> Vec<(ReqId, Vec<SymbolMatch>)> {
         self.matching_symbols.lock().unwrap().drain(..).collect()
+    }
+
+    /// Option chain answers (ibx#440): the rows of each request, for one
+    /// SECURITY_DEFINITION_OPTION_PARAMETER each, then its end.
+    pub fn drain_option_chains(&self) -> Vec<(ReqId, Vec<crate::control::optparams::OptionChain>)> {
+        self.option_chains.lock().unwrap().drain(..).collect()
+    }
+
+    #[doc(hidden)] pub fn push_option_chains(&self, req_id: ReqId, rows: Vec<crate::control::optparams::OptionChain>) {
+        self.option_chains.lock().unwrap().push((req_id, rows));
     }
 
     pub fn drain_scanner_params(&self) -> Vec<String> {
@@ -1186,6 +1207,14 @@ impl ReferenceState {
     #[doc(hidden)] pub fn set_api_features(&self, features: crate::control::logon::ApiFeatures) {
         self.matching_symbols_allowed.store(features.matching_symbols, Ordering::Relaxed);
         self.nightly.store(features.nightly, Ordering::Relaxed);
+        self.no_magnifier_fix.store(features.no_magnifier_fix, Ordering::Relaxed);
+        self.island_to_nasdaq.store(features.island_to_nasdaq, Ordering::Relaxed);
+    }
+
+    /// The option chain features of the logon (ibx#440): NOMAGNFIX and
+    /// ISLAND2NASDAQ.
+    pub fn option_chain_features(&self) -> (bool, bool) {
+        (self.no_magnifier_fix.load(Ordering::Relaxed), self.island_to_nasdaq.load(Ordering::Relaxed))
     }
 
     #[doc(hidden)] pub fn set_max_backfill_years(&self, years: i32) {

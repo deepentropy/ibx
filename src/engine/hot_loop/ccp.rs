@@ -259,6 +259,8 @@ pub(crate) struct CcpState {
     pub(crate) next_internal_secdef_id: u32,
     /// Option calculations and their model inputs (ibx#442).
     pub(crate) optcalc: super::optcalc::OptCalc,
+    /// Option chain parameter requests and their answers (ibx#440).
+    pub(crate) optparams: super::optparams::OptParams,
     /// conIds we've already auto-fetched secdef for, keyed by con_id (dedup).
     pub(crate) auto_fetched_conids: HashSet<i64>,
     /// Scanner results awaiting per-conId contract-detail enrichment.
@@ -597,6 +599,7 @@ impl CcpState {
             disconnected: false,
             pending_secdef: Vec::new(),
             optcalc: super::optcalc::OptCalc::default(),
+            optparams: super::optparams::OptParams::default(),
             pending_lookups: Vec::new(),
             pending_continuous: Vec::new(),
             market_rule_by_exchange: std::collections::HashMap::new(),
@@ -905,6 +908,16 @@ impl CcpState {
                             }
                         }
                         "186" => self.handle_matching_symbols_reply(msg, &parsed, shared),
+                        // Option chain parameters (ibx#440): the derivative
+                        // answer and the chain answer.
+                        "5" => {
+                            let connected = !self.disconnected;
+                            self.optparams.underlying_reply(msg, ccp_conn, connected, hb, shared);
+                        }
+                        "139" => {
+                            let connected = !self.disconnected;
+                            self.optparams.chain_reply(msg, ccp_conn, connected, hb, shared);
+                        }
                         "60" => self.handle_commission_report(&parsed, shared),
                         // An algo definition answer (ibx#263).
                         "54" => if let Some(xml) = parsed.get(&6118) {
@@ -2320,6 +2333,9 @@ impl CcpState {
             }
         }
         let Some(rid) = response_req_id else { return };
+        // The lookup of an option chain leg (ibx#440): not a user reply.
+        let connected = !self.disconnected;
+        if self.optparams.leg_reply(&rid, ccp_conn, connected, hb, shared) { return; }
 
         let fanout_idx = self.pending_fanout.iter()
             .position(|p| p.outstanding.iter().any(|(id, _, _)| *id == rid));
@@ -2766,6 +2782,9 @@ impl CcpState {
 
     pub(crate) fn handle_disconnect(&mut self, _context: &mut Context, _event_tx: &Option<Sender<Event>>) {
         self.disconnected = true;
+        // The derivative answers go with the link, as in the reference
+        // (ibx#440).
+        self.optparams.connection_lost();
         // Matching-symbols requests end without an answer and are not sent
         // again, as in the reference (ibx#369); its send permit is given
         // back, and the waiting request stays.

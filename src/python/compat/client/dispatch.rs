@@ -689,6 +689,19 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "symbol_samples", (req_id, list.as_any()));
         }
 
+        // Option chains -> securityDefinitionOptionParameter per row, with
+        // sets as the reference client, then the end (ibx#440).
+        for (req_id, rows) in shared.reference.drain_option_chains() {
+            for r in &rows {
+                let expirations = pyo3::types::PySet::new(py, &r.expirations)?;
+                let strikes = pyo3::types::PySet::new(py, &r.strikes)?;
+                call_wrapper!(self.wrapper, py, "security_definition_option_parameter",
+                    (req_id, r.exchange.as_str(), r.underlying_con_id, r.trading_class.as_str(), r.multiplier.as_str(),
+                     expirations.as_any(), strikes.as_any()));
+            }
+            call_wrapper!(self.wrapper, py, "security_definition_option_parameter_end", (req_id,));
+        }
+
         // Drain depth exchanges -> mktDepthExchanges
         if let Some(depth_exchanges) = shared.reference.drain_depth_exchanges() {
             let descriptions: Vec<Py<DepthMktDataDescriptionPy>> = depth_exchanges.iter().map(|d| {

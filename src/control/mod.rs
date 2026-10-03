@@ -8,6 +8,7 @@ pub mod historical;
 pub mod logon;
 pub mod news;
 pub mod optcalc;
+pub mod optparams;
 pub mod regsnapshot;
 pub mod scanner;
 pub mod snapshot;

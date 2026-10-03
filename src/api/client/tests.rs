@@ -2111,6 +2111,52 @@ fn req_matching_symbols_sends_fetch() {
     }
 }
 
+// ibx#440: a checked request goes to the engine with the type as the
+// reference reads it; a refused one gets 321 and nothing is sent.
+#[test]
+fn req_sec_def_opt_params_checks_then_sends() {
+    let (client, rx, _shared) = test_client();
+    client.req_sec_def_opt_params(1, "AAPL", "", "cs", 265598).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::FetchSecDefOptParams { req_id, underlying_symbol, fut_fop_exchange, underlying_sec_type, underlying_con_id } => {
+            assert_eq!((req_id, underlying_symbol.as_str(), fut_fop_exchange.as_str(), underlying_sec_type.as_str(), underlying_con_id),
+                (1, "AAPL", "", "STK", 265598));
+        }
+        cmd => panic!("expected FetchSecDefOptParams, got {:?}", cmd),
+    }
+    client.req_sec_def_opt_params(2, "AAPL", "", "OPT", 265598).unwrap();
+    client.req_sec_def_opt_params(3, "ES", "", "FUT", 495512563).unwrap();
+    client.req_sec_def_opt_params(4, "AAPL", "", "STK", -1).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing is sent for a refused request");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let errors: Vec<String> = w.events.iter().filter(|e| e.starts_with("error:")).cloned().collect();
+    assert_eq!(errors, [
+        "error:2:321:Error validating request.-'cp' : cause - Invalid security type - OPT",
+        "error:3:321:Error validating request.-'cp' : cause - Missing exchange for security type FUT",
+        "error:4:321:Error validating request.-'cp' : cause - Invalid contract id",
+    ]);
+}
+
+// ibx#440: one callback per row, then the end; an empty answer gives the
+// end only.
+#[test]
+fn option_chain_rows_then_end() {
+    let (client, _rx, shared) = test_client();
+    shared.reference.push_option_chains(5, vec![crate::control::optparams::OptionChain {
+        exchange: "SMART".into(), underlying_con_id: 265598, trading_class: "AAPL".into(), multiplier: "100".into(),
+        expirations: vec!["20261016".into(), "20261120".into()], strikes: vec![5.0, 297.5],
+    }]);
+    shared.reference.push_option_chains(6, vec![]);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, [
+        "sec_def_opt_param:5:SMART:265598:AAPL:100:20261016,20261120:[5.0, 297.5]",
+        "sec_def_opt_param_end:5",
+        "sec_def_opt_param_end:6",
+    ]);
+}
+
 // ibx#439: the pattern is checked and trimmed as the reference.
 #[test]
 fn req_matching_symbols_checks_and_trims_the_pattern() {
