@@ -1066,6 +1066,11 @@ impl HotLoop {
         for conn in [&mut self.farm_conn, &mut self.ccp_conn, &mut self.hmds_conn].into_iter().flatten() {
             conn.set_queued_writes(true);
         }
+        // The links are known from the start: one lost in the first pass
+        // is reported too (ibx#488: the first look took it as the start).
+        if self.links.is_none() {
+            self.links = Some(self.current_links());
+        }
 
         while self.running {
             self.context.loop_iterations += 1;
@@ -2905,6 +2910,8 @@ fn extract_text_tag(msg: &[u8], tag: u32) -> Option<String> {
 
 #[cfg(test)]
 mod combo_tests;
+#[cfg(test)]
+mod robustness_tests;
 
 #[cfg(test)]
 mod tests {
