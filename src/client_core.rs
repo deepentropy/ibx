@@ -2277,8 +2277,10 @@ impl ClientCore {
         }
         let mut reqs = self.account_summaries.lock().unwrap();
         let cancel_sr_id = reqs.iter().position(|r| r.req_id == req_id).map(|i| reqs.remove(i).sr_id);
+        // The reference's 322 has the rule as its cause (`jextend.dL.a(jextend.b2)@38-72`, ibx#485).
         if reqs.len() >= ACCOUNT_SUMMARY_MAX {
-            return Err((322, "Maximum number of account summary requests exceeded; desubscribe to previous request first".into()));
+            return Err((322, "Error processing request.-'b2' : cause - Maximum number of account summary requests \
+                exceeded; desubscribe to previous request first".into()));
         }
         let sr_id = format!("SR.Socket.{}", self.next_account_summary.fetch_add(1, Ordering::Relaxed));
         reqs.push(AccountSummaryRequest { req_id, sr_id: sr_id.clone(), ledger });
@@ -2354,11 +2356,12 @@ impl ClientCore {
     }
 
     /// Start req_account_updates_multi (ibx#476). A request id already
-    /// running gives 322, as the reference.
+    /// running gives 322 with the duplicate id text as its cause, as the
+    /// reference (`jextend.bj.o()@13-36`; ibx#485).
     pub fn subscribe_account_multi(&self, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool) -> Result<(), (i64, String)> {
         let mut subs = self.account_multi.lock().unwrap();
         if subs.iter().any(|m| m.req_id == req_id) {
-            return Err((322, "Duplicate ticker id".into()));
+            return Err((322, "Error processing request.-'bj' : cause - Duplicate ticker id".into()));
         }
         subs.push(AccountMultiSubscription {
             req_id, account: account.to_string(), model_code: model_code.to_string(),

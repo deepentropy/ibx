@@ -4885,7 +4885,8 @@ fn account_summary_refusals_and_limit() {
         "error:1:321:Error validating request.-'b2' : cause - Tags cannot be null",
         "error:2:321:Error validating request.-'b2' : cause - Group name cannot be null",
         "error:3:321:Error validating request.-'b2' : cause - Group name is invalid",
-        "error:6:322:Maximum number of account summary requests exceeded; desubscribe to previous request first",
+        "error:6:322:Error processing request.-'b2' : cause - Maximum number of account summary requests exceeded; \
+         desubscribe to previous request first",
     ]);
     assert_eq!(summary_sent(&rx), [
         "sub:SR.Socket.1:NetLiquidation:All",
@@ -5049,7 +5050,7 @@ fn account_updates_multi_carries_its_request_id_and_model_code() {
         "acct_end:9001",
         "acct:9002::CashBalance:899133.4993:BASE",
         "acct_end:9002",
-        "error:9001:322:Duplicate ticker id",
+        "error:9001:322:Error processing request.-'bj' : cause - Duplicate ticker id",
     ]);
 
     // A change: a row for each request that has the key, no end.
