@@ -15,6 +15,7 @@ const TESTED_CONTROL_COMMANDS: &[&str] = &[
     "SubscribeTbt",
     "UnsubscribeTbt",
     "SubscribeNews",
+    "UnsubscribeNews", // rust_api_gt api_shared_requests_live (ibx#444)
     "UpdateParam",
     "Order",
     "RegisterInstrument",
