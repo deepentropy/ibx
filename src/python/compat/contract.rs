@@ -2138,6 +2138,12 @@ impl BarData {
         format!("BarData(date='{}', O={}, H={}, L={}, C={}, V={})",
             self.date, self.open, self.high, self.low, self.close, self.volume)
     }
+
+    // ibapi camelCase aliases (ibx#487: the official client library's names)
+    #[getter(barCount)]
+    fn get_bar_count_alias(&self) -> i32 { self.bar_count }
+    #[setter(barCount)]
+    fn set_bar_count_alias(&mut self, v: i32) { self.bar_count = v; }
 }
 
 // ── ContractDetails ──
@@ -2450,6 +2456,60 @@ impl Execution {
     #[new]
     #[pyo3(signature = ())]
     fn new() -> Self { Self::default() }
+
+    // ibapi camelCase aliases (ibx#487: the official client library's names)
+    #[getter(execId)]
+    fn get_exec_id_alias(&self) -> String { self.exec_id.clone() }
+    #[setter(execId)]
+    fn set_exec_id_alias(&mut self, v: String) { self.exec_id = v; }
+    #[getter(acctNumber)]
+    fn get_acct_number_alias(&self) -> String { self.acct_number.clone() }
+    #[setter(acctNumber)]
+    fn set_acct_number_alias(&mut self, v: String) { self.acct_number = v; }
+    #[getter(permId)]
+    fn get_perm_id_alias(&self) -> i64 { self.perm_id }
+    #[setter(permId)]
+    fn set_perm_id_alias(&mut self, v: i64) { self.perm_id = v; }
+    #[getter(clientId)]
+    fn get_client_id_alias(&self) -> i64 { self.client_id }
+    #[setter(clientId)]
+    fn set_client_id_alias(&mut self, v: i64) { self.client_id = v; }
+    #[getter(orderId)]
+    fn get_order_id_alias(&self) -> i64 { self.order_id }
+    #[setter(orderId)]
+    fn set_order_id_alias(&mut self, v: i64) { self.order_id = v; }
+    #[getter(cumQty)]
+    fn get_cum_qty_alias(&self) -> f64 { self.cum_qty }
+    #[setter(cumQty)]
+    fn set_cum_qty_alias(&mut self, v: f64) { self.cum_qty = v; }
+    #[getter(avgPrice)]
+    fn get_avg_price_alias(&self) -> f64 { self.avg_price }
+    #[setter(avgPrice)]
+    fn set_avg_price_alias(&mut self, v: f64) { self.avg_price = v; }
+    #[getter(orderRef)]
+    fn get_order_ref_alias(&self) -> String { self.order_ref.clone() }
+    #[setter(orderRef)]
+    fn set_order_ref_alias(&mut self, v: String) { self.order_ref = v; }
+    #[getter(evRule)]
+    fn get_ev_rule_alias(&self) -> String { self.ev_rule.clone() }
+    #[setter(evRule)]
+    fn set_ev_rule_alias(&mut self, v: String) { self.ev_rule = v; }
+    #[getter(evMultiplier)]
+    fn get_ev_multiplier_alias(&self) -> f64 { self.ev_multiplier }
+    #[setter(evMultiplier)]
+    fn set_ev_multiplier_alias(&mut self, v: f64) { self.ev_multiplier = v; }
+    #[getter(modelCode)]
+    fn get_model_code_alias(&self) -> String { self.model_code.clone() }
+    #[setter(modelCode)]
+    fn set_model_code_alias(&mut self, v: String) { self.model_code = v; }
+    #[getter(lastLiquidity)]
+    fn get_last_liquidity_alias(&self) -> i32 { self.last_liquidity }
+    #[setter(lastLiquidity)]
+    fn set_last_liquidity_alias(&mut self, v: i32) { self.last_liquidity = v; }
+    #[getter(pendingPriceRevision)]
+    fn get_pending_price_revision_alias(&self) -> bool { self.pending_price_revision }
+    #[setter(pendingPriceRevision)]
+    fn set_pending_price_revision_alias(&mut self, v: bool) { self.pending_price_revision = v; }
 }
 
 // ── SmartComponent ──
@@ -2538,6 +2598,28 @@ impl CommissionAndFeesReport {
     #[new]
     #[pyo3(signature = ())]
     fn new() -> Self { Self::default() }
+
+    // ibapi camelCase aliases (ibx#487: the official client library's names)
+    #[getter(execId)]
+    fn get_exec_id_alias(&self) -> String { self.exec_id.clone() }
+    #[setter(execId)]
+    fn set_exec_id_alias(&mut self, v: String) { self.exec_id = v; }
+    #[getter(commissionAndFees)]
+    fn get_commission_and_fees_alias(&self) -> f64 { self.commission_and_fees }
+    #[setter(commissionAndFees)]
+    fn set_commission_and_fees_alias(&mut self, v: f64) { self.commission_and_fees = v; }
+    #[getter(realizedPNL)]
+    fn get_realized_pnl_alias(&self) -> f64 { self.realized_pnl }
+    #[setter(realizedPNL)]
+    fn set_realized_pnl_alias(&mut self, v: f64) { self.realized_pnl = v; }
+    #[getter(yield_)]
+    fn get_yield_amount_alias(&self) -> f64 { self.yield_amount }
+    #[setter(yield_)]
+    fn set_yield_amount_alias(&mut self, v: f64) { self.yield_amount = v; }
+    #[getter(yieldRedemptionDate)]
+    fn get_yield_redemption_date_alias(&self) -> String { self.yield_redemption_date.clone() }
+    #[setter(yieldRedemptionDate)]
+    fn set_yield_redemption_date_alias(&mut self, v: String) { self.yield_redemption_date = v; }
 }
 
 // ── ContractDescription ──
