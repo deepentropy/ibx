@@ -458,9 +458,9 @@ impl Order {
             all_or_none: self.all_or_none,
             // Valid trigger-method codes only (ibx#223): the raw `as u8`
             // cast wrapped the gateway's -1 (Unknown) to 255, and
-            // out-of-range codes went to the wire verbatim. Anything
-            // unrecognized coerces to 0 (default = not emitted), matching
-            // the gateway's unknown->default handling.
+            // out-of-range codes went to the wire verbatim. The reference
+            // refuses an unknown code before sending (321, ibx#263); here
+            // it coerces to 0, the default.
             trigger_method: match self.trigger_method {
                 0..=4 | 7 | 8 => self.trigger_method as u8,
                 _ => 0,

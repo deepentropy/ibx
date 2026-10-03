@@ -3508,15 +3508,6 @@ impl ClientCore {
 
         let order_type = order.order_type.to_uppercase();
 
-        // These order types carry a type-specific instruction in the same
-        // slot all-or-none uses, so the two cannot be combined.
-        if order.all_or_none && matches!(order_type.as_str(), "TRAIL" | "REL") {
-            return Err(format!(
-                "all_or_none is not supported with {} orders",
-                order.order_type
-            ));
-        }
-
         // An algorithm name is checked against the server's definitions
         // (439, ibx#263); one ibx cannot send fails when the order is built.
         // An algo order is checked as the order type it rides (ibx#263).
@@ -3985,6 +3976,13 @@ impl ClientCore {
         // A quantity below 0 or above 999,999,999 (ibx#263).
         if order.total_quantity < 0.0 || order.total_quantity > 999_999_999.0 {
             return refuse("Order size does not conform to market rule.");
+        }
+        // A trigger method that is not one of the reference's (ibx#263,
+        // `jextend.bH.S()@2257`, error 146's text): 0 default, 1 double
+        // bid/ask, 2 last, 3 double last, 4 bid/ask, 7 last or bid/ask,
+        // 8 midpoint.
+        if !matches!(order.trigger_method, 0..=4 | 7 | 8) {
+            return refuse("Invalid trigger method");
         }
         // A what-if with transmit off (ibx#462, `jextend.bH.S()@4692`;
         // captured 02/10/2026, with this check's own 'v' in the text).

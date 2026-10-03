@@ -738,17 +738,54 @@ fn place_order_unknown_tif_is_rejected() {
     assert!(rx.try_recv().is_err());
 }
 
+// ibx#263: the reference takes all-or-none on any order type; its
+// instruction field carries the type letter, then G (`jclient.pe.gI()`).
+// ibx refused it on TRAIL and REL.
 #[test]
-fn place_order_all_or_none_trail_is_rejected() {
+fn place_order_all_or_none_trail_and_rel_are_sent() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL".into(),
-        aux_price: 2.0, all_or_none: true, ..Default::default()
-    };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
-    assert!(err.to_string().contains("all_or_none"), "got: {}", err);
-    assert!(rx.try_recv().is_err());
+    for (id, order_type, aux_price) in [(1, "TRAIL", 2.0), (2, "REL", 0.05)] {
+        let order = Order {
+            action: "SELL".into(), total_quantity: 1.0, order_type: order_type.into(),
+            aux_price, all_or_none: true, ..Default::default()
+        };
+        client.place_order(id, &spy(), &order).unwrap();
+        match rx.try_recv() {
+            Ok(ControlCommand::Order(OrderRequest::SubmitEx { attrs, .. })) => assert!(attrs.all_or_none, "{order_type}"),
+            other => panic!("{order_type}: {other:?}"),
+        }
+    }
+}
+
+// ibx#263: a trigger method the reference does not have is refused before
+// sending, 321 with error 146's text (`jextend.bH.S()@2257`).
+#[test]
+fn place_order_unknown_trigger_method_is_refused() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    for (id, trigger_method) in [(3, -1), (4, 5), (5, 6), (6, 9)] {
+        let order = Order {
+            action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
+            aux_price: 2.0, trigger_method, ..Default::default()
+        };
+        client.place_order(id, &spy(), &order).unwrap();
+    }
+    assert!(rx.try_iter().all(|c| !matches!(c, ControlCommand::Order(_))), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    for id in 3..=6 {
+        let want = format!("error:{id}:321:Error validating request.-'bH' : cause - Invalid trigger method");
+        assert!(w.events.contains(&want), "{:?}", w.events);
+    }
+    for trigger_method in [0, 1, 2, 3, 4, 7, 8] {
+        let order = Order {
+            action: "SELL".into(), total_quantity: 1.0, order_type: "STP".into(),
+            aux_price: 2.0, trigger_method, ..Default::default()
+        };
+        client.place_order(10 + trigger_method as i64, &spy(), &order).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(ControlCommand::Order(_))), "{trigger_method}");
+    }
 }
 
 // ── ibx#215: oca_type carried and coerced ──
