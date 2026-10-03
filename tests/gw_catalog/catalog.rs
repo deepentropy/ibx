@@ -65,9 +65,9 @@ pub fn error_codes() -> BTreeMap<i64, ErrorCode> {
         let messages = if r["message"].is_empty() {
             Vec::new()
         } else {
-            r["message"].split(" || ").map(str::to_string).collect()
+            r["message"].split(" || ").map(|m| m.replace("\\n", "\n")).collect()
         };
-        let captured = Some(r["captured_text"].clone()).filter(|t| !t.is_empty());
+        let captured = Some(r["captured_text"].replace("\\n", "\n")).filter(|t| !t.is_empty());
         (r["code"].parse().unwrap(), ErrorCode { messages, wrapping: r["wrapping"].clone(), captured })
     }).collect()
 }
@@ -89,7 +89,7 @@ pub fn local_rules() -> Vec<LocalRule> {
         id: r["id"].clone(),
         code: r["code"].parse().unwrap(),
         api_code: r["api_code"].parse().unwrap(),
-        text: r["text"].clone(),
+        text: r["text"].replace("\\n", "\n"),
     }).collect()
 }
 

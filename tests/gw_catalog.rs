@@ -9,3 +9,5 @@ mod catalog;
 mod harness;
 #[path = "gw_catalog/writers.rs"]
 mod writers;
+#[path = "gw_catalog/errors.rs"]
+mod errors;
