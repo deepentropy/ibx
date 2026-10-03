@@ -131,30 +131,56 @@ fn read_or_create_hwid() -> String {
             return format!("{:0>8}", v);
         }
     }
-    let path = hwid_path();
-    if let Ok(s) = std::fs::read_to_string(&path) {
-        let s = s.trim();
-        if !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit()) {
-            return format!("{:0>8}", s);
-        }
+    hwid_at(&hwid_path())
+}
+
+/// The machine_id persisted at `path`, created there when missing.
+fn hwid_at(path: &std::path::Path) -> String {
+    if let Some(id) = read_hwid(path) {
+        return id;
     }
     let mut buf = [0u8; 4];
     rand::rng().fill_bytes(&mut buf);
     let new_hwid = format!("{:08x}", u32::from_be_bytes(buf));
-    let _ = std::fs::write(&path, &new_hwid);
+    // The file is created only when no other caller created it first (two
+    // logons on a fresh machine at once, or two tests): the first id
+    // written is the machine's, and every caller returns it.
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            let _ = file.write_all(new_hwid.as_bytes());
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            for _ in 0..100 {
+                if let Some(id) = read_hwid(path) {
+                    return id;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            // A file without an id: replaced, as before.
+            let _ = std::fs::write(path, &new_hwid);
+        }
+        Err(_) => {}
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444));
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444));
     }
     #[cfg(windows)]
     {
         let _ = std::process::Command::new("attrib")
             .args(["+H", "+R"])
-            .arg(&path)
+            .arg(path)
             .status();
     }
     new_hwid
+}
+
+/// The 8-hex machine_id in the file at `path`, if it holds one.
+fn read_hwid(path: &std::path::Path) -> Option<String> {
+    let s = std::fs::read_to_string(path).ok()?;
+    let s = s.trim();
+    (!s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("{:0>8}", s))
 }
 
 /// Generate hardware info string: `{machine_id}|{MAC}`.
@@ -1716,6 +1742,31 @@ mod tests {
     // created once — see read_or_create_hwid, ib-agent#132), so repeated calls
     // must return the SAME id. This test previously asserted the pre-#132
     // behavior (random id per call) and failed once a hwid file existed.
+    // Callers that find no machine id at the same moment all get the one
+    // id written first.
+    #[test]
+    fn concurrent_first_calls_agree_on_the_machine_id() {
+        let dir = std::env::temp_dir().join(format!("ibx-hwid-{}-{}", std::process::id(), rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hwid");
+        let ids: Vec<String> = (0..8)
+            .map(|_| { let p = path.clone(); std::thread::spawn(move || hwid_at(&p)) })
+            .collect::<Vec<_>>()
+            .into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(ids.iter().all(|id| id == &ids[0]), "{ids:?}");
+        assert_eq!(read_hwid(&path).as_deref(), Some(ids[0].as_str()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("attrib").args(["-H", "-R"]).arg(&path).status();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn hw_info_machine_id_is_stable_across_calls() {
         let info1 = get_hw_info();
