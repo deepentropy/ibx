@@ -50,6 +50,7 @@ REQUESTS = {
     "REQ_HISTORICAL_DATA": "HistoricalDataRequest",
     "CANCEL_HISTORICAL_DATA": "CancelHistoricalData",
     "REQ_HEAD_TIMESTAMP": "HeadTimestampRequest",
+    "CANCEL_HEAD_TIMESTAMP": "CancelHeadTimestamp",
     "REQ_HISTORICAL_TICKS": "HistoricalTicksRequest",
     "REQ_SEC_DEF_OPT_PARAMS": "SecDefOptParamsRequest",
     "REQ_MATCHING_SYMBOLS": "MatchingSymbolsRequest",
@@ -275,6 +276,18 @@ def account_slice():
     return keep
 
 
+def hmds_slice(farms=("ushmds",)):
+    """Historical requests: the API side, the historical farm's queries and
+    answers (no heartbeats), the contract lookups."""
+    def keep(r):
+        if r["kind"] == "api":
+            return True
+        if r["conn"] == "CCP":
+            return r.get("msg_type") in ("c", "d")
+        return r["conn"] in farms and r.get("msg_type") not in ("0", "1")
+    return keep
+
+
 L1_IN = ("Q", "L", "P", "G", "3", "d")
 L1_OUT = ("V", "c")
 ORDER_TYPES = ("D", "G", "F", "8", "c", "d")
@@ -293,6 +306,8 @@ def specs(cap: Path):
     yield (s28 / "premarket_order_types.jsonl", "l1_aapl_preopen_delayed", "decode-l1",
            md_slice([(21956, 22700)]),
            "AAPL (and BMW, 7203 on other farms) with delayed data asked, then AAPL with real-time data, before the open")
+    yield (b1 / "b1_431_hist_format.jsonl", "hmds_bars_and_head_timestamp", "decode-hmds", hmds_slice(),
+           "AAPL bars with formatDate 1 and 2, head timestamps and cancels, before the open")
     yield (s26 / "account_summary.jsonl", "account_summary", "decode-account", account_slice(),
            "reqAccountSummary of four tags and $LEDGER:ALL, its rows and ends, its cancel (market closed)")
     for name in ("lmt_cancel", "modify_cancelled", "bracket", "oca_group"):

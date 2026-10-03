@@ -25,9 +25,11 @@ pub(crate) struct Session {
     pub shared: Arc<SharedState>,
     pub farm: Peer,
     pub ccp: Peer,
+    pub hmds: Peer,
     /// Every message the engine sent on each link, in order.
     pub farm_out: Vec<Fields>,
     pub ccp_out: Vec<Fields>,
+    pub hmds_out: Vec<Fields>,
     /// The callbacks ibx gave, one line each (see [`Recorder`]).
     pub callbacks: Vec<String>,
 }
@@ -44,8 +46,9 @@ impl Session {
         };
         let (farm_conn, farm) = pair();
         let (ccp_conn, ccp) = pair();
+        let (hmds_conn, hmds) = pair();
         let (mut engine, control_tx) = HotLoop::with_connections(
-            shared.clone(), None, ACCOUNT.into(), farm_conn, ccp_conn, None, None);
+            shared.clone(), None, ACCOUNT.into(), farm_conn, ccp_conn, Some(hmds_conn), None);
         // The paper logon of the recordings (captures/0928, 28/09/2026):
         // features PRICEMGMT and SCALEUSLOT, 6247=demo, 8146 exclusions.
         engine.set_scale_us_lots(true);
@@ -58,7 +61,10 @@ impl Session {
             "NZD:136000435,SEK:136000429,USD:28812380",
         ));
         let client = EClient::from_parts(shared.clone(), control_tx, std::thread::spawn(|| {}), ACCOUNT.into());
-        Self { engine, client, shared, farm, ccp, farm_out: Vec::new(), ccp_out: Vec::new(), callbacks: Vec::new() }
+        Self {
+            engine, client, shared, farm, ccp, hmds,
+            farm_out: Vec::new(), ccp_out: Vec::new(), hmds_out: Vec::new(), callbacks: Vec::new(),
+        }
     }
 
     /// Call the API client; the engine runs on this thread meanwhile (a
@@ -86,6 +92,7 @@ impl Session {
         }
         self.farm_out.extend(self.farm.messages().iter().map(|m| parse_fields(m)));
         self.ccp_out.extend(self.ccp.messages().iter().map(|m| parse_fields(m)));
+        self.hmds_out.extend(self.hmds.messages().iter().map(|m| parse_fields(m)));
         let mut rec = Recorder::default();
         self.client.process_msgs(&mut rec);
         self.callbacks.extend(rec.lines);
@@ -95,6 +102,7 @@ impl Session {
         }
         self.farm_out.extend(self.farm.messages().iter().map(|m| parse_fields(m)));
         self.ccp_out.extend(self.ccp.messages().iter().map(|m| parse_fields(m)));
+        self.hmds_out.extend(self.hmds.messages().iter().map(|m| parse_fields(m)));
     }
 
     pub fn send_farm(&mut self, raw: &[u8]) {
@@ -104,6 +112,15 @@ impl Session {
 
     pub fn send_ccp(&mut self, raw: &[u8]) {
         self.ccp.send_raw(raw);
+        self.settle();
+    }
+
+    /// A message to the engine on the historical link, compressed as the
+    /// farm sends it.
+    pub fn send_hmds_message(&mut self, fields: &Fields) {
+        let f: Vec<(u32, &str)> = fields.iter().filter(|(t, _)| !matches!(t, 8 | 9 | 10 | 34))
+            .map(|(t, v)| (*t, v.as_str())).collect();
+        self.hmds.send_fixcomp(&f);
         self.settle();
     }
 }
@@ -145,6 +162,18 @@ impl Wrapper for Recorder {
     }
     fn account_summary_end(&mut self, req_id: i64) {
         self.lines.push(format!("accountSummaryEnd|{req_id}"));
+    }
+    fn historical_data(&mut self, req_id: i64, b: &crate::api::types::BarData) {
+        self.lines.push(format!(
+            "historicalData|{req_id}|{}|{}|{}|{}|{}|{}|{}|{}",
+            b.date, n(b.open), n(b.high), n(b.low), n(b.close), b.volume, n(b.wap), b.bar_count,
+        ));
+    }
+    fn historical_data_end(&mut self, req_id: i64, start: &str, end: &str) {
+        self.lines.push(format!("historicalDataEnd|{req_id}|{start}|{end}"));
+    }
+    fn head_timestamp(&mut self, req_id: i64, ts: &str) {
+        self.lines.push(format!("headTimestamp|{req_id}|{ts}"));
     }
     fn smart_components(&mut self, req_id: i64, components: &[crate::types::SmartComponent]) {
         let mut rows: Vec<&crate::types::SmartComponent> = components.iter().collect();

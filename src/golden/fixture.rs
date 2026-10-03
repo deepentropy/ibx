@@ -116,6 +116,17 @@ pub(crate) fn canonical(cb: &Value) -> Option<String> {
             i(1), s(2), n(num(&a[3])), n(num(&a[4])), n(num(&a[5])), perm(i(6)), i(7), n(num(&a[8])), i(9), s(10), n(num(&a[11])),
         ),
         "openOrder" => open_order_line(i(1), &a[2], &a[3], &a[4]),
+        "historicalData" => {
+            let b = &a[2];
+            let d = |k: &str| n(num(&b[k]));
+            format!(
+                "historicalData|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                i(1), b["date"].as_str().unwrap_or(""), d("open"), d("high"), d("low"), d("close"),
+                num(&b["volume"]) as i64, d("wap"), b["barCount"].as_i64().unwrap_or(0),
+            )
+        }
+        "historicalDataEnd" => format!("historicalDataEnd|{}|{}|{}", i(1), s(2), s(3)),
+        "headTimestamp" => format!("headTimestamp|{}|{}", i(1), s(2)),
         "accountSummary" => format!("accountSummary|{}|{}|{}|{}|{}", i(1), s(2), s(3), s(4), s(5)),
         "accountSummaryEnd" => format!("accountSummaryEnd|{}", i(1)),
         "smartComponents" => {

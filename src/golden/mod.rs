@@ -15,6 +15,7 @@
 
 mod account;
 mod fixture;
+mod hmds;
 mod l1;
 mod orders;
 mod replay;
