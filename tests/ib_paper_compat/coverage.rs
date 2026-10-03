@@ -25,6 +25,7 @@ const TESTED_CONTROL_COMMANDS: &[&str] = &[
     "FetchContractDetails",
     "CancelHeadTimestamp",
     "FetchMatchingSymbols",
+    "FetchSecDefOptParams", // rust_api_gt api_option_chains_live (ibx#440)
     "FetchScannerParams",
     "SubscribeScanner",
     "CancelScanner",
