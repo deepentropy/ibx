@@ -1977,56 +1977,148 @@ impl BarData {
 
 // ── ContractDetails ──
 
-/// ibapi-compatible ContractDetails class.
-#[pyclass(from_py_object)]
-pub struct ContractDetails {
-    /// Stored as `Py<Contract>` so the getter hands Python THE contained
-    /// object, not a copy: with a plain field, `details.contract.con_id = x`
-    /// mutated a temporary clone and was a silent no-op (ibx#230).
+/// ibapi-compatible IneligibilityReason class (ibx#436).
+#[pyclass(from_py_object, name = "IneligibilityReason")]
+#[derive(Clone, Debug, Default)]
+pub struct IneligibilityReasonPy {
     #[pyo3(get, set)]
-    pub contract: Py<Contract>,
+    pub id_: String,
     #[pyo3(get, set)]
-    pub market_name: String,
-    #[pyo3(get, set)]
-    pub min_tick: f64,
-    #[pyo3(get, set)]
-    pub order_types: String,
-    #[pyo3(get, set)]
-    pub valid_exchanges: String,
-    #[pyo3(get, set)]
-    pub long_name: String,
-    #[pyo3(get, set)]
-    pub last_trade_date: String,
-    #[pyo3(get, set)]
-    pub multiplier: String,
-    #[pyo3(get, set)]
-    pub market_rule_id: i64,
-    #[pyo3(get, set)]
-    pub strike: f64,
-    #[pyo3(get, set)]
-    pub right: String,
-    #[pyo3(get, set)]
-    pub primary_exchange: String,
-    #[pyo3(get, set)]
-    pub local_symbol: String,
-    #[pyo3(get, set)]
-    pub trading_class: String,
-    #[pyo3(get, set)]
-    pub stock_type: String,
-    #[pyo3(get, set)]
-    pub category: String,
-    #[pyo3(get, set)]
-    pub country: String,
-    #[pyo3(get, set)]
-    pub isin: String,
-    #[pyo3(get, set)]
-    pub min_size: f64,
-    #[pyo3(get, set)]
-    pub trading_hours: String,
-    #[pyo3(get, set)]
-    pub liquid_hours: String,
-    #[pyo3(get, set)]
-    pub time_zone_id: String,
+    pub description: String,
+}
+
+#[pymethods]
+impl IneligibilityReasonPy {
+    #[new]
+    #[pyo3(signature = (id_="".to_string(), description="".to_string()))]
+    fn new(id_: String, description: String) -> Self {
+        Self { id_, description }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("IneligibilityReason(id_='{}', description='{}')", self.id_, self.description)
+    }
+}
+
+/// Generates the ibapi-compatible ContractDetails class: every field but
+/// the contract and the two lists, with its clone and its default.
+macro_rules! contract_details_class {
+    ($($field:ident: $ty:ty = $default:expr),* $(,)?) => {
+        /// ibapi-compatible ContractDetails class, with the fields of a
+        /// contract row and of a bond row (ibx#436). Unset decimals are
+        /// `sys.float_info.max`.
+        #[pyclass(from_py_object)]
+        pub struct ContractDetails {
+            /// Stored as `Py<Contract>` so the getter hands Python THE contained
+            /// object, not a copy: with a plain field, `details.contract.con_id = x`
+            /// mutated a temporary clone and was a silent no-op (ibx#230).
+            #[pyo3(get, set)]
+            pub contract: Py<Contract>,
+            /// `TagValue` items (ISIN, CUSIP).
+            #[pyo3(get, set)]
+            pub sec_id_list: Vec<Py<PyAny>>,
+            /// `IneligibilityReason` items.
+            #[pyo3(get, set)]
+            pub ineligibility_reason_list: Vec<Py<PyAny>>,
+            $(
+                #[pyo3(get, set)]
+                pub $field: $ty,
+            )*
+        }
+
+        impl Clone for ContractDetails {
+            /// `Py<Contract>` clones by reference under the GIL: the copy shares the
+            /// same Python Contract object, matching Python assignment semantics.
+            fn clone(&self) -> Self {
+                Python::attach(|py| Self {
+                    contract: self.contract.clone_ref(py),
+                    sec_id_list: self.sec_id_list.iter().map(|o| o.clone_ref(py)).collect(),
+                    ineligibility_reason_list: self.ineligibility_reason_list.iter().map(|o| o.clone_ref(py)).collect(),
+                    $($field: self.$field.clone(),)*
+                })
+            }
+        }
+
+        impl ContractDetails {
+            /// Fresh instance with an owned default Contract. `Py<Contract>` has no
+            /// Default, so this replaces the derived constructor (ibx#230).
+            pub fn new_default(py: Python<'_>) -> Self {
+                Self {
+                    contract: Py::new(py, Contract::default()).expect("Contract allocation failed"),
+                    sec_id_list: Vec::new(),
+                    ineligibility_reason_list: Vec::new(),
+                    $($field: $default,)*
+                }
+            }
+        }
+    };
+}
+
+contract_details_class! {
+    market_name: String = String::new(),
+    min_tick: f64 = 0.0,
+    order_types: String = String::new(),
+    valid_exchanges: String = String::new(),
+    price_magnifier: i32 = 0,
+    under_con_id: i32 = 0,
+    long_name: String = String::new(),
+    contract_month: String = String::new(),
+    industry: String = String::new(),
+    category: String = String::new(),
+    subcategory: String = String::new(),
+    time_zone_id: String = String::new(),
+    trading_hours: String = String::new(),
+    liquid_hours: String = String::new(),
+    ev_rule: String = String::new(),
+    ev_multiplier: f64 = 0.0,
+    agg_group: i32 = 0,
+    under_symbol: String = String::new(),
+    under_sec_type: String = String::new(),
+    market_rule_ids: String = String::new(),
+    real_expiration_date: String = String::new(),
+    last_trade_time: String = String::new(),
+    stock_type: String = String::new(),
+    min_size: f64 = f64::MAX,
+    size_increment: f64 = f64::MAX,
+    suggested_size_increment: f64 = f64::MAX,
+    min_algo_size: f64 = f64::MAX,
+    last_price_precision: f64 = f64::MAX,
+    last_size_precision: f64 = f64::MAX,
+    cusip: String = String::new(),
+    ratings: String = String::new(),
+    desc_append: String = String::new(),
+    bond_type: String = String::new(),
+    coupon_type: String = String::new(),
+    callable: bool = false,
+    putable: bool = false,
+    coupon: f64 = 0.0,
+    convertible: bool = false,
+    maturity: String = String::new(),
+    issue_date: String = String::new(),
+    next_option_date: String = String::new(),
+    next_option_type: String = String::new(),
+    next_option_partial: bool = false,
+    notes: String = String::new(),
+    fund_name: String = String::new(),
+    fund_family: String = String::new(),
+    fund_type: String = String::new(),
+    fund_front_load: String = String::new(),
+    fund_back_load: String = String::new(),
+    fund_back_load_time_interval: String = String::new(),
+    fund_management_fee: String = String::new(),
+    fund_closed: bool = false,
+    fund_closed_for_new_investors: bool = false,
+    fund_closed_for_new_money: bool = false,
+    fund_notify_amount: String = String::new(),
+    fund_minimum_initial_purchase: String = String::new(),
+    fund_subsequent_minimum_purchase: String = String::new(),
+    fund_blue_sky_states: String = String::new(),
+    fund_blue_sky_territories: String = String::new(),
+    fund_distribution_policy_indicator: String = String::new(),
+    fund_asset_type: String = String::new(),
+    event_contract1: String = String::new(),
+    event_contract_description1: String = String::new(),
+    event_contract_description2: String = String::new(),
 }
 
 #[pymethods]
@@ -2043,107 +2135,101 @@ impl ContractDetails {
     }
 }
 
-impl Clone for ContractDetails {
-    /// `Py<Contract>` clones by reference under the GIL: the copy shares the
-    /// same Python Contract object, matching Python assignment semantics.
-    fn clone(&self) -> Self {
-        Python::attach(|py| Self {
-            contract: self.contract.clone_ref(py),
-            market_name: self.market_name.clone(),
-            min_tick: self.min_tick,
-            order_types: self.order_types.clone(),
-            valid_exchanges: self.valid_exchanges.clone(),
-            long_name: self.long_name.clone(),
-            last_trade_date: self.last_trade_date.clone(),
-            multiplier: self.multiplier.clone(),
-            market_rule_id: self.market_rule_id,
-            strike: self.strike,
-            right: self.right.clone(),
-            primary_exchange: self.primary_exchange.clone(),
-            local_symbol: self.local_symbol.clone(),
-            trading_class: self.trading_class.clone(),
-            stock_type: self.stock_type.clone(),
-            category: self.category.clone(),
-            country: self.country.clone(),
-            isin: self.isin.clone(),
-            min_size: self.min_size,
-            trading_hours: self.trading_hours.clone(),
-            liquid_hours: self.liquid_hours.clone(),
-            time_zone_id: self.time_zone_id.clone(),
-        })
-    }
-}
-
 impl ContractDetails {
-    /// Fresh instance with an owned default Contract. `Py<Contract>` has no
-    /// Default, so this replaces the derived constructor (ibx#230).
-    pub fn new_default(py: Python<'_>) -> Self {
-        Self {
-            contract: Py::new(py, Contract::default()).expect("Contract allocation failed"),
-            market_name: String::new(),
-            min_tick: 0.0,
-            order_types: String::new(),
-            valid_exchanges: String::new(),
-            long_name: String::new(),
-            last_trade_date: String::new(),
-            multiplier: String::new(),
-            market_rule_id: 0,
-            strike: 0.0,
-            right: String::new(),
-            primary_exchange: String::new(),
-            local_symbol: String::new(),
-            trading_class: String::new(),
-            stock_type: String::new(),
-            category: String::new(),
-            country: String::new(),
-            isin: String::new(),
-            min_size: 0.0,
-            trading_hours: String::new(),
-            liquid_hours: String::new(),
-            time_zone_id: String::new(),
-        }
-    }
-
+    /// The row of a definition: the fields of the Rust API row (ibx#436).
     pub fn from_definition(py: Python<'_>, def: &crate::control::contracts::ContractDefinition) -> Self {
-        let mut c = Contract::default();
-        c.con_id = def.con_id;
-        // Official API string ("STK"), not the Debug derive ("Stock"): the
-        // returned Contract must round-trip into another request (ibx#230).
-        c.sec_type = if def.continuous { "CONTFUT".to_string() } else { def.sec_type.to_api_str().to_string() };
-        c.symbol = def.symbol.clone();
-        c.exchange = def.exchange.clone();
-        c.primary_exchange = def.primary_exchange.clone();
-        c.currency = def.currency.clone();
-        c.local_symbol = def.local_symbol.clone();
-        c.trading_class = def.trading_class.clone();
-        c.last_trade_date_or_contract_month = def.last_trade_date.clone();
-        c.strike = def.strike;
-        c.multiplier = if def.multiplier != 1.0 { format!("{}", def.multiplier) } else { String::new() };
-
+        let d = crate::api::types::ContractDetails::from_definition(def);
+        let r = &d.contract;
+        let c = Contract {
+            con_id: r.con_id,
+            symbol: r.symbol.clone(),
+            sec_type: r.sec_type.clone(),
+            exchange: r.exchange.clone(),
+            primary_exchange: r.primary_exchange.clone(),
+            currency: r.currency.clone(),
+            local_symbol: r.local_symbol.clone(),
+            trading_class: r.trading_class.clone(),
+            last_trade_date_or_contract_month: r.last_trade_date_or_contract_month.clone(),
+            last_trade_date: r.last_trade_date.clone(),
+            strike: r.strike,
+            right: r.right.clone(),
+            multiplier: r.multiplier.clone(),
+            ..Default::default()
+        };
+        let sec_id_list = d.sec_id_list.iter()
+            .map(|tv| Py::new(py, TagValue { tag: tv.tag.clone(), value: tv.value.clone() }).expect("TagValue allocation failed").into_any())
+            .collect();
+        let ineligibility_reason_list = d.ineligibility_reason_list.iter()
+            .map(|r| Py::new(py, IneligibilityReasonPy { id_: r.id.clone(), description: r.description.clone() }).expect("IneligibilityReason allocation failed").into_any())
+            .collect();
         Self {
             contract: Py::new(py, c).expect("Contract allocation failed"),
-            // Parsed from the reply all along but thrown away (ibx#230).
-            market_name: def.market_name.clone(),
-            min_tick: def.min_tick,
-            order_types: def.order_types.join(","),
-            valid_exchanges: def.valid_exchanges.join(","),
-            long_name: def.long_name.clone(),
-            last_trade_date: def.last_trade_date.clone(),
-            multiplier: if def.multiplier != 1.0 { format!("{}", def.multiplier) } else { String::new() },
-            market_rule_id: def.market_rule_id.map(|id| id as i64).unwrap_or(-1),
-            strike: def.strike,
-            right: def.right.map(|r| format!("{:?}", r)).unwrap_or_default(),
-            primary_exchange: def.primary_exchange.clone(),
-            local_symbol: def.local_symbol.clone(),
-            trading_class: def.trading_class.clone(),
-            stock_type: def.stock_type.clone(),
-            category: def.category.clone(),
-            country: def.country.clone(),
-            isin: def.isin.clone(),
-            min_size: def.min_size,
-            trading_hours: def.trading_hours.clone().unwrap_or_default(),
-            liquid_hours: def.liquid_hours.clone().unwrap_or_default(),
-            time_zone_id: def.time_zone_id.clone().unwrap_or_default(),
+            sec_id_list,
+            ineligibility_reason_list,
+            market_name: d.market_name,
+            min_tick: d.min_tick,
+            order_types: d.order_types,
+            valid_exchanges: d.valid_exchanges,
+            price_magnifier: d.price_magnifier,
+            under_con_id: d.under_con_id,
+            long_name: d.long_name,
+            contract_month: d.contract_month,
+            industry: d.industry,
+            category: d.category,
+            subcategory: d.subcategory,
+            time_zone_id: d.time_zone_id,
+            trading_hours: d.trading_hours,
+            liquid_hours: d.liquid_hours,
+            ev_rule: d.ev_rule,
+            ev_multiplier: d.ev_multiplier,
+            agg_group: d.agg_group,
+            under_symbol: d.under_symbol,
+            under_sec_type: d.under_sec_type,
+            market_rule_ids: d.market_rule_ids,
+            real_expiration_date: d.real_expiration_date,
+            last_trade_time: d.last_trade_time,
+            stock_type: d.stock_type,
+            min_size: d.min_size,
+            size_increment: d.size_increment,
+            suggested_size_increment: d.suggested_size_increment,
+            min_algo_size: d.min_algo_size,
+            last_price_precision: d.last_price_precision,
+            last_size_precision: d.last_size_precision,
+            cusip: d.cusip,
+            ratings: d.ratings,
+            desc_append: d.desc_append,
+            bond_type: d.bond_type,
+            coupon_type: d.coupon_type,
+            callable: d.callable,
+            putable: d.putable,
+            coupon: d.coupon,
+            convertible: d.convertible,
+            maturity: d.maturity,
+            issue_date: d.issue_date,
+            next_option_date: d.next_option_date,
+            next_option_type: d.next_option_type,
+            next_option_partial: d.next_option_partial,
+            notes: d.notes,
+            fund_name: d.fund_name,
+            fund_family: d.fund_family,
+            fund_type: d.fund_type,
+            fund_front_load: d.fund_front_load,
+            fund_back_load: d.fund_back_load,
+            fund_back_load_time_interval: d.fund_back_load_time_interval,
+            fund_management_fee: d.fund_management_fee,
+            fund_closed: d.fund_closed,
+            fund_closed_for_new_investors: d.fund_closed_for_new_investors,
+            fund_closed_for_new_money: d.fund_closed_for_new_money,
+            fund_notify_amount: d.fund_notify_amount,
+            fund_minimum_initial_purchase: d.fund_minimum_initial_purchase,
+            fund_subsequent_minimum_purchase: d.fund_subsequent_minimum_purchase,
+            fund_blue_sky_states: d.fund_blue_sky_states,
+            fund_blue_sky_territories: d.fund_blue_sky_territories,
+            fund_distribution_policy_indicator: d.fund_distribution_policy_indicator,
+            fund_asset_type: d.fund_asset_type,
+            event_contract1: d.event_contract1,
+            event_contract_description1: d.event_contract_description1,
+            event_contract_description2: d.event_contract_description2,
         }
     }
 }
@@ -2372,6 +2458,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PercentChangeCondition>()?;
     m.add_class::<BarData>()?;
     m.add_class::<ContractDetails>()?;
+    m.add_class::<IneligibilityReasonPy>()?;
     m.add_class::<ContractDescription>()?;
     m.add_class::<CommissionAndFeesReport>()?;
     m.add_class::<Execution>()?;

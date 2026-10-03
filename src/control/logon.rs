@@ -189,6 +189,10 @@ pub struct ApiFeatures {
     /// ISLAND2NASDAQ: NASDAQ is not left out of the option chains
     /// (`jfix.s.hy()`, ibx#440).
     pub island_to_nasdaq: bool,
+    /// BONDAPI: bond rows carry the bond fields (`jfix.s.aX()`, ibx#436).
+    pub bond_api: bool,
+    /// EVAPI: contract rows carry the EV rule (`jfix.s.v()`, ibx#436).
+    pub ev_api: bool,
 }
 
 impl ApiFeatures {
@@ -199,6 +203,8 @@ impl ApiFeatures {
             nightly: has_feature(features, "NIGHTLY"),
             no_magnifier_fix: has_feature(features, "NOMAGNFIX"),
             island_to_nasdaq: has_feature(features, "ISLAND2NASDAQ"),
+            bond_api: has_feature(features, "BONDAPI"),
+            ev_api: has_feature(features, "EVAPI"),
         }
     }
 }
@@ -315,10 +321,10 @@ mod tests {
     fn api_features_of_the_feature_list() {
         let f = ApiFeatures::parse("1DAYSORDER,APIELOG,ISLAND2NASDAQ,SECDEFTA,SCALEUSLOT");
         assert_eq!(f, ApiFeatures { deny_api: false, matching_symbols: true, nightly: false,
-            no_magnifier_fix: false, island_to_nasdaq: true });
-        let f = ApiFeatures::parse("DENYAPI,NIGHTLY,SECDEFTA:x,NOMAGNFIX");
+            no_magnifier_fix: false, island_to_nasdaq: true, bond_api: false, ev_api: false });
+        let f = ApiFeatures::parse("DENYAPI,NIGHTLY,SECDEFTA:x,NOMAGNFIX,BONDAPI,EVAPI");
         assert_eq!(f, ApiFeatures { deny_api: true, matching_symbols: false, nightly: true,
-            no_magnifier_fix: true, island_to_nasdaq: false });
+            no_magnifier_fix: true, island_to_nasdaq: false, bond_api: true, ev_api: true });
     }
 
     #[test]

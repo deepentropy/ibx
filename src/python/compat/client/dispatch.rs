@@ -656,7 +656,7 @@ impl EClient {
             let details = ContractDetails::from_definition(py, &def);
             let details_py = Py::new(py, details)?.into_any();
             // A bond row is a bond contract details message (ibx#438).
-            let callback = if def.sec_type == crate::control::contracts::SecurityType::Bond {
+            let callback = if def.is_bond() {
                 "bond_contract_details"
             } else {
                 "contract_details"

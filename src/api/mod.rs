@@ -6,6 +6,8 @@
 pub mod client;
 pub mod types;
 pub mod wrapper;
+#[cfg(test)]
+pub(crate) mod contract_details_golden;
 
 pub use client::{EClient, EClientConfig};
 pub use types::*;

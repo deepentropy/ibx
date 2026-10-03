@@ -414,7 +414,7 @@ impl EClient {
         for (req_id, def) in self.shared.reference.drain_contract_details() {
             let details = ContractDetails::from_definition(&def);
             // A bond row is a bond contract details message (ibx#438).
-            if def.sec_type == crate::control::contracts::SecurityType::Bond {
+            if def.is_bond() {
                 wrapper.bond_contract_details(req_id, &details);
             } else {
                 wrapper.contract_details(req_id, &details);

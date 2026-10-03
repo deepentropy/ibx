@@ -218,6 +218,11 @@ pub(crate) struct CcpState {
     /// Known market rule per (conId, exchange), from the records of every
     /// definition reply; a fan-out asks only for the unknown ones (ibx#435).
     pub(crate) market_rule_by_exchange: std::collections::HashMap<(i64, String), u32>,
+    /// Industry, category and subcategory of an underlying, from the
+    /// company lookups of derivative rows (ibx#436).
+    pub(crate) company_by_underlying: std::collections::HashMap<i64, (String, String, String)>,
+    /// Company lookups in flight: request id sent, underlying conId.
+    pub(crate) pending_company: Vec<(String, i64)>,
     /// Matching-symbols requests sent and not answered: (own request id
     /// sent, API reqId). No deadline, as in the reference; cleared without
     /// an answer when the auth link drops (ibx#369).
@@ -603,6 +608,8 @@ impl CcpState {
             pending_lookups: Vec::new(),
             pending_continuous: Vec::new(),
             market_rule_by_exchange: std::collections::HashMap::new(),
+            company_by_underlying: std::collections::HashMap::new(),
+            pending_company: Vec::new(),
             pending_matching_symbols: Vec::new(),
             next_matching_symbols_id: 1,
             matching_waiting: None,
@@ -2072,17 +2079,9 @@ impl CcpState {
         let mut req_ids: Vec<ReqId> = Vec::new();
         for mut pair in ready {
             if let Some(sched) = &sched {
-                pair.def.time_zone_id = if sched.timezone.is_empty() {
-                    None
-                } else {
-                    Some(sched.timezone.clone())
-                };
-                pair.def.trading_hours = Some(
-                    crate::control::contracts::format_sessions_string(&sched.trading_hours)
-                );
-                pair.def.liquid_hours = Some(
-                    crate::control::contracts::format_sessions_string(&sched.liquid_hours)
-                );
+                // In the zone of the schedule, from its current day on, as
+                // the reference (ibx#436).
+                crate::control::contracts::apply_schedule(&mut pair.def, sched, jiff::Timestamp::now());
             }
             if !req_ids.contains(&pair.api_req_id) {
                 req_ids.push(pair.api_req_id);
@@ -2324,6 +2323,21 @@ impl CcpState {
             shared.reference.push_market_rules(rules);
         }
         let records = contracts::parse_secdef_records(msg).unwrap_or_default();
+        // The company lookup of an underlying (ibx#436): its industry is
+        // kept for the later rows of its derivatives; not a user reply.
+        if let Some(i) = response_req_id.as_deref().and_then(|rid| self.pending_company.iter().position(|(id, _)| id == rid)) {
+            let (_, under) = self.pending_company.swap_remove(i);
+            let company = records.iter().find(|d| d.con_id == under)
+                .map(|d| (d.industry.clone(), d.category.clone(), d.subcategory.clone()))
+                .unwrap_or_default();
+            self.company_by_underlying.insert(under, company);
+            for (i, def) in records.iter().enumerate() {
+                if !records[..i].iter().any(|d| d.con_id == def.con_id) {
+                    self.cache_definition(def, shared);
+                }
+            }
+            return;
+        }
         // A reply can list one conId once per exchange: the contract cache
         // keeps the first record of each conId, the one on the lookup's own
         // exchange, not the last listed exchange.
@@ -2398,8 +2412,15 @@ impl CcpState {
             self.no_security_definition(req_id, shared, ccp_conn, hb);
             return;
         }
-        let multiplier = self.take_lookup(req_id)
-            .and_then(|l| l.filters.multiplier.parse::<f64>().ok());
+        let lookup = self.take_lookup(req_id);
+        let multiplier = lookup.as_ref().and_then(|l| l.filters.multiplier.parse::<f64>().ok());
+        // The request symbol is the CUSIP of a bond row when it reads as
+        // one (`jextend.dz.b(dy, lh.D)`, ibx#436).
+        if let Some(cusip) = lookup.as_ref().map(|l| l.symbol.as_str()).filter(|s| crate::control::contracts::reads_as_cusip(s)) {
+            for def in records.iter_mut() {
+                def.lookup_cusip = cusip.to_string();
+            }
+        }
         // With several records, a requested multiplier keeps only the
         // records that have it, as the reference.
         if let (true, Some(m)) = (records.len() > 1, multiplier) {
@@ -2434,6 +2455,20 @@ impl CcpState {
                 seen.push(d.con_id);
                 first
             });
+        }
+        // A derivative without an industry takes the one of its
+        // underlying's company when known; else the company is looked up
+        // and only the later rows get it, as the reference (ibx#436).
+        for def in records.iter_mut().filter(|d| d.under_con_id > 0 && d.industry.is_empty()) {
+            match self.company_by_underlying.get(&def.under_con_id) {
+                Some(company) => crate::control::contracts::apply_company(def, company),
+                None => {
+                    let under = def.under_con_id;
+                    if !self.pending_company.iter().any(|(_, u)| *u == under) {
+                        self.send_company_lookup(under, ccp_conn, hb);
+                    }
+                }
+            }
         }
         // By-symbol lookup: each record asks for its unknown per-exchange
         // market rules before it becomes a row.
@@ -2577,7 +2612,7 @@ impl CcpState {
         shared.reference.cache_contract(def.con_id, api::Contract {
             con_id: def.con_id,
             symbol: def.symbol.clone(),
-            sec_type: def.sec_type.to_api_str().to_string(),
+            sec_type: def.api_type_name(),
             exchange: def.exchange.clone(),
             currency: def.currency.clone(),
             local_symbol: def.local_symbol.clone(),
@@ -2603,8 +2638,11 @@ impl CcpState {
     ) {
         let deadline = Instant::now() + std::time::Duration::from_secs(3);
         let mut subscribed: Vec<String> = Vec::new();
+        let (bond_api, ev_api) = shared.reference.contract_details_features();
         for mut def in records {
             def.market_rule_ids = self.market_rule_ids(&def);
+            def.bond_api = bond_api;
+            def.ev_api = ev_api;
             if def.join_key.is_empty() {
                 push_contract_row(shared, event_tx, req_id, def);
             } else {
@@ -2634,16 +2672,31 @@ impl CcpState {
     /// Market rule id of each valid exchange of a record whose rule is
     /// known, comma-joined (ibx#435).
     fn market_rule_ids(&self, def: &crate::control::contracts::ContractDefinition) -> String {
-        let mut ids = String::new();
-        for exch in &def.valid_exchanges {
-            if let Some(id) = self.market_rule_by_exchange.get(&(def.con_id, exch.clone())) {
-                if !ids.is_empty() {
-                    ids.push(',');
-                }
-                ids.push_str(&id.to_string());
-            }
+        crate::control::contracts::market_rule_ids(def, &self.market_rule_by_exchange)
+    }
+
+    /// The company lookup of an underlying (ibx#436), as the reference
+    /// sends it after a derivative record without an industry:
+    /// `35=c|320=UnderlyingECNoDupsNDReqByConid{N}|321=2|146=1|6008={conId}|6004=ANYEXCH`
+    /// (captured 28/09/2026).
+    fn send_company_lookup(&mut self, under_con_id: i64, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        let rid = format!("{}{}", crate::control::contracts::SECDEF_UNDERLYING_NAME, self.next_fanout_id);
+        self.next_fanout_id = self.next_fanout_id.wrapping_add(1);
+        if let Some(conn) = ccp_conn.as_mut().filter(|_| !self.disconnected) {
+            let con_id_str = under_con_id.to_string();
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "c"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (crate::control::contracts::TAG_SECURITY_REQ_ID, &rid),
+                (crate::control::contracts::TAG_SECURITY_REQ_TYPE, "2"),
+                (146, "1"),
+                (crate::control::contracts::TAG_IB_CON_ID, &con_id_str),
+                (6004, "ANYEXCH"),
+            ]);
+            hb.last_ccp_sent = Instant::now();
+            self.pending_company.push((rid, under_con_id));
         }
-        ids
     }
 
     /// Send a per-exchange fan-out request after a by-symbol master reply.
@@ -2793,6 +2846,9 @@ impl CcpState {
         self.matching_permits += 1;
         self.awaiting_status_replay = false;
         self.status_replay_end_at = None;
+        // A company lookup lost with the link is made again by the next
+        // derivative row (ibx#436).
+        self.pending_company.clear();
         // The orders keep their status, as in the reference: the clients get
         // the lost-link message only, and the replay after the new logon
         // corrects each order (ibx#251).
@@ -4620,6 +4676,49 @@ mod tests {
         assert!(ccp.pending_secdef.is_empty() && ccp.pending_lookups.is_empty());
     }
 
+    // ibx#436: a derivative record without an industry looks up the
+    // company of its underlying; its row goes out without the industry,
+    // the later rows get it (captured 28/09/2026: the first AAPL option row
+    // has no industry, the next ones have Technology).
+    #[test]
+    fn a_derivative_row_gets_the_industry_of_its_looked_up_company() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut hb = HeartbeatState::new();
+        let option = |rid: &str| pipe_msg(&format!(
+            "35=d|320={rid}|323=4|55=AAPL|167=OPT|207=BEST|6008=926735346|6031=32|146=0|6344=1|6008=926735346|6346=265598|306=APPLE INC"));
+
+        ccp.send_secdef_request_by_symbol(31, "AAPL", "OPT", "SMART", "USD", &Default::default(), &mut conn, &mut hb);
+        let _ = ccp_messages_sent(&mut server);
+        ccp.process_ccp_message(&option("31"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let rows = shared.reference.drain_contract_details();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.industry, "", "the first row has no industry");
+        let sent = ccp_messages_sent(&mut server);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].contains("|146=1|6008=265598|6004=ANYEXCH"), "{}", sent[0]);
+        let rid = sent[0].split('|').find_map(|f| f.strip_prefix("320=")).unwrap().to_string();
+        assert!(rid.starts_with("UnderlyingECNoDupsNDReqByConid"), "{rid}");
+
+        // The company reply is not a row.
+        let mut company = pipe_msg(&format!(
+            "35=d|320={rid}|323=4|55=AAPL|167=STK|207=BEST|6008=265598|146=0|6344=1|6008=265598|6623=0|6622=1|6623=0|6624=Technology"));
+        let at = company.windows(15).position(|w| w == b"6624=Technology").unwrap() + 15;
+        company.splice(at..at, b"|Computers|Computers".iter().copied());
+        ccp.process_ccp_message(&company, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(shared.reference.drain_contract_details().is_empty());
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![31]);
+
+        ccp.send_secdef_request_by_symbol(32, "AAPL", "OPT", "SMART", "USD", &Default::default(), &mut conn, &mut hb);
+        let _ = ccp_messages_sent(&mut server);
+        ccp.process_ccp_message(&option("32"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let rows = shared.reference.drain_contract_details();
+        let d = &rows[0].1;
+        assert_eq!((d.industry.as_str(), d.category.as_str(), d.subcategory.as_str()), ("Technology", "Computers", "Computers"));
+        assert!(ccp_messages_sent(&mut server).is_empty(), "no second company lookup");
+    }
+
     #[test]
     fn records_sharing_a_join_key_ask_their_schedule_once() {
         let (mut ccp, mut context, shared) = u186_test_state();
@@ -4632,8 +4731,13 @@ mod tests {
         ccp.process_ccp_message(&five_future_records("22", "CME/FUT"), &mut conn, &mut context, &shared, &None,
             &mut hb, "DU1");
         let sent = ccp_messages_sent(&mut server);
-        assert_eq!(sent.len(), 1, "one schedule request for the shared key: {sent:?}");
-        assert!(sent[0].contains("6256=CME/FUT"), "{}", sent[0]);
+        let schedules: Vec<&String> = sent.iter().filter(|m| m.contains("6040=106")).collect();
+        assert_eq!(schedules.len(), 1, "one schedule request for the shared key: {sent:?}");
+        assert!(schedules[0].contains("6256=CME/FUT"), "{}", schedules[0]);
+        // And one company lookup of the underlying (ibx#436).
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(sent.iter().any(|m| m.contains("320=UnderlyingECNoDupsNDReqByConid") && m.contains("6008=362687422")
+            && m.contains("6004=ANYEXCH")), "{sent:?}");
         assert!(shared.reference.drain_contract_details().is_empty(), "rows wait for the schedule");
         assert!(shared.reference.drain_contract_details_end().is_empty());
 

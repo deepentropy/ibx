@@ -748,6 +748,9 @@ pub struct ReferenceState {
     /// The logon feature list has ISLAND2NASDAQ: NASDAQ is not left out of
     /// the option chains (ibx#440).
     island_to_nasdaq: AtomicBool,
+    /// BONDAPI and EVAPI of the logon (ibx#436).
+    bond_api: AtomicBool,
+    ev_api: AtomicBool,
 }
 
 impl ReferenceState {
@@ -799,6 +802,8 @@ impl ReferenceState {
             nightly: AtomicBool::new(false),
             no_magnifier_fix: AtomicBool::new(false),
             island_to_nasdaq: AtomicBool::new(false),
+            bond_api: AtomicBool::new(false),
+            ev_api: AtomicBool::new(false),
             option_chains: Mutex::new(Vec::new()),
         }
     }
@@ -1222,6 +1227,14 @@ impl ReferenceState {
         self.nightly.store(features.nightly, Ordering::Relaxed);
         self.no_magnifier_fix.store(features.no_magnifier_fix, Ordering::Relaxed);
         self.island_to_nasdaq.store(features.island_to_nasdaq, Ordering::Relaxed);
+        self.bond_api.store(features.bond_api, Ordering::Relaxed);
+        self.ev_api.store(features.ev_api, Ordering::Relaxed);
+    }
+
+    /// The contract details features of the logon (ibx#436): BONDAPI and
+    /// EVAPI.
+    pub fn contract_details_features(&self) -> (bool, bool) {
+        (self.bond_api.load(Ordering::Relaxed), self.ev_api.load(Ordering::Relaxed))
     }
 
     /// The option chain features of the logon (ibx#440): NOMAGNFIX and

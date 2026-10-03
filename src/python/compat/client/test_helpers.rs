@@ -471,6 +471,31 @@ impl EClient {
         Ok(())
     }
 
+    /// Push the row of one record of a definition reply and its end
+    /// (ibx#436), made as the hot loop makes it: the record of `con_id` on
+    /// `exchange`, its market rules known by exchange, the company lookup
+    /// replies received before, the schedule reply merged at `now_ms`.
+    #[doc(hidden)]
+    #[pyo3(signature = (req_id, secdef, con_id, exchange, continuous, rules, company, schedule, now_ms, bond_api=false, ev_api=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn _test_push_reply_row(
+        &self, req_id: ReqId, secdef: &str, con_id: i64, exchange: &str, continuous: bool,
+        rules: Vec<(String, u32)>, company: Vec<String>, schedule: Option<String>, now_ms: i64,
+        bond_api: bool, ev_api: bool,
+    ) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        let known = rules.into_iter().map(|(exchange, rule)| ((con_id, exchange), rule)).collect();
+        let now = jiff::Timestamp::from_millisecond(now_ms).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let company: Vec<&[u8]> = company.iter().map(|c| c.as_bytes()).collect();
+        let def = crate::control::contracts::row_of_reply(
+            secdef.as_bytes(), con_id, exchange, continuous, &known, &company,
+            schedule.as_deref().map(str::as_bytes), now, bond_api, ev_api,
+        ).ok_or_else(|| PyRuntimeError::new_err("no record"))?;
+        shared.reference.push_contract_details(req_id, def);
+        shared.reference.push_contract_details_end(req_id);
+        Ok(())
+    }
+
     /// Push one option chain answer (ibx#440): rows of (exchange, conId,
     /// trading class, multiplier, expirations, strikes).
     #[doc(hidden)]

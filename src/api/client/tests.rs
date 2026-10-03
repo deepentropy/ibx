@@ -3197,8 +3197,8 @@ fn req_market_rule_answers_known_rules_and_refuses_others() {
         MarketRule { rule_id: 109, price_increments: vec![
             PriceIncrement { low_edge: 0.0, increment: 0.01 },
             PriceIncrement { low_edge: 3.0, increment: 0.05 },
-        ] },
-        MarketRule { rule_id: 5, price_increments: vec![] },
+        ], ..Default::default() },
+        MarketRule { rule_id: 5, price_increments: vec![], ..Default::default() },
     ]);
     let mut w = RecordingWrapper::default();
     client.req_market_rule(109, &mut w);
