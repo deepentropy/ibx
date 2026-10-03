@@ -1,4 +1,4 @@
-{"type":"header","format":"codec/1","scenario":"account_summary","area":"decode-account","source":"20260926/account_summary.jsonl","source_scenario":"account_summary","capture_date":"26/09/2026","market_session":"closed","gateway_version":"10401","notes":"reqAccountSummary of four tags and $LEDGER:ALL, its rows and ends, its cancel (market closed)"}
+{"type":"header","format":"codec/1","scenario":"account_summary","area":"decode-account","source":"20260926/account_summary.jsonl","source_scenario":"account_summary","capture_date":"26/09/2026","market_session":"closed","gateway_version":"10401","machine_zone":"Europe/Paris","notes":"reqAccountSummary of four tags and $LEDGER:ALL, its rows and ends, its cancel (market closed)"}
 {"seq":2979,"leg":"api_out","conn":"api:25970","msg_name":"API_PREFIX","raw_b64":"QVBJAA=="}
 {"seq":2980,"leg":"api_out","conn":"api:25970","msg_name":"CLIENT_VERSION","raw_b64":"djEwMC4uMjI1"}
 {"seq":2982,"leg":"fix_out","conn":"CCP","msg_type":"U","raw_b64":"OD1GSVguNC4xATk9MDA3NgEzNT1VATM0PTAwMDIwOQE1Mj0yMDI2MDkyNi0xOTo0NjoyMAE2MDQwPTExMwE2ODkzPTEBNjM1MD0xMjcuMC4wLjEBNjk5MD0yMTQBMTA9MTUyAQ=="}

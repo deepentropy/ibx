@@ -15,6 +15,10 @@ use super::fixture::{attr_mask, n, order_price, perm, OPEN_ORDER_FIELDS};
 
 pub(crate) const ACCOUNT: &str = "DUXXXXXXX";
 
+/// The zone of the machine the recordings were made on, when a fixture
+/// header does not name it (`machine_zone`): every capture so far.
+pub(crate) const RECORDING_ZONE: &str = "Europe/Paris";
+
 /// Steps of the engine after each input: enough for a request to reach the
 /// wire and for its reply to reach the queues.
 const SETTLE_STEPS: usize = 4;
@@ -36,6 +40,9 @@ pub(crate) struct Session {
 
 impl Session {
     pub fn new() -> Self {
+        // The engine runs on this thread in the recording machine's zone; a
+        // replay of another zone sets its own (`in_zone`).
+        crate::gateway::set_machine_zone_for_test(Some(RECORDING_ZONE));
         let shared = Arc::new(SharedState::new());
         // Reads return at once: the test steps the engine itself.
         let pair = || {
@@ -67,14 +74,26 @@ impl Session {
         }
     }
 
+    /// Run in the machine zone a fixture names (`machine_zone` in its
+    /// header), else in [`RECORDING_ZONE`].
+    pub fn in_zone(self, header: &serde_json::Value) -> Self {
+        crate::gateway::set_machine_zone_for_test(Some(header["machine_zone"].as_str().unwrap_or(RECORDING_ZONE)));
+        self
+    }
+
     /// Call the API client; the engine runs on this thread meanwhile (a
     /// call may wait for the engine's answer). Then the engine settles and
     /// the callbacks are taken.
     pub fn call<R: Send>(&mut self, f: impl FnOnce(&EClient) -> R + Send) -> R {
         let Self { engine, client, .. } = self;
         let client = &*client;
+        // The client's thread reads the machine zone of this one.
+        let zone = crate::gateway::machine_zone_for_test();
         let out = std::thread::scope(|s| {
-            let h = s.spawn(move || f(client));
+            let h = s.spawn(move || {
+                crate::gateway::set_machine_zone_for_test(zone.as_deref());
+                f(client)
+            });
             while !h.is_finished() {
                 engine.step_for_test();
                 std::thread::yield_now();

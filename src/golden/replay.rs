@@ -178,7 +178,7 @@ pub(crate) fn replay_market_data(fx: &Fixture, farm_conn: &str, keep: &[&str], u
 /// [`replay_market_data`] without the records `skip` (requests that go to
 /// another farm).
 pub(crate) fn replay_market_data_without(fx: &Fixture, farm_conn: &str, keep: &[&str], until: Option<u64>, skip: &[u64]) -> Replayed {
-    let mut s = Session::new();
+    let mut s = Session::new().in_zone(&fx.header);
     let mut ids = Ids::default();
     let mut theirs = Vec::new();
     let mut unsent = Vec::new();

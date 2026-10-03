@@ -293,7 +293,38 @@ const TAG_SESSION_EPOCH: u32 = 6059;
 /// Time zone sent at logon: `IBX_TZ` when set, else the machine zone. It
 /// is also the machine zone of an order's expiry zone rule (ibx#335).
 pub(crate) fn machine_time_zone() -> String {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(zone) = ZONE_FOR_TEST.with(|z| z.borrow().clone()) {
+        return zone;
+    }
     time_zone_or_system(std::env::var("IBX_TZ").ok())
+}
+
+/// The machine zone as a zone: [`machine_time_zone`], or the system zone
+/// when that name is not known.
+pub(crate) fn machine_tz() -> jiff::tz::TimeZone {
+    jiff::tz::TimeZone::get(&machine_time_zone()).unwrap_or_else(|_| jiff::tz::TimeZone::system())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// The machine zone of this thread in the tests (ibx#486).
+    static ZONE_FOR_TEST: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Fix the machine zone this thread reads, for the tests: a replay of a
+/// recording runs in the zone of the machine it was made on, whatever the
+/// zone of the machine that runs the test (ibx#486). `None` gives the real
+/// zone back.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_machine_zone_for_test(zone: Option<&str>) {
+    ZONE_FOR_TEST.with(|z| *z.borrow_mut() = zone.map(str::to_string));
+}
+
+/// The machine zone fixed for this thread by [`set_machine_zone_for_test`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn machine_zone_for_test() -> Option<String> {
+    ZONE_FOR_TEST.with(|z| z.borrow().clone())
 }
 
 fn time_zone_or_system(override_tz: Option<String>) -> String {

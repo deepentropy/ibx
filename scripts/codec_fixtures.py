@@ -4,7 +4,8 @@ the API side decoded, for the golden codec tests.
 Each fixture is one JSONL file under tests/fixtures/gw1040/codec/:
 
 - line 1, the header: `format` (`codec/1`), `scenario`, `area`, `source` (the
-  four-leg file), `capture_date` (dd/mm/yyyy), `market_session`, `notes`;
+  four-leg file), `capture_date` (dd/mm/yyyy), `market_session`,
+  `machine_zone` (the zone of the machine that ran the gateway), `notes`;
 - then the kept records of the source in their order, with `seq`, `leg`,
   `conn`, `raw_b64` and the message type (`msg_type` for a frame, `msg_name`
   for an API message), plus the API side decoded with the official client
@@ -181,7 +182,10 @@ def export(src: Path, name: str, area: str, keep, notes: str):
         "type": "header", "format": "codec/1", "scenario": name, "area": area,
         "source": f"{src.parent.name}/{src.name}", "source_scenario": head["scenario"],
         "capture_date": head["capture_date"], "market_session": head.get("market_session"),
-        "gateway_version": head.get("gateway_version"), "notes": notes,
+        "gateway_version": head.get("gateway_version"),
+        # The zone of the machine that ran the gateway: a time without a
+        # zone is read in it (all captures so far: the Paris desktop).
+        "machine_zone": "Europe/Paris", "notes": notes,
     }]
     for line in lines[1:]:
         r = json.loads(line)

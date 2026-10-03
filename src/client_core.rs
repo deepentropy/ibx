@@ -284,8 +284,7 @@ pub const SERVER_VERSION: i32 = 214;
 /// is the machine zone of the session (`IBX_TZ` when set).
 pub fn connection_time_now() -> String {
     let zone = crate::gateway::machine_time_zone();
-    let tz = jiff::tz::TimeZone::get(&zone).unwrap_or_else(|_| jiff::tz::TimeZone::system());
-    connection_time(&jiff::Timestamp::now().to_zoned(tz), &zone)
+    connection_time(&jiff::Timestamp::now().to_zoned(crate::gateway::machine_tz()), &zone)
 }
 
 /// `connection_time_now` for a given time and zone name.

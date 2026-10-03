@@ -29,7 +29,7 @@ struct AccountReplay {
 /// Replay the account summary requests of a fixture: the server's frames
 /// with ibx's subscription id in place of the reference's.
 fn replay_account_summary(fx: &Fixture) -> AccountReplay {
-    let mut s = Session::new();
+    let mut s = Session::new().in_zone(&fx.header);
     let mut theirs = Vec::new();
     let mut requests_theirs = Vec::new();
     // The reference's subscription id and ibx's, in request order.

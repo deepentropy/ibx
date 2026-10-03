@@ -900,7 +900,7 @@ impl CcpState {
         if crate::control::logon::message_sets_clock(msg_type, parsed.get(&6040).map(String::as_str), parsed.contains_key(&1)) {
             match parsed.get(&fix::TAG_SENDING_TIME).and_then(|v| crate::control::logon::server_time_ms(v)) {
                 Some(server_ms) => {
-                    let zone = jiff::tz::TimeZone::system();
+                    let zone = crate::gateway::machine_tz();
                     if let Some(offset) = shared.reference.clock().apply_message(server_ms, crate::control::logon::local_now_ms(), &zone) {
                         log::debug!("Setting time offset to {} ms (35={})", offset, msg_type);
                     }

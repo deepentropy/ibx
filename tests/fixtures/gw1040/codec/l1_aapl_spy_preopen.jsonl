@@ -1,4 +1,4 @@
-{"type":"header","format":"codec/1","scenario":"l1_aapl_spy_preopen","area":"decode-l1","source":"scenarios/b1_441_smart_components.jsonl","source_scenario":"b1_441_smart_components","capture_date":"02/10/2026","market_session":"pre-open","gateway_version":"10401","notes":"AAPL and SPY top of book before the open: acks, definitions, trades, quotes, smart components"}
+{"type":"header","format":"codec/1","scenario":"l1_aapl_spy_preopen","area":"decode-l1","source":"scenarios/b1_441_smart_components.jsonl","source_scenario":"b1_441_smart_components","capture_date":"02/10/2026","market_session":"pre-open","gateway_version":"10401","machine_zone":"Europe/Paris","notes":"AAPL and SPY top of book before the open: acks, definitions, trades, quotes, smart components"}
 {"seq":2359,"leg":"api_out","conn":"api:29986","msg_name":"API_PREFIX","raw_b64":"QVBJAA=="}
 {"seq":2360,"leg":"api_out","conn":"api:29986","msg_name":"CLIENT_VERSION","raw_b64":"djEwMC4uMjI1"}
 {"seq":2364,"leg":"api_in","conn":"api:29986","msg_name":"SERVER_VERSION","raw_b64":"MjE0ADIwMjYxMDAyIDEwOjU1OjU0IENlbnRyYWwgRXVyb3BlYW4gU3RhbmRhcmQgVGltZQA="}

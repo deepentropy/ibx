@@ -57,7 +57,9 @@ The `6010` (orderRef) values in the order frames are labels chosen by the record
 Slices of the scenarios above (and of other recorded sessions) for the golden codec tests (`src/golden/`), one file
 per scenario, `codec/1` format, made by `scripts/codec_fixtures.py`:
 
-- line 1, the header: `scenario`, `area`, `source` (the scenario file), `capture_date`, `market_session`, `notes`;
+- line 1, the header: `scenario`, `area`, `source` (the scenario file), `capture_date`, `market_session`,
+  `machine_zone` (the zone of the machine that ran the gateway: a time without a zone is read in it; the replays run
+  in it, whatever the zone of the machine running the tests), `notes`;
 - then the kept records in their order (`seq`, `leg`, `conn`, `msg_type` or `msg_name`, `raw_b64`), with the API side
   decoded by the official client library: `request` on an `api_out` record (for placeOrder the order and the contract
   as the library reads them back, only the fields that differ from a new object), `callbacks` on an `api_in` record
