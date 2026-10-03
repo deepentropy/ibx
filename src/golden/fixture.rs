@@ -189,7 +189,7 @@ pub(crate) fn open_order_line(id: i64, contract: &Value, order: &Value, state: &
 pub(crate) fn rebuild_text(fields: &[(u32, String)]) -> Vec<u8> {
     let begin = fields.iter().find(|(t, _)| *t == 8).map_or("FIX.4.1", |(_, v)| v.as_str());
     let mut body = Vec::new();
-    for (t, v) in fields.iter().filter(|(t, _)| !matches!(t, 8 | 9 | 10)) {
+    for (t, v) in fields.iter().filter(|(t, _)| !matches!(t, 8..=10)) {
         body.extend_from_slice(format!("{t}={v}\x01").as_bytes());
     }
     let mut msg = format!("8={begin}\x019={:04}\x01", body.len()).into_bytes();

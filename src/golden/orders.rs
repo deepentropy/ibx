@@ -95,7 +95,7 @@ fn order_contract(v: &Value) -> crate::api::types::Contract {
     c
 }
 
-fn tag<'a>(f: &'a Fields, t: u32) -> Option<&'a str> {
+fn tag(f: &Fields, t: u32) -> Option<&str> {
     f.iter().find(|(k, _)| *k == t).map(|(_, v)| v.as_str())
 }
 
@@ -156,6 +156,10 @@ pub(crate) fn comparable(f: &Fields) -> Fields {
 /// The key of an order message: API order id, message type, rank.
 pub(crate) type Key = (i64, String, usize);
 
+/// An order message of both sides by its key: ibx's, and the reference's
+/// with its seq.
+pub(crate) type Pair = (Key, Option<Fields>, Option<(u64, Fields)>);
+
 /// The records with each order request moved to where the reference acted
 /// on it: just before its first effect, the order message it sent or the
 /// error it gave at once. The reference reads a request on its API thread
@@ -173,20 +177,20 @@ pub(crate) fn at_their_effect(recs: &[Rec]) -> Vec<Rec> {
     };
     let mut effect_of: HashMap<usize, usize> = HashMap::new();
     for (i, r) in recs.iter().enumerate() {
-        if r.leg == "fix_out" && r.msg == "D" {
-            if let (Some(c), Some(id)) = (r.get(11), r.get(6121).and_then(|v| v.parse::<i64>().ok())) {
-                by_base.insert(base(&c).to_string(), id);
-            }
+        if r.leg == "fix_out" && r.msg == "D"
+            && let (Some(c), Some(id)) = (r.get(11), r.get(6121).and_then(|v| v.parse::<i64>().ok()))
+        {
+            by_base.insert(base(&c).to_string(), id);
         }
         if !(r.leg == "api_out" && matches!(r.msg.as_str(), "PLACE_ORDER" | "CANCEL_ORDER")) { continue; }
         let Some(id) = r.request["orderId"].as_i64() else { continue };
         let mut scan = by_base.clone();
         for (j, e) in recs.iter().enumerate().skip(i + 1) {
             if e.leg == "api_out" && e.request["orderId"].as_i64() == Some(id) { break; }
-            if e.leg == "fix_out" && e.msg == "D" {
-                if let (Some(c), Some(oid)) = (e.get(11), e.get(6121).and_then(|v| v.parse::<i64>().ok())) {
-                    scan.insert(base(&c).to_string(), oid);
-                }
+            if e.leg == "fix_out" && e.msg == "D"
+                && let (Some(c), Some(oid)) = (e.get(11), e.get(6121).and_then(|v| v.parse::<i64>().ok()))
+            {
+                scan.insert(base(&c).to_string(), oid);
             }
             let sent = e.leg == "fix_out" && order_of(e, &scan) == Some(id);
             let refused = e.leg == "api_in" && e.callbacks.as_array().into_iter().flatten().any(|c| {
@@ -215,7 +219,7 @@ pub(crate) fn at_their_effect(recs: &[Rec]) -> Vec<Rec> {
 pub(crate) struct OrderReplay {
     /// The order messages: key, ibx's and the reference's (with its seq),
     /// as [`comparable`] gives them.
-    pub pairs: Vec<(Key, Option<Fields>, Option<(u64, Fields)>)>,
+    pub pairs: Vec<Pair>,
     /// The order callbacks, one line each.
     pub cb_ours: Vec<String>,
     pub cb_theirs: Vec<String>,
@@ -252,7 +256,7 @@ pub(crate) fn replay_orders(fx: &Fixture) -> OrderReplay {
     // whole ClOrdIDs of the new orders (a preview's version differs).
     let mut ids: HashMap<String, String> = HashMap::new();
     let mut clords: HashMap<String, String> = HashMap::new();
-    for (k, r) in fx.recs.iter().enumerate() {
+    for r in &fx.recs {
         match (r.leg.as_str(), r.msg.as_str()) {
             ("api_out", "PLACE_ORDER") => {
                 let q = &r.request;
@@ -328,18 +332,18 @@ pub(crate) fn replay_orders(fx: &Fixture) -> OrderReplay {
         let their_frames: Vec<Fields> = theirs.iter().map(|(_, f)| f.clone()).collect();
         let (kt, ko) = (keys(&their_frames), keys(&ours));
         for (i, key) in kt.iter().enumerate().filter(|(_, k)| k.1 == "D") {
-            if let Some(j) = ko.iter().position(|o| o == key) {
-                if let (Some(a), Some(b)) = (tag(&their_frames[i], 11), tag(&ours[j], 11)) {
-                    ids.entry(base(a).to_string()).or_insert_with(|| base(b).to_string());
-                    clords.entry(a.to_string()).or_insert_with(|| b.to_string());
-                }
+            if let Some(j) = ko.iter().position(|o| o == key)
+                && let (Some(a), Some(b)) = (tag(&their_frames[i], 11), tag(&ours[j], 11))
+            {
+                ids.entry(base(a).to_string()).or_insert_with(|| base(b).to_string());
+                clords.entry(a.to_string()).or_insert_with(|| b.to_string());
             }
         }
     }
     s.settle();
     let their_frames: Vec<Fields> = theirs.iter().map(|(_, f)| f.clone()).collect();
     let (kt, ko) = (keys(&their_frames), keys(&ours));
-    let mut pairs: Vec<(Key, Option<Fields>, Option<(u64, Fields)>)> = Vec::new();
+    let mut pairs: Vec<Pair> = Vec::new();
     for (i, key) in kt.iter().enumerate() {
         let mine = ko.iter().position(|o| o == key).map(|j| comparable(&ours[j]));
         pairs.push((key.clone(), mine, Some((theirs[i].0, comparable(&theirs[i].1)))));

@@ -9,7 +9,7 @@ use crate::test_support::{parse_fields, to_pipe, Fields, Normaliser};
 
 const HMDS_CALLBACKS: &[&str] = &["historicalData", "historicalDataEnd", "headTimestamp", "error"];
 
-fn tag<'a>(f: &'a Fields, t: u32) -> Option<&'a str> {
+fn tag(f: &Fields, t: u32) -> Option<&str> {
     f.iter().find(|(k, _)| *k == t).map(|(_, v)| v.as_str())
 }
 
@@ -97,8 +97,8 @@ fn replay_hmds(fx: &Fixture) -> HmdsReplayed {
                 let f = r.fields();
                 let rank = queries_theirs.len();
                 let ours: Vec<&Fields> = s.hmds_out.iter().filter(|o| tag(o, 35) == Some("W")).collect();
-                if let (Some(gw), Some(o)) = (query_id(&f), ours.get(rank)) {
-                    if let Some(oq) = query_id(o) { qids.push((gw, oq)); }
+                if let (Some(gw), Some(oq)) = (query_id(&f), ours.get(rank).and_then(|o| query_id(o))) {
+                    qids.push((gw, oq));
                 }
                 queries_theirs.push((f, no_end.last().copied().unwrap_or(false)));
             }

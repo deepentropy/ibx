@@ -7,7 +7,7 @@ use super::replay::assert_same_callbacks;
 use super::session::Session;
 use crate::test_support::{to_pipe, Fields, Normaliser};
 
-fn tag<'a>(f: &'a Fields, t: u32) -> Option<&'a str> {
+fn tag(f: &Fields, t: u32) -> Option<&str> {
     f.iter().find(|(k, _)| *k == t).map(|(_, v)| v.as_str())
 }
 

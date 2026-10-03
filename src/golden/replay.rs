@@ -91,7 +91,7 @@ fn msg_type(f: &Fields) -> &str {
     f.iter().find(|(t, _)| *t == 35).map_or("", |(_, v)| v.as_str())
 }
 
-fn tag<'a>(f: &'a Fields, tag: u32) -> Option<&'a str> {
+fn tag(f: &Fields, tag: u32) -> Option<&str> {
     f.iter().find(|(t, _)| *t == tag).map(|(_, v)| v.as_str())
 }
 
