@@ -78,3 +78,36 @@ fn aapl_with_delayed_data_asked_before_the_open() {
 fn a_new_request_gets_the_quote_kept_from_a_cancelled_one() {
     assert!(replay_and_compare("l1_aapl_preopen_delayed", None, &[9100]) > 10);
 }
+
+/// The market data messages and contract lookups ibx wrote, against the
+/// reference's: (ours, theirs) for 35=V, then for 35=c.
+fn requests_of(name: &str, until: Option<u64>, skip: &[u64]) -> [(Vec<String>, Vec<String>); 2] {
+    let fx = load(name);
+    let r = super::replay::replay_market_data_without(&fx, "usfarm", MD_CALLBACKS, until, skip);
+    let (v, c) = super::replay::request_messages(&r.session, &["V"], &["c"]);
+    let theirs = |t: &str| r.requests_theirs.iter().filter(|m| m.starts_with(t)).cloned().collect::<Vec<_>>();
+    // Market data of contracts the reference asked on this farm only.
+    let farm_v = theirs("35=V");
+    let on_farm = |m: &String| farm_v.iter().any(|t| t.split('|').find(|f| f.starts_with("6008=")) == m.split('|').find(|f| f.starts_with("6008=")));
+    [(v.into_iter().filter(on_farm).collect(), farm_v.clone()), (c, theirs("35=c"))]
+}
+
+// The requests of the top of book replays (02/10 and 28/09/2026): the
+// subscribe of bid/ask and last (442, 443, with 6088=Socket and 9830=1),
+// the gateway's own exchange map entry (626) after the acknowledgement and
+// its cancel once the map came, the cancel of the request (no 6088), and
+// the symbol lookups: each message as the reference's, the farm ids and
+// lookup ids masked. EUR.USD, BMW and 7203 go to other farms: left out.
+#[test]
+fn market_data_requests_as_the_reference() {
+    for (name, until, skip) in [
+        ("l1_aapl_spy_preopen", Some(2635), &[2633][..]),
+        ("l1_spy_qqq_rth", Some(5410), &[][..]),
+        ("l1_aapl_preopen_delayed", Some(22599), &[][..]),
+    ] {
+        for (ours, theirs) in requests_of(name, until, skip) {
+            assert!(!theirs.is_empty(), "{name}");
+            assert_eq!(ours, theirs, "{name}");
+        }
+    }
+}

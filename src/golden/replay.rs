@@ -20,7 +20,29 @@ pub(crate) struct Replayed {
     /// Recorded server frames not sent (seq, link): no request of ibx
     /// matches them.
     pub unsent: Vec<(u64, String)>,
+    /// The market data messages (35=V) and contract lookups (35=c) of the
+    /// reference and of ibx, normalised (see [`request_messages`]).
+    pub requests_theirs: Vec<String>,
     pub session: Session,
+}
+
+/// A market data message (35=V) or a contract lookup (35=c) as compared:
+/// the framing dropped, the farm request ids (262) and the lookup id (320)
+/// masked, as the reference's and ibx's numbering differ.
+pub(crate) fn request_message(f: &Fields) -> String {
+    let n = crate::test_support::Normaliser::framing();
+    let out: Fields = n.apply(f).into_iter().map(|(t, v)| match t {
+        262 => (t, "{id}".to_string()),
+        320 => (t, "{lookup}".to_string()),
+        _ => (t, v),
+    }).collect();
+    crate::test_support::to_pipe(&out)
+}
+
+/// ibx's market data messages and contract lookups, as compared.
+pub(crate) fn request_messages(s: &Session, farm_types: &[&str], ccp_types: &[&str]) -> (Vec<String>, Vec<String>) {
+    let pick = |msgs: &[Fields], types: &[&str]| msgs.iter().filter(|f| types.contains(&msg_type(f))).map(request_message).collect();
+    (pick(&s.farm_out, farm_types), pick(&s.ccp_out, ccp_types))
 }
 
 /// A contract of a request: the client library's object or the request's
@@ -150,16 +172,29 @@ pub(crate) fn request(s: &mut Session, r: &Rec) {
 /// `keep` chooses the callbacks compared (by name); the replay stops at
 /// the record `until` (a request on another farm, for example).
 pub(crate) fn replay_market_data(fx: &Fixture, farm_conn: &str, keep: &[&str], until: Option<u64>) -> Replayed {
+    replay_market_data_without(fx, farm_conn, keep, until, &[])
+}
+
+/// [`replay_market_data`] without the records `skip` (requests that go to
+/// another farm).
+pub(crate) fn replay_market_data_without(fx: &Fixture, farm_conn: &str, keep: &[&str], until: Option<u64>, skip: &[u64]) -> Replayed {
     let mut s = Session::new();
     let mut ids = Ids::default();
     let mut theirs = Vec::new();
     let mut unsent = Vec::new();
-    for r in fx.recs.iter().take_while(|r| until.is_none_or(|u| r.seq < u)) {
+    let mut requests_theirs = Vec::new();
+    for r in fx.recs.iter().take_while(|r| until.is_none_or(|u| r.seq < u)).filter(|r| !skip.contains(&r.seq)) {
         match r.leg.as_str() {
             "api_out" => request(&mut s, r),
             "api_in" => theirs.extend(r.callbacks.as_array().into_iter().flatten().filter_map(canonical)),
-            "fix_out" if r.conn == farm_conn && r.msg == "V" => ids.pair_farm(&r.fields(), &s.farm_out),
-            "fix_out" if r.conn == "CCP" && r.msg == "c" => ids.pair_lookup(&r.fields(), &s.ccp_out),
+            "fix_out" if r.conn == farm_conn && r.msg == "V" => {
+                requests_theirs.push(request_message(&r.fields()));
+                ids.pair_farm(&r.fields(), &s.farm_out)
+            }
+            "fix_out" if r.conn == "CCP" && r.msg == "c" => {
+                requests_theirs.push(request_message(&r.fields()));
+                ids.pair_lookup(&r.fields(), &s.ccp_out)
+            }
             "fix_in" if r.conn == "CCP" && r.msg == "d" => {
                 // Pair lookups the engine made after the reference's.
                 for o in fx.recs.iter().filter(|o| o.is("fix_out", "CCP", "c") && o.seq < r.seq) {
@@ -212,7 +247,7 @@ pub(crate) fn replay_market_data(fx: &Fixture, farm_conn: &str, keep: &[&str], u
     let wanted = |line: &String| keep.iter().any(|k| line.split('|').next() == Some(*k));
     let ours = s.callbacks.iter().filter(|l| wanted(l)).cloned().collect();
     let theirs = theirs.into_iter().filter(wanted).collect();
-    Replayed { ours, theirs, unsent, session: s }
+    Replayed { ours, theirs, unsent, requests_theirs, session: s }
 }
 
 /// The two lists of callbacks are the same; on a difference, the first one
