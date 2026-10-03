@@ -1565,7 +1565,8 @@ fn cancel_fields(context: &mut Context, account_id: &str, order_id: crate::types
 
 /// The reference's answer to a cancel it does not send (ibx#464): the order
 /// is unknown (10147), or finished or already pending cancel (10148, with
-/// the state). `None` when the cancel goes out.
+/// the state; "cannot" as in every captured 10148, where the message table
+/// of the JAR says "can not", ibx#485). `None` when the cancel goes out.
 fn cancel_refusal(context: &Context, order_id: crate::types::OrderId) -> Option<(i64, String)> {
     let state = match context.order(order_id) {
         Some(o) if o.status == OrderStatus::PendingCancel => OrderStatus::PendingCancel,
@@ -1581,7 +1582,7 @@ fn cancel_refusal(context: &Context, order_id: crate::types::OrderId) -> Option<
     Some((
         10148,
         format!(
-            "OrderId {} that needs to be cancelled can not be cancelled, state: {}.",
+            "OrderId {} that needs to be cancelled cannot be cancelled, state: {}.",
             order_id, crate::client_core::order_status_str(state),
         ),
     ))
@@ -3865,7 +3866,7 @@ mod tests {
         let (sent, errors) = cancel_of(|ctx| ctx.insert_order(order(5, 0, OrderStatus::PendingCancel)));
         assert_eq!(sent, 0);
         assert_eq!(errors, [(5, 10148,
-            "OrderId 5 that needs to be cancelled can not be cancelled, state: PendingCancel.".to_string())]);
+            "OrderId 5 that needs to be cancelled cannot be cancelled, state: PendingCancel.".to_string())]);
     }
 
     #[test]
