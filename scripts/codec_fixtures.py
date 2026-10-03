@@ -76,6 +76,13 @@ REQUESTS = {
     "REQ_HISTOGRAM_DATA": "HistogramDataRequest",
     "REQ_REAL_TIME_BARS": "RealTimeBarsRequest",
     "CANCEL_REAL_TIME_BARS": "CancelRealTimeBars",
+    "CANCEL_PNL": "CancelPnL",
+    "CANCEL_PNL_SINGLE": "CancelPnLSingle",
+    "REQ_GLOBAL_CANCEL": "GlobalCancelRequest",
+    "REQ_IDS": "IdsRequest",
+    "CANCEL_HISTORICAL_TICKS": "CancelHistoricalTicks",
+    "REQ_SCANNER_PARAMETERS": "ScannerParametersRequest",
+    "REQ_COMPLETED_ORDERS": "CompletedOrdersRequest",
 }
 
 UNSET_FLOAT = sys.float_info.max
@@ -206,6 +213,36 @@ def export(src: Path, name: str, area: str, keep, notes: str):
     print(f"{path.name}: {len(out) - 1} records, {path.stat().st_size} bytes")
 
 
+SCENARIOS = OUT.parent / "scenarios"
+
+
+def api_sidecar(src: Path):
+    """The API side of a whole four-leg scenario, decoded: `<name>.api.jsonl`
+    next to it, one line per API record (`seq` with `request` or
+    `callbacks`), for the scenario replay tests (ibx#487)."""
+    import ibapi
+    lines = src.read_text(encoding="utf-8").splitlines()
+    head = json.loads(lines[0])
+    out = [{"type": "header", "format": "four-leg-api/1", "source": f"{src.parent.name}/{src.name}",
+            "scenario": head["scenario"], "decoder": f"official client library {ibapi.__version__}"}]
+    for line in lines[1:]:
+        r = json.loads(line)
+        if r["kind"] != "api" or not r.get("raw_b64"):
+            continue
+        body = base64.b64decode(r["raw_b64"])
+        rec = {"seq": r["seq"], "leg": r["leg"], "msg_name": r.get("msg_name")}
+        if r["leg"] == "api_in" and r.get("msg_name") not in ("SERVER_VERSION",):
+            rec["callbacks"] = callbacks(body)
+        elif r["leg"] == "api_out" and r.get("binary_id"):
+            rec["request"] = request(r.get("msg_name"), body)
+        else:
+            continue
+        out.append(rec)
+    path = src.with_name(src.stem + ".api.jsonl")
+    path.write_text("".join(json.dumps(o, separators=(",", ":")) + "\n" for o in out), encoding="utf-8")
+    print(f"{path.parent.name}/{path.name}: {len(out) - 1} records")
+
+
 def fix_types(*types, conns=None):
     def keep(r):
         if r["kind"] == "api":
@@ -325,9 +362,19 @@ def specs(cap: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--captures", required=True, type=Path)
+    ap.add_argument("--captures", type=Path)
     ap.add_argument("--only")
+    ap.add_argument("--scenarios", action="store_true",
+                    help="write the decoded API side of every scenario file (<name>.api.jsonl)")
     a = ap.parse_args()
+    if a.scenarios:
+        for src in sorted(SCENARIOS.glob("*/*.jsonl")):
+            if src.name.endswith(".api.jsonl") or (a.only and a.only not in src.stem):
+                continue
+            api_sidecar(src)
+        return
+    if a.captures is None:
+        ap.error("--captures is needed for the codec fixtures")
     for src, name, area, keep, notes in specs(a.captures):
         if a.only and a.only not in name:
             continue

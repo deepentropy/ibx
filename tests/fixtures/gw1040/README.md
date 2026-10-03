@@ -49,6 +49,15 @@ it always comes after the `fix_in` that caused it.
 | `20260926b` | closed | i105_combo_stock_smart, i105_combo_leg_prices, i105_combo_directed: combo orders of the same session (no set-up request), price change and cancel, per-leg prices, a combo on ARCA refused with 200 |
 | `20260930` | RTH | i105_combo_fill: a SMART stock combo bought and sold, its set-up, the fill of the combo and of each leg |
 | `20261002` | pre-open | b1_432_hist_ticks: historical ticks of AAPL and EUR.USD (start, end, both, no zone, refusals, AGGTRADES); b1_429_keep_up_to_date: four keepUpToDate requests, their updates, cancels and refusals; b1_431_hist_format: formatDate 1 and 2 bars, historicalDataEnd strings, head timestamps, cancel of an unknown request |
+| `20261002` | pre-open | b1_cleanup: reqAllOpenOrders and reqPositions, both answered from the gateway's state (no frame) |
+
+## Decoded API side (`<name>.api.jsonl`, ibx#487)
+
+Next to each scenario, its API messages decoded by the official client library, for the scenario replay
+(`test_support::scenario`, tests/scenario_replay.rs): line 1 a header (`format` `four-leg-api/1`, `source`,
+`decoder`), then one line per API record: `seq`, `leg`, `msg_name`, and `request` (`api_out`) or `callbacks`
+(`api_in`) in the form of the codec fixtures below. Made by `scripts/codec_fixtures.py --scenarios`; a scenario
+recorded again needs only this script run again.
 
 The `6010` (orderRef) values in the order frames are labels chosen by the recording scripts.
 

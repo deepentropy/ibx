@@ -1,0 +1,36 @@
+{"type":"header","format":"four-leg-api/1","source":"20261002/b1_458_news_dup.jsonl","scenario":"b1_458_news_dup","decoder":"official client library 10.46.01"}
+{"seq":15423,"leg":"api_out","msg_name":"START_API","request":{"clientId":198}}
+{"seq":15424,"leg":"api_in","msg_name":"MANAGED_ACCTS","callbacks":[["managedAccounts","DUXXXXXXX"]]}
+{"seq":15425,"leg":"api_in","msg_name":"NEXT_VALID_ID","callbacks":[["nextValidId",91]]}
+{"seq":15426,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfarm",""]]}
+{"seq":15427,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2106,"HMDS data farm connection is OK:cashhmds",""]]}
+{"seq":15428,"leg":"api_out","msg_name":"REQ_MKT_DATA","request":{"reqId":9580,"contract":{"conId":0,"symbol":"AAPL","secType":"STK","exchange":"SMART","currency":"USD"},"genericTickList":"mdoff,292"}}
+{"seq":15429,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2106,"HMDS data farm connection is OK:ushmds",""]]}
+{"seq":15430,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2158,"Sec-def data farm connection is OK:secdefil",""]]}
+{"seq":15438,"leg":"api_in","msg_name":"TICK_REQ_PARAMS","callbacks":[["tickReqParams",9580,0.01,"9c0001",3]]}
+{"seq":15460,"leg":"api_in","msg_name":"MARKET_DATA_TYPE","callbacks":[["marketDataType",9580,1]]}
+{"seq":15506,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9580,1790893800000,"DJ-RTPRO","DJ-RTPRO$1f790db1","VP Newstead Sells 2,399 Of Apple Inc >AAPL","A:800015:L:en"]]}
+{"seq":15507,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9580,1790920800000,"DJ-N","DJ-N$1f798bd2","The New Math of AI: Are Those Trillion-Dollar Numbers for Real? -- Barrons.com","L:en:A:800015"]]}
+{"seq":15508,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9580,1790920800000,"DJ-RTG","DJ-RTG$1f798bd2","The New Math of AI: Are Those Trillion-Dollar Numbers for Real? -- Barrons.com","L:en:A:800015"]]}
+{"seq":15509,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9580,1790920800000,"DJ-RTPRO","DJ-RTPRO$1f798bd2","The New Math of AI: Are Those Trillion-Dollar Numbers for Real? -- Barrons.com","L:en:A:800015"]]}
+{"seq":15517,"leg":"api_out","msg_name":"REQ_MKT_DATA","request":{"reqId":9581,"contract":{"conId":0,"symbol":"AAPL","secType":"STK","exchange":"SMART","currency":"USD"},"genericTickList":"mdoff,292"}}
+{"seq":15525,"leg":"api_in","msg_name":"MARKET_DATA_TYPE","callbacks":[["marketDataType",9581,1]]}
+{"seq":15526,"leg":"api_in","msg_name":"TICK_REQ_PARAMS","callbacks":[["tickReqParams",9581,0.01,"9c0001",3]]}
+{"seq":15527,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9581,1790893800000,"DJ-RTPRO","DJ-RTPRO$1f790db1","VP Newstead Sells 2,399 Of Apple Inc >AAPL","A:800015:L:en"]]}
+{"seq":15528,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9581,1790920800000,"DJ-RTG","DJ-RTG$1f798bd2","The New Math of AI: Are Those Trillion-Dollar Numbers for Real? -- Barrons.com","L:en:A:800015"]]}
+{"seq":15529,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9581,1790920800000,"DJ-N","DJ-N$1f798bd2","The New Math of AI: Are Those Trillion-Dollar Numbers for Real? -- Barrons.com","L:en:A:800015"]]}
+{"seq":15530,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9581,1790920800000,"DJ-RTPRO","DJ-RTPRO$1f798bd2","The New Math of AI: Are Those Trillion-Dollar Numbers for Real? -- Barrons.com","L:en:A:800015"]]}
+{"seq":15591,"leg":"api_out","msg_name":"REQ_MKT_DATA","request":{"reqId":9582,"contract":{"conId":0,"symbol":"MSFT","secType":"STK","exchange":"SMART","currency":"USD"},"genericTickList":"mdoff,292:DJ-N"}}
+{"seq":15592,"leg":"api_out","msg_name":"REQ_MKT_DATA","request":{"reqId":9583,"contract":{"conId":0,"symbol":"NVDA","secType":"STK","exchange":"SMART","currency":"USD"},"genericTickList":"mdoff,292:XYZ"}}
+{"seq":15600,"leg":"api_in","msg_name":"TICK_REQ_PARAMS","callbacks":[["tickReqParams",9582,0.01,"9c0001",3]]}
+{"seq":15631,"leg":"api_in","msg_name":"MARKET_DATA_TYPE","callbacks":[["marketDataType",9582,1]]}
+{"seq":15636,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",9583,null,10094,"API News error:Source code unchecked in API news Settings: XYZ",""]]}
+{"seq":15718,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9582,1790878380000,"DJ-N","DJ-N$1f78cb2c","* Former LinkedIn CEO Ryan Roslansky to Leave Microsoft","A:800015:L:en"]]}
+{"seq":15719,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9582,1790878440000,"DJ-N","DJ-N$1f78cb55","* Earlier in 2026, Roslansky Became Part of a New Group in Charge of Microsoft 365 Apps","A:800015:L:en"]]}
+{"seq":15720,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9582,1790879580000,"DJ-N","DJ-N$1f78ceea","Microsoft Exec., Former LinkedIn CEO Roslansky Stepping Down","A:800015:L:en"]]}
+{"seq":15721,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9582,1790924400000,"DJ-N","DJ-N$1f79a18a","Quantum Computing Is Having a Moment. What to Know About the Hottest Sector After AI. -- Barrons.com","A:800015:L:en"]]}
+{"seq":15722,"leg":"api_in","msg_name":"TICK_NEWS","callbacks":[["tickNews",9582,1790931600000,"DJ-N","DJ-N$1f79d3bf","Amazon's New Push to Get Buy-In for Data Center Build-Out -- WSJ","L:en:A:800015"]]}
+{"seq":15737,"leg":"api_out","msg_name":"CANCEL_MKT_DATA","request":{"reqId":9580}}
+{"seq":15738,"leg":"api_out","msg_name":"CANCEL_MKT_DATA","request":{"reqId":9581}}
+{"seq":15739,"leg":"api_out","msg_name":"CANCEL_MKT_DATA","request":{"reqId":9582}}
+{"seq":15740,"leg":"api_out","msg_name":"CANCEL_MKT_DATA","request":{"reqId":9583}}

@@ -1,0 +1,15 @@
+{"type":"header","format":"four-leg-api/1","source":"20260926/i105_combo_stock_smart.jsonl","scenario":"i105_combo_stock_smart","decoder":"official client library 10.46.01"}
+{"seq":5967,"leg":"api_out","msg_name":"START_API","request":{"clientId":198}}
+{"seq":5968,"leg":"api_in","msg_name":"MANAGED_ACCTS","callbacks":[["managedAccounts","DUXXXXXXX"]]}
+{"seq":5969,"leg":"api_in","msg_name":"NEXT_VALID_ID","callbacks":[["nextValidId",23]]}
+{"seq":5970,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfarm",""]]}
+{"seq":5971,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2106,"HMDS data farm connection is OK:ushmds",""]]}
+{"seq":5972,"leg":"api_out","msg_name":"PLACE_ORDER","request":{"orderId":23,"contract":{"symbol":"SPY,QQQ","secType":"BAG","exchange":"SMART","currency":"USD","comboLegs":[{"conId":756733,"ratio":1,"action":"BUY","exchange":"SMART"},{"conId":320227571,"ratio":1,"action":"SELL","exchange":"SMART"}]},"order":{"softDollarTier":{},"orderId":23,"action":"BUY","totalQuantity":"1","orderType":"LMT","lmtPrice":-23.15,"tif":"DAY","orderRef":"fourleg","smartComboRoutingParams":[{"tag":"NonGuaranteed","value":"1"}],"orderComboLegs":[{},{}]},"attachedOrders":{}}}
+{"seq":5973,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2158,"Sec-def data farm connection is OK:secdefil",""]]}
+{"seq":6027,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",23,null,478,"Parameters in request conflicts with contract parameters received by contract id:Requested symbol SPY,QQQ, in legs QQQ,SPY",""]]}
+{"seq":6028,"leg":"api_out","msg_name":"PLACE_ORDER","request":{"orderId":24,"contract":{"symbol":"SPY,QQQ","secType":"BAG","exchange":"SMART","currency":"USD","comboLegs":[{"conId":756733,"ratio":1,"action":"BUY","exchange":"SMART"},{"conId":320227571,"ratio":1,"action":"SELL","exchange":"SMART"}]},"order":{"softDollarTier":{},"orderId":24,"action":"BUY","totalQuantity":"1","orderType":"LMT","lmtPrice":-24.15,"tif":"DAY","orderRef":"fourleg","smartComboRoutingParams":[{"tag":"NonGuaranteed","value":"1"}],"orderComboLegs":[{},{}]},"attachedOrders":{}}}
+{"seq":6029,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",24,null,478,"Parameters in request conflicts with contract parameters received by contract id:Requested symbol SPY,QQQ, in legs QQQ,SPY",""]]}
+{"seq":6030,"leg":"api_out","msg_name":"CANCEL_ORDER","request":{"orderId":24,"orderCancel":{}}}
+{"seq":6031,"leg":"api_out","msg_name":"CANCEL_ORDER","request":{"orderId":23,"orderCancel":{}}}
+{"seq":6032,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",24,null,10147,"OrderId 24 that needs to be cancelled is not found.",""]]}
+{"seq":6033,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",23,null,10147,"OrderId 23 that needs to be cancelled is not found.",""]]}

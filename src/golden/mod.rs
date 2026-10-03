@@ -11,12 +11,18 @@
 //!   normalised (`test_support::normalise`).
 //!
 //! The fixtures are under tests/fixtures/gw1040/codec/ (`codec/1`, made by
-//! scripts/codec_fixtures.py).
+//! scripts/codec_fixtures.py), read and replayed by
+//! `test_support::scenario`.
 
 mod account;
-mod fixture;
 mod hmds;
 mod l1;
 mod orders;
 mod replay;
-mod session;
+
+use crate::test_support::scenario::{load_codec, Scenario};
+
+/// A codec fixture by name.
+fn load(name: &str) -> Scenario {
+    load_codec(name)
+}

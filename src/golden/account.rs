@@ -2,9 +2,9 @@
 //! the request against the reference's, the rows against the callbacks
 //! the reference gave.
 
-use super::fixture::{canonical, load, rebuild_binary, Fixture};
-use super::replay::assert_same_callbacks;
-use super::session::Session;
+use super::load;
+use crate::test_support::scenario::record::{binary_body, canonical, rebuild_binary};
+use crate::test_support::scenario::{assert_same_callbacks, Scenario as Fixture, Session};
 use crate::test_support::{to_pipe, Fields, Normaliser};
 
 fn tag(f: &Fields, t: u32) -> Option<&str> {
@@ -60,7 +60,7 @@ fn replay_account_summary(fx: &Fixture) -> AccountReplay {
             }
             ("fix_in", "UM" | "RL" | "EB" | "UT" | "UP") => {
                 // The subscription id is a text field of the frame.
-                let body = ids.iter().fold(super::fixture::binary_body(&r.raw), |b, (gw, ours)| {
+                let body = ids.iter().fold(binary_body(&r.raw), |b, (gw, ours)| {
                     b.replace(&format!("6529={gw}"), &format!("6529={ours}"))
                 });
                 s.send_ccp(&rebuild_binary(&r.raw, &body));

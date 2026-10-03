@@ -2,34 +2,17 @@
 //! the reference's, the bars and head timestamps against the reference's
 //! callbacks.
 
-use super::fixture::{canonical, load, rebuild_text, Fixture};
-use super::replay::{assert_same_callbacks, contract_of};
-use super::session::Session;
-use crate::test_support::{parse_fields, to_pipe, Fields, Normaliser};
+use super::load;
+use crate::test_support::scenario::record::{canonical, rebuild_text};
+use crate::test_support::scenario::request::contract_of;
+use crate::test_support::scenario::runner::hmds_query;
+use crate::test_support::scenario::{assert_same_callbacks, Scenario as Fixture, Session};
+use crate::test_support::{parse_fields, Fields};
 
 const HMDS_CALLBACKS: &[&str] = &["historicalData", "historicalDataEnd", "headTimestamp", "error"];
 
 fn tag(f: &Fields, t: u32) -> Option<&str> {
     f.iter().find(|(k, _)| *k == t).map(|(_, v)| v.as_str())
-}
-
-/// A historical farm query (35=W) as compared: the framing dropped; in the
-/// query, the id before its first `;;` (the reference's counter, cf76) and
-/// the end time of a request with none (the time it was made) masked.
-fn hmds_query(f: &Fields, mask_end: bool) -> String {
-    let out: Fields = Normaliser::framing().apply(f).into_iter().map(|(t, mut v)| {
-        if t == 6118 {
-            if let (Some(a), Some(b)) = (v.find("<id>"), v.find("</id>")) {
-                let end = v[a + 4..b].find(";;").map_or(b, |k| a + 4 + k);
-                v.replace_range(a + 4..end, "{id}");
-            }
-            if mask_end && let (Some(a), Some(b)) = (v.find("<endTime>"), v.find("</endTime>")) {
-                v.replace_range(a + 9..b, "{now}");
-            }
-        }
-        (t, v)
-    }).collect();
-    to_pipe(&out)
 }
 
 /// The window id of a 35=W: the `<id>` up to its first `;;`.

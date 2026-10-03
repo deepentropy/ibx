@@ -1,28 +1,39 @@
-//! A replay session: the engine on in-memory links to a scripted farm and
-//! auth server, the API client on top, driven one step at a time from the
-//! test thread, so the callbacks of each recorded frame are known.
+//! A replay session: the engine on in-memory links to a scripted farm,
+//! auth server and historical farm, driven one step at a time from the
+//! test thread, so the callbacks of each recorded frame are known. The API
+//! client on top is the Rust one ([`Session`]) or any other through
+//! [`super::Driver`] (the Python one).
 
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crossbeam_channel::Sender;
+
 use crate::api::client::EClient;
-use crate::api::types::{Contract, Order, OrderState, TickAttrib};
+use crate::api::types::{
+    BarData, CommissionAndFeesReport, Contract, ContractDetails, Execution, Order, OrderState, TickAttrib,
+};
 use crate::api::wrapper::Wrapper;
 use crate::bridge::SharedState;
 use crate::engine::hot_loop::HotLoop;
 use crate::test_support::{parse_fields, Fields, Peer};
+use crate::types::ControlCommand;
 
-use super::fixture::{attr_mask, n, order_price, perm, OPEN_ORDER_FIELDS};
+use super::record::{attr_mask, n, order_price, perm, OPEN_ORDER_FIELDS};
 
-pub(crate) const ACCOUNT: &str = "DUXXXXXXX";
+pub const ACCOUNT: &str = "DUXXXXXXX";
 
 /// Steps of the engine after each input: enough for a request to reach the
 /// wire and for its reply to reach the queues.
 const SETTLE_STEPS: usize = 4;
 
-pub(crate) struct Session {
+/// The engine and its three links, with every message it sent on each.
+pub struct Links {
     pub engine: HotLoop,
-    pub client: EClient,
     pub shared: Arc<SharedState>,
+    /// The engine's command channel, for an API client to take.
+    pub control_tx: Sender<ControlCommand>,
     pub farm: Peer,
     pub ccp: Peer,
     pub hmds: Peer,
@@ -30,11 +41,9 @@ pub(crate) struct Session {
     pub farm_out: Vec<Fields>,
     pub ccp_out: Vec<Fields>,
     pub hmds_out: Vec<Fields>,
-    /// The callbacks ibx gave, one line each (see [`Recorder`]).
-    pub callbacks: Vec<String>,
 }
 
-impl Session {
+impl Links {
     pub fn new() -> Self {
         let shared = Arc::new(SharedState::new());
         // Reads return at once: the test steps the engine itself.
@@ -60,23 +69,87 @@ impl Session {
             "GBP:58666494,HKD:61227072,INR:136000444,JPY:61227069,KRW:136000424,MXN:136000449,NOK:136000452,",
             "NZD:136000435,SEK:136000429,USD:28812380",
         ));
-        let client = EClient::from_parts(shared.clone(), control_tx, std::thread::spawn(|| {}), ACCOUNT.into());
         Self {
-            engine, client, shared, farm, ccp, hmds,
-            farm_out: Vec::new(), ccp_out: Vec::new(), hmds_out: Vec::new(), callbacks: Vec::new(),
+            engine, shared, control_tx, farm, ccp, hmds,
+            farm_out: Vec::new(), ccp_out: Vec::new(), hmds_out: Vec::new(),
         }
+    }
+
+    /// Run the engine a few steps and read what it sent.
+    pub fn step(&mut self) {
+        for _ in 0..SETTLE_STEPS {
+            self.engine.step_for_test();
+        }
+        self.farm_out.extend(self.farm.messages().iter().map(|m| parse_fields(m)));
+        self.ccp_out.extend(self.ccp.messages().iter().map(|m| parse_fields(m)));
+        self.hmds_out.extend(self.hmds.messages().iter().map(|m| parse_fields(m)));
+    }
+
+    /// Run `f` on this thread while the engine runs on another (a client
+    /// call may wait for the engine's answer); then the engine settles.
+    pub fn during<R>(&mut self, f: impl FnOnce() -> R) -> R {
+        let stop = AtomicBool::new(false);
+        let engine = &mut self.engine;
+        let out = std::thread::scope(|s| {
+            s.spawn(|| {
+                while !stop.load(Ordering::Acquire) {
+                    engine.step_for_test();
+                    std::thread::yield_now();
+                }
+            });
+            let out = f();
+            stop.store(true, Ordering::Release);
+            out
+        });
+        self.step();
+        out
+    }
+}
+
+impl Default for Links {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The links with the Rust API client on top, its callbacks as lines.
+pub struct Session {
+    pub links: Links,
+    pub client: EClient,
+    /// The callbacks ibx gave, one line each (see [`Recorder`]).
+    pub callbacks: Vec<String>,
+}
+
+impl Deref for Session {
+    type Target = Links;
+    fn deref(&self) -> &Links {
+        &self.links
+    }
+}
+
+impl DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut Links {
+        &mut self.links
+    }
+}
+
+impl Session {
+    pub fn new() -> Self {
+        let links = Links::new();
+        let client = EClient::from_parts(links.shared.clone(), links.control_tx.clone(), std::thread::spawn(|| {}), ACCOUNT.into());
+        Self { links, client, callbacks: Vec::new() }
     }
 
     /// Call the API client; the engine runs on this thread meanwhile (a
     /// call may wait for the engine's answer). Then the engine settles and
     /// the callbacks are taken.
     pub fn call<R: Send>(&mut self, f: impl FnOnce(&EClient) -> R + Send) -> R {
-        let Self { engine, client, .. } = self;
+        let Self { links, client, .. } = self;
         let client = &*client;
         let out = std::thread::scope(|s| {
             let h = s.spawn(move || f(client));
             while !h.is_finished() {
-                engine.step_for_test();
+                links.engine.step_for_test();
                 std::thread::yield_now();
             }
             h.join().unwrap()
@@ -87,49 +160,57 @@ impl Session {
 
     /// Run the engine a few steps, read what it sent, and take the callbacks.
     pub fn settle(&mut self) {
-        for _ in 0..SETTLE_STEPS {
-            self.engine.step_for_test();
-        }
-        self.farm_out.extend(self.farm.messages().iter().map(|m| parse_fields(m)));
-        self.ccp_out.extend(self.ccp.messages().iter().map(|m| parse_fields(m)));
-        self.hmds_out.extend(self.hmds.messages().iter().map(|m| parse_fields(m)));
+        self.links.step();
         let mut rec = Recorder::default();
         self.client.process_msgs(&mut rec);
         self.callbacks.extend(rec.lines);
         // What the dispatch sent to the engine (a snapshot's cancel).
-        for _ in 0..SETTLE_STEPS {
-            self.engine.step_for_test();
-        }
-        self.farm_out.extend(self.farm.messages().iter().map(|m| parse_fields(m)));
-        self.ccp_out.extend(self.ccp.messages().iter().map(|m| parse_fields(m)));
-        self.hmds_out.extend(self.hmds.messages().iter().map(|m| parse_fields(m)));
+        self.links.step();
     }
 
     pub fn send_farm(&mut self, raw: &[u8]) {
-        self.farm.send_raw(raw);
+        self.links.farm.send_raw(raw);
         self.settle();
     }
 
     pub fn send_ccp(&mut self, raw: &[u8]) {
-        self.ccp.send_raw(raw);
+        self.links.ccp.send_raw(raw);
         self.settle();
     }
 
     /// A message to the engine on the historical link, compressed as the
     /// farm sends it.
     pub fn send_hmds_message(&mut self, fields: &Fields) {
-        let f: Vec<(u32, &str)> = fields.iter().filter(|(t, _)| !matches!(t, 8 | 9 | 10 | 34))
-            .map(|(t, v)| (*t, v.as_str())).collect();
-        self.hmds.send_fixcomp(&f);
+        send_hmds(&mut self.links.hmds, fields);
         self.settle();
     }
 }
 
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A message on the historical link, compressed as the farm sends it.
+pub fn send_hmds(peer: &mut Peer, fields: &Fields) {
+    let f: Vec<(u32, &str)> = fields.iter().filter(|(t, _)| !matches!(t, 8 | 9 | 10 | 34))
+        .map(|(t, v)| (*t, v.as_str())).collect();
+    peer.send_fixcomp(&f);
+}
+
 /// The callbacks as one line each, in the form of
-/// [`super::fixture::canonical`].
+/// [`super::record::canonical`].
 #[derive(Default)]
-pub(crate) struct Recorder {
+pub struct Recorder {
     pub lines: Vec<String>,
+}
+
+fn bar_line(name: &str, req_id: i64, b: &BarData) -> String {
+    format!(
+        "{name}|{req_id}|{}|{}|{}|{}|{}|{}|{}|{}",
+        b.date, n(b.open), n(b.high), n(b.low), n(b.close), b.volume, n(b.wap), b.bar_count,
+    )
 }
 
 impl Wrapper for Recorder {
@@ -163,11 +244,47 @@ impl Wrapper for Recorder {
     fn account_summary_end(&mut self, req_id: i64) {
         self.lines.push(format!("accountSummaryEnd|{req_id}"));
     }
-    fn historical_data(&mut self, req_id: i64, b: &crate::api::types::BarData) {
+    fn update_account_value(&mut self, key: &str, value: &str, currency: &str, account: &str) {
+        self.lines.push(format!("updateAccountValue|{key}|{value}|{currency}|{account}"));
+    }
+    fn update_portfolio(
+        &mut self, c: &Contract, position: f64, market_price: f64, market_value: f64, average_cost: f64,
+        unrealized_pnl: f64, realized_pnl: f64, account: &str,
+    ) {
         self.lines.push(format!(
-            "historicalData|{req_id}|{}|{}|{}|{}|{}|{}|{}|{}",
-            b.date, n(b.open), n(b.high), n(b.low), n(b.close), b.volume, n(b.wap), b.bar_count,
+            "updatePortfolio|{}|{}|{}|{}|{}|{}|{}|{}|{account}",
+            c.con_id, c.symbol, n(position), n(market_price), n(market_value), n(average_cost), n(unrealized_pnl), n(realized_pnl),
         ));
+    }
+    fn update_account_time(&mut self, timestamp: &str) {
+        self.lines.push(format!("updateAccountTime|{timestamp}"));
+    }
+    fn account_download_end(&mut self, account: &str) {
+        self.lines.push(format!("accountDownloadEnd|{account}"));
+    }
+    fn position(&mut self, account: &str, c: &Contract, pos: f64, avg_cost: f64) {
+        self.lines.push(format!("position|{account}|{}|{}|{}|{}", c.con_id, c.symbol, n(pos), n(avg_cost)));
+    }
+    fn position_end(&mut self) {
+        self.lines.push("positionEnd".into());
+    }
+    fn pnl(&mut self, req_id: i64, daily: f64, unrealized: f64, realized: f64) {
+        self.lines.push(format!("pnl|{req_id}|{}|{}|{}", n(daily), n(unrealized), n(realized)));
+    }
+    fn pnl_single(&mut self, req_id: i64, pos: f64, daily: f64, unrealized: f64, realized: f64, value: f64) {
+        self.lines.push(format!("pnlSingle|{req_id}|{}|{}|{}|{}|{}", n(pos), n(daily), n(unrealized), n(realized), n(value)));
+    }
+    fn scanner_data(&mut self, req_id: i64, rank: i32, d: &ContractDetails, _: &str, _: &str, _: &str, _: &str) {
+        self.lines.push(format!("scannerData|{req_id}|{rank}|{}|{}", d.contract.con_id, d.contract.symbol));
+    }
+    fn scanner_data_end(&mut self, req_id: i64) {
+        self.lines.push(format!("scannerDataEnd|{req_id}"));
+    }
+    fn historical_data(&mut self, req_id: i64, b: &BarData) {
+        self.lines.push(bar_line("historicalData", req_id, b));
+    }
+    fn historical_data_update(&mut self, req_id: i64, b: &BarData) {
+        self.lines.push(bar_line("historicalDataUpdate", req_id, b));
     }
     fn historical_data_end(&mut self, req_id: i64, start: &str, end: &str) {
         self.lines.push(format!("historicalDataEnd|{req_id}|{start}|{end}"));
@@ -218,5 +335,21 @@ impl Wrapper for Recorder {
         self.lines.push(format!(
             "openOrder|{order_id}|{}|{}|{}|{}|{}", c.con_id, c.symbol, c.sec_type, fields.join(","), state.status,
         ));
+    }
+    fn open_order_end(&mut self) {
+        self.lines.push("openOrderEnd".into());
+    }
+    fn exec_details(&mut self, req_id: i64, c: &Contract, e: &Execution) {
+        self.lines.push(format!(
+            "execDetails|{req_id}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            c.con_id, c.symbol, e.exchange, e.side, n(e.shares), n(e.price), n(e.cum_qty), n(e.avg_price),
+            e.order_id, e.order_ref, e.last_liquidity,
+        ));
+    }
+    fn exec_details_end(&mut self, req_id: i64) {
+        self.lines.push(format!("execDetailsEnd|{req_id}"));
+    }
+    fn commission_and_fees_report(&mut self, r: &CommissionAndFeesReport) {
+        self.lines.push(format!("commissionAndFeesReport|{}|{}", n(r.commission_and_fees), r.currency));
     }
 }

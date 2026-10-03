@@ -1,6 +1,11 @@
-//! The codec fixtures (tests/fixtures/gw1040/codec/, format `codec/1`): a
-//! slice of a recorded reference scenario, the frames as recorded and the
-//! API side as the official client library read it.
+//! The recorded scenarios: the four-leg files (tests/fixtures/gw1040/
+//! scenarios/, format `four-leg/1`, with their decoded API side
+//! `<name>.api.jsonl`) and the codec fixtures (tests/fixtures/gw1040/codec/,
+//! format `codec/1`). Both give the same records: the frames as recorded
+//! and the API side as the official client library read it.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use serde_json::Value;
@@ -9,7 +14,7 @@ use crate::test_support::{parse_fields, Fields};
 
 /// One recorded message.
 #[derive(Debug, Clone)]
-pub(crate) struct Rec {
+pub struct Rec {
     pub seq: u64,
     /// `api_out`, `api_in`, `fix_out` or `fix_in`.
     pub leg: String,
@@ -38,36 +43,72 @@ impl Rec {
     }
 }
 
-/// A fixture: its header and its records in recorded order.
-pub(crate) struct Fixture {
+/// A scenario: its header and its records in recorded order.
+#[derive(Clone)]
+pub struct Scenario {
     pub header: Value,
     pub recs: Vec<Rec>,
 }
 
-pub(crate) fn load(name: &str) -> Fixture {
-    let path = format!("{}/tests/fixtures/gw1040/codec/{name}.jsonl", env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+/// The fixture tree of the reference recordings.
+pub fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gw1040")
+}
+
+/// A codec fixture by name (tests/fixtures/gw1040/codec/<name>.jsonl).
+pub fn load_codec(name: &str) -> Scenario {
+    load_path(&fixtures_dir().join("codec").join(format!("{name}.jsonl")))
+}
+
+/// A four-leg scenario by its path under tests/fixtures/gw1040/scenarios/
+/// (`20260926/lmt_cancel`), with its decoded API side.
+pub fn load_scenario(rel: &str) -> Scenario {
+    load_path(&fixtures_dir().join("scenarios").join(format!("{rel}.jsonl")))
+}
+
+/// A scenario file of either format. A four-leg file takes its API side
+/// from `<name>.api.jsonl` (scripts/codec_fixtures.py --scenarios).
+pub fn load_path(path: &Path) -> Scenario {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let mut lines = text.lines();
     let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
-    assert_eq!(header["format"], "codec/1", "{path}");
+    let four_leg = match header["format"].as_str() {
+        Some("codec/1") => false,
+        Some("four-leg/1") => true,
+        other => panic!("{}: format {other:?}", path.display()),
+    };
+    let api: HashMap<u64, Value> = if four_leg {
+        let side = path.with_file_name(format!("{}.api.jsonl", path.file_stem().unwrap().to_string_lossy()));
+        let text = std::fs::read_to_string(&side).unwrap_or_else(|e| {
+            panic!("{}: {e} (made by scripts/codec_fixtures.py --scenarios)", side.display())
+        });
+        text.lines().skip(1).map(|l| {
+            let v: Value = serde_json::from_str(l).unwrap();
+            (v["seq"].as_u64().unwrap(), v)
+        }).collect()
+    } else {
+        HashMap::new()
+    };
     let recs = lines.map(|l| {
         let v: Value = serde_json::from_str(l).unwrap();
         let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
+        let seq = v["seq"].as_u64().unwrap();
+        let decoded = api.get(&seq).unwrap_or(&v);
         Rec {
-            seq: v["seq"].as_u64().unwrap(),
+            seq,
             leg: s("leg"),
             conn: s("conn"),
             msg: if v["msg_type"].is_string() { s("msg_type") } else { s("msg_name") },
             raw: v["raw_b64"].as_str().map(|b| base64::engine::general_purpose::STANDARD.decode(b).unwrap()).unwrap_or_default(),
-            request: v["request"].clone(),
-            callbacks: v["callbacks"].clone(),
+            request: decoded["request"].clone(),
+            callbacks: decoded["callbacks"].clone(),
         }
     }).collect();
-    Fixture { header, recs }
+    Scenario { header, recs }
 }
 
 /// A number of the client library as text: `"80"` (a decimal) or `80.0`.
-pub(crate) fn num(v: &Value) -> f64 {
+pub fn num(v: &Value) -> f64 {
     match v {
         Value::String(s) if s == "MAX" => f64::MAX,
         Value::String(s) => s.parse().unwrap_or_else(|_| panic!("number {s}")),
@@ -80,20 +121,20 @@ pub(crate) fn num(v: &Value) -> f64 {
 
 /// A number as the callbacks are compared: shortest decimal text, so 80,
 /// 80.0 and "80" are the same.
-pub(crate) fn n(v: f64) -> String {
+pub fn n(v: f64) -> String {
     if v == f64::MAX { "MAX".into() } else { format!("{v}") }
 }
 
 /// The attribute mask of a price tick: 1 can auto execute, 2 past limit,
 /// 4 pre-open (as the API message's `attrMask`).
-pub(crate) fn attr_mask(auto: bool, past: bool, pre: bool) -> u8 {
+pub fn attr_mask(auto: bool, past: bool, pre: bool) -> u8 {
     auto as u8 | (past as u8) << 1 | (pre as u8) << 2
 }
 
 /// The callbacks of a recorded API message, each as one line of text in the
-/// form [`super::session::Recorder`] gives for ibx's callbacks. Callbacks
-/// the comparison does not cover give `None`.
-pub(crate) fn canonical(cb: &Value) -> Option<String> {
+/// form [`super::Recorder`] gives for ibx's callbacks. Callbacks the
+/// comparison does not cover give `None`.
+pub fn canonical(cb: &Value) -> Option<String> {
     let a = cb.as_array().unwrap();
     let name = a[0].as_str().unwrap();
     let s = |i: usize| a[i].as_str().unwrap_or("").to_string();
@@ -116,11 +157,50 @@ pub(crate) fn canonical(cb: &Value) -> Option<String> {
             i(1), s(2), n(num(&a[3])), n(num(&a[4])), n(num(&a[5])), perm(i(6)), i(7), n(num(&a[8])), i(9), s(10), n(num(&a[11])),
         ),
         "openOrder" => open_order_line(i(1), &a[2], &a[3], &a[4]),
-        "historicalData" => {
+        "openOrderEnd" => "openOrderEnd".into(),
+        "execDetails" => {
+            let (c, e) = (&a[2], &a[3]);
+            let es = |k: &str| e[k].as_str().unwrap_or("").to_string();
+            format!(
+                "execDetails|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                i(1), c["conId"].as_i64().unwrap_or(0), c["symbol"].as_str().unwrap_or(""), es("exchange"), es("side"),
+                n(num(&e["shares"])), n(num(&e["price"])), n(num(&e["cumQty"])), n(num(&e["avgPrice"])),
+                e["orderId"].as_i64().unwrap_or(0), es("orderRef"), e["lastLiquidity"].as_i64().unwrap_or(0),
+            )
+        }
+        "execDetailsEnd" => format!("execDetailsEnd|{}", i(1)),
+        "commissionAndFeesReport" => {
+            let r = &a[1];
+            format!("commissionAndFeesReport|{}|{}", n(num(&r["commissionAndFees"])), r["currency"].as_str().unwrap_or(""))
+        }
+        "position" => {
+            let c = &a[2];
+            format!("position|{}|{}|{}|{}|{}", s(1), c["conId"].as_i64().unwrap_or(0), c["symbol"].as_str().unwrap_or(""), n(num(&a[3])), n(num(&a[4])))
+        }
+        "positionEnd" => "positionEnd".into(),
+        "updateAccountValue" => format!("updateAccountValue|{}|{}|{}|{}", s(1), s(2), s(3), s(4)),
+        "updatePortfolio" => {
+            let c = &a[1];
+            format!(
+                "updatePortfolio|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                c["conId"].as_i64().unwrap_or(0), c["symbol"].as_str().unwrap_or(""), n(num(&a[2])), n(num(&a[3])),
+                n(num(&a[4])), n(num(&a[5])), n(num(&a[6])), n(num(&a[7])), s(8),
+            )
+        }
+        "updateAccountTime" => format!("updateAccountTime|{}", s(1)),
+        "accountDownloadEnd" => format!("accountDownloadEnd|{}", s(1)),
+        "pnl" => format!("pnl|{}|{}|{}|{}", i(1), n(num(&a[2])), n(num(&a[3])), n(num(&a[4]))),
+        "pnlSingle" => format!("pnlSingle|{}|{}|{}|{}|{}|{}", i(1), n(num(&a[2])), n(num(&a[3])), n(num(&a[4])), n(num(&a[5])), n(num(&a[6]))),
+        "scannerData" => {
+            let c = &a[3]["contract"];
+            format!("scannerData|{}|{}|{}|{}", i(1), i(2), c["conId"].as_i64().unwrap_or(0), c["symbol"].as_str().unwrap_or(""))
+        }
+        "scannerDataEnd" => format!("scannerDataEnd|{}", i(1)),
+        "historicalData" | "historicalDataUpdate" => {
             let b = &a[2];
             let d = |k: &str| n(num(&b[k]));
             format!(
-                "historicalData|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                "{name}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
                 i(1), b["date"].as_str().unwrap_or(""), d("open"), d("high"), d("low"), d("close"),
                 num(&b["volume"]) as i64, d("wap"), b["barCount"].as_i64().unwrap_or(0),
             )
@@ -142,13 +222,13 @@ pub(crate) fn canonical(cb: &Value) -> Option<String> {
 
 /// A permId as compared: the reference's is the integer part of its
 /// ClOrdID, ibx's its own; both are session values. Set or not.
-pub(crate) fn perm(v: i64) -> &'static str {
+pub fn perm(v: i64) -> &'static str {
     if v == 0 { "0" } else { "{perm}" }
 }
 
 /// The fields of an openOrder the comparison covers. trailStopPrice is
 /// left out: ibx#491 (the reference shows the stop the server reports).
-pub(crate) const OPEN_ORDER_FIELDS: &[&str] = &[
+pub const OPEN_ORDER_FIELDS: &[&str] = &[
     "action", "totalQuantity", "orderType", "lmtPrice", "auxPrice", "tif", "ocaGroup", "orderRef",
     "parentId", "outsideRth", "goodAfterTime", "goodTillDate", "account", "trailingPercent",
     "whatIf", "permId", "clientId",
@@ -156,14 +236,14 @@ pub(crate) const OPEN_ORDER_FIELDS: &[&str] = &[
 
 /// A price field of an openOrder: unset (the client library's MAX, ibx's
 /// 0 for trailingPercent) as one value.
-pub(crate) fn order_price(v: f64) -> String {
+pub fn order_price(v: f64) -> String {
     if v == f64::MAX || v == 0.0 { "-".into() } else { n(v) }
 }
 
 /// openOrder as one line: the order id, the contract's conId, symbol and
 /// type, the order fields of [`OPEN_ORDER_FIELDS`] and the status. A field
 /// the recorded object does not hold has its default.
-pub(crate) fn open_order_line(id: i64, contract: &Value, order: &Value, state: &Value) -> String {
+pub fn open_order_line(id: i64, contract: &Value, order: &Value, state: &Value) -> String {
     let field = |k: &str| -> String {
         let v = &order[k];
         match k {
@@ -186,7 +266,7 @@ pub(crate) fn open_order_line(id: i64, contract: &Value, order: &Value, state: &
 
 /// Rebuild a text frame (`8=FIX...`) with changed fields: the body length
 /// and the checksum computed again; the other fields kept in their order.
-pub(crate) fn rebuild_text(fields: &[(u32, String)]) -> Vec<u8> {
+pub fn rebuild_text(fields: &[(u32, String)]) -> Vec<u8> {
     let begin = fields.iter().find(|(t, _)| *t == 8).map_or("FIX.4.1", |(_, v)| v.as_str());
     let mut body = Vec::new();
     for (t, v) in fields.iter().filter(|(t, _)| !matches!(t, 8..=10)) {
@@ -201,7 +281,7 @@ pub(crate) fn rebuild_text(fields: &[(u32, String)]) -> Vec<u8> {
 
 /// Rebuild a farm frame with a text body (`8=O|9=|35=Q|<body>|8349=..`)
 /// with another body; the length counts the signature, as on the wire.
-pub(crate) fn rebuild_binary(raw: &[u8], new_body: &str) -> Vec<u8> {
+pub fn rebuild_binary(raw: &[u8], new_body: &str) -> Vec<u8> {
     let text = String::from_utf8_lossy(raw);
     let msg_type = text.split("\x0135=").nth(1).unwrap().split('\x01').next().unwrap();
     let sig = text.split("\x018349=").nth(1).map(|s| s.trim_end_matches('\x01')).unwrap_or("00000000");
@@ -210,7 +290,7 @@ pub(crate) fn rebuild_binary(raw: &[u8], new_body: &str) -> Vec<u8> {
 }
 
 /// The text body of a farm frame (the part after `35=X`).
-pub(crate) fn binary_body(raw: &[u8]) -> String {
+pub fn binary_body(raw: &[u8]) -> String {
     let text = String::from_utf8_lossy(raw);
     let after = text.split_once("\x0135=").unwrap().1;
     let after = after.split_once('\x01').unwrap().1;
