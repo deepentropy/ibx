@@ -137,11 +137,18 @@ pub(crate) fn drain_and_send_orders(
                 continue;
             }
         }
-        // Snap every price to the contract's tick grid before encoding
-        // (ibx#216). The tick comes from the market-data subscription ack;
-        // without one it is 0 and prices pass through unchanged.
-        if let Some(instrument) = order_req.instrument() {
-            order_req.snap_prices(context.market.min_tick_scaled(instrument));
+        // A price off the contract's price grid: refused with 110 and
+        // nothing sent, as the reference; it does not round it (ibx#263,
+        // replacing the snapping of ibx#216). The tick comes from the
+        // market-data subscription ack; without one only a negative price
+        // is refused.
+        let instrument = order_req.instrument().or_else(|| context.order(oid).map(|o| o.instrument));
+        let tick = instrument.map_or(0, |i| context.market.min_tick_scaled(i));
+        if let Some(id) = order_req.off_grid_order(tick) {
+            let (code, message) = crate::client_core::PRICE_VARIATION;
+            log::warn!("Order {} refused: a price off the price grid", id);
+            shared.orders.push_order_error(id, code, message.into());
+            continue;
         }
         // A what-if goes out under a ClOrdID of its own and stays out of
         // the order table: an order with the same id is left as it is
@@ -530,7 +537,7 @@ pub(crate) fn drain_and_send_orders(
                 }
                 send_new_order(conn, context, instrument, &fields)
             }
-            OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_pct, trail_stop_price } => {
+            OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_percent, trail_stop_price } => {
                 context.insert_order(crate::types::Order::new(
                     order_id, instrument, side, qty, 0, b'P', b'0', 0,
                 ));
@@ -544,7 +551,7 @@ pub(crate) fn drain_and_send_orders(
                 // "Invalid value in field # 18". 6268 is the trail unit, 100 =
                 // percent, at every percentage (ib-agent#192 B7, ibx#339); it
                 // was sent as basis points, right only at exactly 1%.
-                let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
+                let pct_decimal = format_price_ref(trail_percent).to_string();
                 let trail_stop_str = format_price_ref(trail_stop_price);
                 let symbol = context.market.symbol(instrument).to_string();
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
@@ -571,9 +578,9 @@ pub(crate) fn drain_and_send_orders(
                 if trail_stop_price > 0 { fields.push((6117, &trail_stop_str)); }
                 send_new_order(conn, context, instrument, &fields)
             }
-            OrderRequest::SubmitTrailingStopPctEx { order_id, instrument, side, qty, trail_pct, tif, attrs, trail_stop_price } => {
+            OrderRequest::SubmitTrailingStopPctEx { order_id, instrument, side, qty, trail_percent, tif, attrs, trail_stop_price } => {
                 send_order_ex(conn, context, account_id, order_id, instrument, side, qty,
-                    crate::types::OrderKind::TrailPct { trail_pct, trail_stop_price }, tif, &attrs)
+                    crate::types::OrderKind::TrailPct { trail_percent, trail_stop_price }, tif, &attrs)
             }
             OrderRequest::SubmitMoc { order_id, instrument, side, qty } => {
                 context.insert_order(crate::types::Order::new(
@@ -1790,7 +1797,8 @@ fn reference_rank(tag: u32) -> u16 {
         168 => 86,
         9813 => 87,
         6102 => 88,
-        5920 => 89,
+        // Cash quantity (`jattrib.attribs.holder.CashQuantityValue`).
+        152 => 89,
         6941 => 90,
         6938 => 91,
         6939 => 92,
@@ -1983,8 +1991,8 @@ fn modify_fields(
             after_type.push((211, p(trail_amt)));
             "P"
         }
-        K::TrailPct { trail_pct, trail_stop_price } => {
-            let pct = format!("{:.2}", trail_pct as f64 / 100.0);
+        K::TrailPct { trail_percent, trail_stop_price } => {
+            let pct = format_price_ref(trail_percent).to_string();
             before_account.push((99, pct.clone()));
             stop_trigger = trailing_stop(trail_stop_price);
             trail_unit = Some("100");
@@ -2464,7 +2472,9 @@ fn push_extended_attrs(
         fields.push((6102, "1".to_string()));
     }
     if attrs.cash_qty > 0 {
-        fields.push((5920, format_price_ref(attrs.cash_qty).to_string()));
+        // Tag 152, the cash quantity attribute of the reference, written
+        // with its price formatter (ibx#263; 5920 is only its column id).
+        fields.push((152, format_price_ref(attrs.cash_qty).to_string()));
     }
     // Condition tags (6136+ framework). The reference always sends both
     // flags, 0 or 1, before the count: ignore-RTH rides 6128 and cancel-order
@@ -2587,11 +2597,11 @@ fn send_order_ex(
             fields.push((211, t));
             if trail_stop_price > 0 { fields.push((6117, format_price_ref(trail_stop_price).to_string())); }
         }
-        K::TrailPct { trail_pct, trail_stop_price } => {
+        K::TrailPct { trail_percent, trail_stop_price } => {
             // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
             // percent in decimal form (1.00 for 1%), with 18=a. 6268 is the
             // trail unit, 100 = percent (ib-agent#192 B7, ibx#339).
-            let pct_decimal = format!("{:.2}", trail_pct as f64 / 100.0);
+            let pct_decimal = format_price_ref(trail_percent).to_string();
             fields.push((40, "P".to_string()));
             fields.push((99, pct_decimal.clone()));
             fields.push((211, pct_decimal));
@@ -3308,7 +3318,7 @@ mod tests {
     #[test]
     fn replace_trailing_percent_matches_reference() {
         let ours = replace_fields(9000000558, Side::Sell, 1,
-            crate::types::OrderKind::TrailPct { trail_pct: 3100, trail_stop_price: 0 }, b'0', attrs_rth(false));
+            crate::types::OrderKind::TrailPct { trail_percent: px(31.0), trail_stop_price: 0 }, b'0', attrs_rth(false));
         assert_same_replace(&ours, "35=G|11=9000000558.1|41=9000000558.0|99=31.00|1=DU1|6122=c|6268=100|38=1|54=2|40=P|211=31.00|18=a|55=AAPL|167=STK|6035=AAPL|59=0|6008=265598|6088=Socket|6211=|6238=");
     }
 
@@ -3333,13 +3343,16 @@ mod tests {
     // unit field, which only matched at exactly 1%.
     #[test]
     fn percent_trail_submit_matches_reference_at_every_percentage() {
-        for (bp, pct) in [(50u32, "0.50"), (100, "1.00"), (125, "1.25"), (200, "2.00")] {
+        // A percent with more decimals goes out as given (ibx#263): the
+        // reference writes it with its price formatter.
+        for (percent, pct) in [(0.5, "0.50"), (1.0, "1.00"), (1.25, "1.25"), (2.0, "2.00"), (1.239, "1.239"), (0.12345678, "0.12345678")] {
+            let bp = crate::api::types::price_from_f64(percent);
             let plain = wire_tags(OrderRequest::SubmitTrailingStopPct {
-                order_id: 7, instrument: 0, side: Side::Sell, qty: 1, trail_pct: bp, trail_stop_price: 0,
+                order_id: 7, instrument: 0, side: Side::Sell, qty: 1, trail_percent: bp, trail_stop_price: 0,
             });
             let ext = wire_tags(OrderRequest::SubmitEx {
                 order_id: 8, instrument: 0, side: Side::Sell, qty: 1,
-                kind: crate::types::OrderKind::TrailPct { trail_pct: bp, trail_stop_price: 0 },
+                kind: crate::types::OrderKind::TrailPct { trail_percent: bp, trail_stop_price: 0 },
                 tif: b'1', attrs: crate::types::OrderAttrs::default(),
             });
             for tags in [&plain, &ext] {
@@ -4536,8 +4549,8 @@ mod tests {
                 K::TrailingStop { trail_amt: P / 2, trail_stop_price: 90 * P }, b'0', Default::default()),
             (OrderRequest::SubmitTrailingStopLimit { order_id: id, instrument: 0, side, qty, lmt_offset: P / 10, lmt_price: None, trail_amt: P / 2, trail_stop_price: 90 * P },
                 K::TrailingStopLimit { lmt_offset: P / 10, lmt_price: None, trail_amt: P / 2, trail_stop_price: 90 * P }, b'0', Default::default()),
-            (OrderRequest::SubmitTrailingStopPct { order_id: id, instrument: 0, side, qty, trail_pct: 150, trail_stop_price: 90 * P },
-                K::TrailPct { trail_pct: 150, trail_stop_price: 90 * P }, b'0', Default::default()),
+            (OrderRequest::SubmitTrailingStopPct { order_id: id, instrument: 0, side, qty, trail_percent: px(1.5), trail_stop_price: 90 * P },
+                K::TrailPct { trail_percent: px(1.5), trail_stop_price: 90 * P }, b'0', Default::default()),
             (OrderRequest::SubmitMoc { order_id: id, instrument: 0, side, qty }, K::Moc, b'0', Default::default()),
             (OrderRequest::SubmitLoc { order_id: id, instrument: 0, side, qty, price: 100 * P }, K::Loc { price: 100 * P }, b'0', Default::default()),
             (OrderRequest::SubmitMit { order_id: id, instrument: 0, side, qty, stop_price: 90 * P }, K::Mit { stop_price: 90 * P }, b'0', Default::default()),
@@ -4781,7 +4794,7 @@ mod tests {
             (STP, OrderRequest::SubmitStop { order_id: id, instrument: 0, side, qty, stop_price: px(237.82) }),
             (STP_LMT, ex(K::StopLimit { price: px(234.43), stop_price: px(237.82) }, b'0', OrderAttrs::default())),
             (STP_LMT, OrderRequest::SubmitStopLimit { order_id: id, instrument: 0, side, qty, price: px(234.43), stop_price: px(237.82) }),
-            (TRAIL_PCT, ex(K::TrailPct { trail_pct: 3000, trail_stop_price: 0 }, b'1',
+            (TRAIL_PCT, ex(K::TrailPct { trail_percent: px(30.0), trail_stop_price: 0 }, b'1',
                 OrderAttrs { order_ref: "c0928-a22_stp_trail".into(), ..Default::default() })),
         ];
         let not_id = |(t, _): &(u32, String)| !matches!(t, 35 | 11 | 1 | 6121 | 6119);
@@ -4812,7 +4825,7 @@ mod tests {
             K::StopLimit { price: px(89.0), stop_price: px(90.0) },
             K::StpPrt { stop_price: px(90.0) },
             K::TrailingStop { trail_amt: px(0.5), trail_stop_price: 0 },
-            K::TrailPct { trail_pct: 150, trail_stop_price: 0 },
+            K::TrailPct { trail_percent: px(1.5), trail_stop_price: 0 },
             K::TrailingStopLimit { lmt_offset: px(0.1), lmt_price: None, trail_amt: px(0.5), trail_stop_price: px(90.0) },
             K::Mit { stop_price: px(90.0) },
             K::Lit { price: px(89.0), stop_price: px(90.0) },
@@ -4862,7 +4875,7 @@ mod tests {
         let aon = OrderAttrs { all_or_none: true, trigger_method: 2, ..Default::default() };
         let cases = [
             (K::TrailingStop { trail_amt: px(1.0), trail_stop_price: 0 }, Some("a G")),
-            (K::TrailPct { trail_pct: 150, trail_stop_price: 0 }, Some("a G")),
+            (K::TrailPct { trail_percent: px(1.5), trail_stop_price: 0 }, Some("a G")),
             (K::Rel { price: 0, offset: px(0.05) }, Some("R G")),
             (K::Limit { price: px(100.0) }, Some("G")),
             (K::Stop { stop_price: px(90.0) }, Some("G")),
@@ -5216,9 +5229,50 @@ mod tests {
         let amount = K::TrailingStop { trail_amt: px(1.0), trail_stop_price: px(99.0) };
         assert_eq!(tag(&trail(amount, 98.5), 6117), Some("99.00"));
         assert_eq!(tag(&trail(amount, 99.0), 6117), None);
-        let pct = K::TrailPct { trail_pct: 150, trail_stop_price: px(99.0) };
+        let pct = K::TrailPct { trail_percent: px(1.5), trail_stop_price: px(99.0) };
         assert_eq!(tag(&trail(pct, 98.5), 6117), Some("99.00"));
         assert_eq!(tag(&trail(K::StpPrt { stop_price: px(90.0) }, 0.0), 6117), Some("90.00"));
+    }
+
+    // ibx#263: the cash quantity is the reference's attribute 152
+    // (`jattrib.attribs.holder.CashQuantityValue`, a double attribute
+    // written with the price formatter); 5920 is only its column id.
+    #[test]
+    fn cash_quantity_goes_out_in_152() {
+        let tags = wire_tags(OrderRequest::SubmitEx {
+            order_id: 9, instrument: 0, side: Side::Buy, qty: 0, kind: crate::types::OrderKind::Market, tif: b'0',
+            attrs: crate::types::OrderAttrs { cash_qty: px(1000.0), ..Default::default() },
+        });
+        assert_eq!(tag(&tags, 152), Some("1000.00"));
+        assert_eq!(tag(&tags, 5920), None);
+        assert!((70..100).contains(&reference_rank(152)), "an order attribute");
+    }
+
+    // ibx#263: a price off the contract's grid is refused with 110 and
+    // nothing is sent, as the reference (`jextend.dx.a(dy, boolean)@1961`,
+    // ib-agent#192 B5); ibx snapped it to the tick (ibx#216).
+    #[test]
+    fn a_price_off_the_grid_is_refused_with_110() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.market.set_min_tick(0, 0.01);
+        context.pending_orders.push(OrderRequest::SubmitLimit { order_id: 31, instrument: 0, side: Side::Buy, qty: 1, price: px(100.005) });
+        context.pending_orders.push(OrderRequest::SubmitEx { order_id: 32, instrument: 0, side: Side::Buy, qty: 1,
+            kind: crate::types::OrderKind::Rel { price: 0, offset: px(-0.5) }, tif: b'0', attrs: Default::default() });
+        let shared = Arc::new(SharedState::new());
+        let mut conn = Some(Connection::new_raw(client).unwrap());
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        let mut buf = [0u8; 256];
+        assert!(server.read(&mut buf).is_err(), "nothing sent");
+        let errors = shared.orders.drain_order_errors();
+        let text = "The price does not conform to the minimum price variation for this contract.".to_string();
+        assert_eq!(errors, vec![(31, 110, text.clone()), (32, 110, text)]);
+        assert!(context.order(31).is_none() && context.order(32).is_none());
     }
 
     // ibx#466: the API order id is an int; a larger order id is not sent.
@@ -5430,7 +5484,7 @@ mod tests {
             (ex(2, K::Stop { stop_price: 90 * P }), false),
             (ex(3, K::Mit { stop_price: 90 * P }), false),
             (ex(4, K::TrailingStop { trail_amt: P, trail_stop_price: 0 }), false),
-            (ex(5, K::TrailPct { trail_pct: 100, trail_stop_price: 0 }), false),
+            (ex(5, K::TrailPct { trail_percent: px(1.0), trail_stop_price: 0 }), false),
             (ex(6, K::StopLimit { price: 89 * P, stop_price: 90 * P }), true),
             (ex(7, K::Moc), true),
         ];

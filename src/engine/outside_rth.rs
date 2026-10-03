@@ -154,7 +154,7 @@ pub(crate) fn rth_parts(req: &mut OrderRequest) -> Option<(Option<u32>, RthKind,
         R::SubmitStopLimitGtc { instrument, outside_rth, .. } =>
             Some((Some(*instrument), RthKind::of(&OrderKind::StopLimit { price: 0, stop_price: 0 }), b'1', None, outside_rth)),
         R::SubmitTrailingStopPctEx { instrument, tif, attrs, .. } =>
-            Some((Some(*instrument), RthKind::of(&OrderKind::TrailPct { trail_pct: 0, trail_stop_price: 0 }), *tif, None, &mut attrs.outside_rth)),
+            Some((Some(*instrument), RthKind::of(&OrderKind::TrailPct { trail_percent: 0, trail_stop_price: 0 }), *tif, None, &mut attrs.outside_rth)),
         R::SubmitLimitEx { instrument, tif, attrs, .. }
         | R::SubmitAdaptive { instrument, tif, attrs, .. }
         | R::SubmitAlgo { instrument, tif, attrs, .. } => Some((Some(*instrument), limit, *tif, None, &mut attrs.outside_rth)),
@@ -211,7 +211,7 @@ mod tests {
         let cases = [
             ("STP DAY", k(OrderKind::Stop { stop_price: 1 }), b'0', "BEST", false),
             ("TRAIL amount DAY", k(OrderKind::TrailingStop { trail_amt: 1, trail_stop_price: 0 }), b'0', "BEST", false),
-            ("TRAIL percent GTC", k(OrderKind::TrailPct { trail_pct: 1, trail_stop_price: 0 }), b'1', "BEST", false),
+            ("TRAIL percent GTC", k(OrderKind::TrailPct { trail_percent: 1, trail_stop_price: 0 }), b'1', "BEST", false),
             ("STP LMT GTC", k(OrderKind::StopLimit { price: 1, stop_price: 1 }), b'1', "BEST", true),
             ("TRAIL LIMIT GTC", k(OrderKind::TrailingStopLimit { lmt_offset: 1, lmt_price: None, trail_amt: 1, trail_stop_price: 1 }), b'1', "BEST", true),
             ("MIT GTC", k(OrderKind::Mit { stop_price: 1 }), b'1', "BEST", false),

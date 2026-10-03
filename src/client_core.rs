@@ -1137,6 +1137,10 @@ pub fn parse_condition_time(s: &str, machine_zone: &str) -> Option<ConditionTime
     Some(ConditionTime { wire, zone, implied_zone })
 }
 
+/// Error 110 and its text: a price off the contract's price grid, or not
+/// a number (`jextend.d7.l`, ibx#263).
+pub(crate) const PRICE_VARIATION: (i64, &str) = (110, "The price does not conform to the minimum price variation for this contract.");
+
 /// The API's overnight time-in-force values (ibx#467).
 const TIF_OVERNIGHT: &str = "OVERNIGHT";
 const TIF_OVERNIGHT_DAY: &str = "OVERNIGHT + DAY";
@@ -4047,7 +4051,7 @@ impl ClientCore {
     /// a price of 0.
     pub fn price_refusal(order: &ApiOrder) -> Option<(i64, String)> {
         order.lmt_price.is_nan()
-            .then(|| (110, "The price does not conform to the minimum price variation for this contract.".to_string()))
+            .then(|| (PRICE_VARIATION.0, PRICE_VARIATION.1.to_string()))
     }
 
     /// Status to report with a fill that leaves part of the order open.
@@ -4176,7 +4180,7 @@ impl ClientCore {
             "TRAIL" => {
                 if order.trailing_percent > 0.0 {
                     OrderKind::TrailPct {
-                        trail_pct: (order.trailing_percent * 100.0).round() as u32,
+                        trail_percent: crate::api::types::price_from_f64(order.trailing_percent),
                         trail_stop_price: trail_stop,
                     }
                 } else {
@@ -4461,16 +4465,16 @@ impl ClientCore {
                 // Optional initial stop trigger (tag 6117); default f64::MAX = unset.
                 let trail_stop = if order.trail_stop_price == f64::MAX { 0 } else { crate::api::types::price_from_f64(order.trail_stop_price) };
                 if order.trailing_percent > 0.0 {
-                    let pct = (order.trailing_percent * 100.0).round() as u32;
+                    let pct = crate::api::types::price_from_f64(order.trailing_percent);
                     if extended {
                         OrderRequest::SubmitTrailingStopPctEx {
-                            order_id, instrument, side, qty, trail_pct: pct,
+                            order_id, instrument, side, qty, trail_percent: pct,
                             tif: order.tif_byte(),
                             attrs: attrs(),
                             trail_stop_price: trail_stop,
                         }
                     } else {
-                        OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_pct: pct, trail_stop_price: trail_stop }
+                        OrderRequest::SubmitTrailingStopPct { order_id, instrument, side, qty, trail_percent: pct, trail_stop_price: trail_stop }
                     }
                 } else {
                     let trail = crate::api::types::price_from_f64(order.aux_price);

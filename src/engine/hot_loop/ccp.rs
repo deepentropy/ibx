@@ -1664,6 +1664,10 @@ impl CcpState {
                 algo_strategy,
                 // The orderRef the server echoes (ibx#466).
                 order_ref: parsed.get(&6010).cloned().unwrap_or_default(),
+                // The cash quantity the server echoes in 152, which the
+                // reference reads into the order's cash quantity
+                // (`jexec.fq.<init>(dk, boolean)@2005-2120`, ibx#263).
+                cash_qty: parsed.get(&152).and_then(|s| s.parse().ok()).unwrap_or(0.0),
                 // A TRAIL LIMIT's offset as the server reports it (ib-agent#194).
                 lmt_price_offset: trail_limit.map_or(f64::MAX, |r| r.offset as f64 / PRICE_SCALE as f64),
                 ..Default::default()
@@ -3922,6 +3926,17 @@ mod tests {
         let info = shared.orders.get_order_info(42).expect("cached");
         assert_eq!(info.order_state.status, "Submitted");
         assert_eq!(info.order.lmt_price, 101.5);
+    }
+
+    // ibx#263: the reference reads the cash quantity the server echoes in
+    // 152 into the order (`jexec.fq.<init>(dk, boolean)@2005-2120`), which
+    // openOrder shows.
+    #[test]
+    fn the_reported_cash_quantity_is_read_from_152() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let routed = exec_report_frame(&[(39, "0"), (150, "0"), (100, "ARCA"), (152, "1000.00")]);
+        ccp.handle_exec_report(&routed, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.get_order_info(42).expect("cached").order.cash_qty, 1000.0);
     }
 
     #[test]

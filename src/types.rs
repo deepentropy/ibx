@@ -22,20 +22,15 @@ pub type Qty = i64;
 pub const PRICE_SCALE: i64 = 100_000_000; // 10^8
 pub const QTY_SCALE: i64 = 10_000; // 10^4
 
-/// Snap a fixed-point price to the nearest multiple of `tick` (ties round
-/// away from zero). A non-positive tick means the grid is unknown and the
-/// price is returned unchanged. Pure integer math — exact on the fixed-point
-/// representation. See ibx#216.
-pub fn snap_to_tick(price: Price, tick: i64) -> Price {
-    if tick <= 0 {
-        return price;
-    }
-    let half = tick / 2;
-    if price >= 0 {
-        ((price + half) / tick) * tick
-    } else {
-        -(((-price + half) / tick) * tick)
-    }
+/// Whether a price the reference checks is off the contract's price grid
+/// (ibx#263, reversing the snapping of ibx#216): negative (ib-agent#192 B5,
+/// a REL offset of -0.50 refused with 110), or not a multiple of `tick`
+/// when the tick is known (a non-positive tick: unknown, not checked).
+/// The reference refuses such an order with 110 and sends nothing
+/// (`jextend.dx.a(dy, boolean)@1886-1961`, `trader.common.b9.a(OrderCreator,
+/// o)`); it does not round it.
+pub fn off_grid(price: Price, tick: i64) -> bool {
+    price < 0 || (tick > 0 && price % tick != 0)
 }
 
 /// Maximum number of concurrently tracked instruments.
@@ -550,7 +545,8 @@ pub struct OrderAttrs {
     /// 0=default, 1=double-bid-ask, 2=last, 3=double-last, 4=bid-ask,
     /// 7=last-or-bid-ask, 8=mid-point.
     pub trigger_method: u8,
-    /// Cash quantity — order by dollar amount instead of shares (IB tag 5920). 0 = not set.
+    /// Cash quantity — order by dollar amount instead of shares (tag 152,
+    /// ibx#263). 0 = not set.
     /// Fixed-point Price value (e.g., $1000 = 1000 * PRICE_SCALE).
     pub cash_qty: Price,
     /// Conditions that must be met before the order activates (IB tag 6136+).
@@ -768,7 +764,10 @@ pub enum OrderKind {
     TrailingStopLimit { lmt_offset: Price, lmt_price: Option<Price>, trail_amt: Price, trail_stop_price: Price },
     /// Trailing stop by percentage. Basis points: 100 = 1%.
     /// `trail_stop_price` is the optional initial stop trigger (tag 6117); 0 = not set.
-    TrailPct { trail_pct: u32, trail_stop_price: Price },
+    /// The percent as the API gives it, in the price fixed point (1% =
+    /// PRICE_SCALE): the reference writes it with its price formatter, so
+    /// 1.239 goes out as 1.239 (ibx#263; basis points kept two decimals).
+    TrailPct { trail_percent: Price, trail_stop_price: Price },
     Moc,
     Loc { price: Price },
     Mit { stop_price: Price },
@@ -817,42 +816,32 @@ pub enum OrderKind {
 }
 
 impl OrderKind {
-    /// Snap every price of this kind to the tick grid (ibx#216). Percent
-    /// values are not prices and are left alone.
-    pub fn snap_prices(&mut self, tick: i64) {
-        if tick <= 0 {
-            return;
-        }
-        let s = |p: &mut Price| *p = snap_to_tick(*p, tick);
-        match self {
-            OrderKind::Market | OrderKind::Moc | OrderKind::Mtl | OrderKind::MktPrt => {}
-            OrderKind::TrailPct { trail_stop_price, .. } => s(trail_stop_price),
-            OrderKind::Limit { price } | OrderKind::Loc { price } => s(price),
+    /// The prices of this kind the reference checks against the price grid
+    /// (`trader.common.b9.a(OrderCreator, o)`, ibx#263): the limit price of
+    /// every type, and the stop or offset price (the API auxPrice) of the
+    /// types that have one (`jibtypes.s.s()`), for a trailing type its
+    /// amount, never a percent. Not checked: the trailing stop price, the
+    /// TRAIL LIMIT offset, the adjusted prices, the benchmark changes.
+    /// Unset prices are 0 and pass.
+    pub fn grid_prices(&self) -> [Price; 2] {
+        match *self {
+            OrderKind::Market | OrderKind::Moc | OrderKind::Mtl | OrderKind::MktPrt
+            | OrderKind::TrailPct { .. } => [0, 0],
+            OrderKind::Limit { price } | OrderKind::Loc { price } => [price, 0],
             OrderKind::Stop { stop_price }
             | OrderKind::Mit { stop_price }
-            | OrderKind::StpPrt { stop_price } => s(stop_price),
+            | OrderKind::StpPrt { stop_price }
+            | OrderKind::AdjustableStop { stop_price, .. } => [0, stop_price],
             OrderKind::StopLimit { price, stop_price }
-            | OrderKind::Lit { price, stop_price } => { s(price); s(stop_price); }
-            OrderKind::TrailingStop { trail_amt, trail_stop_price } => { s(trail_amt); s(trail_stop_price); }
-            OrderKind::TrailingStopLimit { lmt_offset, lmt_price, trail_amt, trail_stop_price } => {
-                s(lmt_offset); if let Some(p) = lmt_price { s(p); } s(trail_amt); s(trail_stop_price);
-            }
-            OrderKind::MidPrice { price_cap } => s(price_cap),
-            OrderKind::PegMkt { price, offset } | OrderKind::PegMid { price, offset } => { s(price); s(offset); }
-            OrderKind::Rel { price, offset } => { s(price); s(offset); }
+            | OrderKind::Lit { price, stop_price } => [price, stop_price],
+            OrderKind::TrailingStop { trail_amt, .. } => [0, trail_amt],
+            OrderKind::TrailingStopLimit { lmt_price, trail_amt, .. } => [lmt_price.unwrap_or(0), trail_amt],
+            OrderKind::MidPrice { price_cap } => [price_cap, 0],
+            OrderKind::PegMkt { price, offset } | OrderKind::PegMid { price, offset }
+            | OrderKind::Rel { price, offset } => [price, offset],
             OrderKind::SnapMkt { offset }
-            | OrderKind::SnapMid { offset } | OrderKind::SnapPri { offset } => s(offset),
-            OrderKind::PegBench { starting_price, pegged_change_amount, ref_change_amount, .. } => {
-                s(starting_price); s(pegged_change_amount); s(ref_change_amount);
-            }
-            OrderKind::AdjustableStop {
-                stop_price, trigger_price, adjusted_stop_price, adjusted_stop_limit_price,
-                adjusted_trailing_amount, adjustable_trailing_unit, ..
-            } => {
-                s(stop_price); s(trigger_price); s(adjusted_stop_price); s(adjusted_stop_limit_price);
-                // Same rule as SubmitAdjustableStop: a percent does not snap.
-                if *adjustable_trailing_unit == 0 { s(adjusted_trailing_amount); }
-            }
+            | OrderKind::SnapMid { offset } | OrderKind::SnapPri { offset } => [0, offset],
+            OrderKind::PegBench { starting_price, .. } => [0, starting_price],
         }
     }
 }
@@ -950,7 +939,8 @@ pub enum OrderRequest {
         /// Optional initial stop trigger (tag 6117); 0 = not set.
         trail_stop_price: Price,
     },
-    /// Trailing stop by percentage. `trail_pct` is in basis points (1% = 100);
+    /// Trailing stop by percentage. `trail_percent` is the percent in the
+    /// price fixed point (1% = PRICE_SCALE, ibx#263);
     /// on the wire the percent rides as a decimal with the unit flag set to
     /// percent (ibx#339).
     SubmitTrailingStopPct {
@@ -958,7 +948,7 @@ pub enum OrderRequest {
         instrument: InstrumentId,
         side: Side,
         qty: u32,
-        trail_pct: u32, // basis points: 100 = 1%, 250 = 2.5%
+        trail_percent: Price, // 1% = PRICE_SCALE, 2.5% = 2.5 * PRICE_SCALE
         /// Optional initial stop trigger (tag 6117); 0 = not set.
         trail_stop_price: Price,
     },
@@ -967,7 +957,7 @@ pub enum OrderRequest {
         instrument: InstrumentId,
         side: Side,
         qty: u32,
-        trail_pct: u32,
+        trail_percent: Price,
         tif: u8,
         attrs: OrderAttrs,
         /// Optional initial stop trigger (tag 6117); 0 = not set.
@@ -1387,72 +1377,55 @@ impl OrderRequest {
         }
     }
 
-    /// Snap every outbound price-like field to the instrument's tick grid
-    /// (ibx#216). `tick` is the fixed-point tick from
-    /// `MarketState::min_tick_scaled`; 0 (unknown — no market-data
-    /// subscription seen yet) leaves prices unchanged. Percent-based fields
-    /// (trailing percent) and non-price fields (quantities, cash amounts)
-    /// are not touched.
-    pub fn snap_prices(&mut self, tick: i64) {
-        if tick <= 0 {
-            return;
-        }
-        let s = |p: &mut Price| *p = snap_to_tick(*p, tick);
-        match self {
+    /// The order of this request with a price off the contract's price
+    /// grid (`off_grid`), as the reference checks it (ibx#263): None when
+    /// every checked price is on the grid. A bracket answers for the first
+    /// leg found.
+    pub fn off_grid_order(&self, tick: i64) -> Option<OrderId> {
+        let off = |prices: &[Price]| prices.iter().any(|&p| off_grid(p, tick));
+        let checked: (OrderId, [Price; 2]) = match self {
             Self::Cancel { .. } | Self::CancelAll { .. }
             | Self::SubmitMarket { .. } | Self::SubmitMoc { .. }
             | Self::SubmitMtl { .. } | Self::SubmitMktPrt { .. }
-            | Self::SubmitMtlAuc { .. } => {}
-            Self::Modify { kind, .. } => kind.snap_prices(tick),
-            Self::SubmitLimit { price, .. }
-            | Self::SubmitLimitGtc { price, .. }
-            | Self::SubmitLimitIoc { price, .. }
-            | Self::SubmitLimitFok { price, .. }
-            | Self::SubmitLimitEx { price, .. }
-            | Self::SubmitLimitOpg { price, .. }
-            | Self::SubmitLimitAuc { price, .. }
-            | Self::SubmitLimitFractional { price, .. }
-            | Self::SubmitAdaptive { price, .. }
-            | Self::SubmitAlgo { price, .. }
-            | Self::SubmitLoc { price, .. } => s(price),
-            Self::SubmitWhatIf { request } => request.snap_prices(tick),
-            Self::SubmitStop { stop_price, .. }
-            | Self::SubmitStopGtc { stop_price, .. }
-            | Self::SubmitMit { stop_price, .. }
-            | Self::SubmitStpPrt { stop_price, .. } => s(stop_price),
-            Self::SubmitStopLimit { price, stop_price, .. }
-            | Self::SubmitStopLimitGtc { price, stop_price, .. }
-            | Self::SubmitLit { price, stop_price, .. } => { s(price); s(stop_price); }
-            Self::SubmitTrailingStop { trail_amt, trail_stop_price, .. } => { s(trail_amt); s(trail_stop_price); }
-            Self::SubmitTrailingStopLimit { lmt_offset, lmt_price, trail_amt, trail_stop_price, .. } => {
-                s(lmt_offset); if let Some(p) = lmt_price { s(p); } s(trail_amt); s(trail_stop_price);
+            | Self::SubmitMtlAuc { .. }
+            | Self::SubmitTrailingStopPct { .. } | Self::SubmitTrailingStopPctEx { .. } => return None,
+            Self::SubmitWhatIf { request } => return request.off_grid_order(tick),
+            Self::Modify { order_id, kind, .. } | Self::SubmitEx { order_id, kind, .. } => (*order_id, kind.grid_prices()),
+            Self::SubmitLimit { order_id, price, .. }
+            | Self::SubmitLimitGtc { order_id, price, .. }
+            | Self::SubmitLimitIoc { order_id, price, .. }
+            | Self::SubmitLimitFok { order_id, price, .. }
+            | Self::SubmitLimitEx { order_id, price, .. }
+            | Self::SubmitLimitOpg { order_id, price, .. }
+            | Self::SubmitLimitAuc { order_id, price, .. }
+            | Self::SubmitLimitFractional { order_id, price, .. }
+            | Self::SubmitAdaptive { order_id, price, .. }
+            | Self::SubmitAlgo { order_id, price, .. }
+            | Self::SubmitLoc { order_id, price, .. }
+            | Self::SubmitMidPrice { order_id, price_cap: price, .. } => (*order_id, [*price, 0]),
+            Self::SubmitStop { order_id, stop_price, .. }
+            | Self::SubmitStopGtc { order_id, stop_price, .. }
+            | Self::SubmitMit { order_id, stop_price, .. }
+            | Self::SubmitStpPrt { order_id, stop_price, .. }
+            | Self::SubmitAdjustableStop { order_id, stop_price, .. } => (*order_id, [0, *stop_price]),
+            Self::SubmitStopLimit { order_id, price, stop_price, .. }
+            | Self::SubmitStopLimitGtc { order_id, price, stop_price, .. }
+            | Self::SubmitLit { order_id, price, stop_price, .. } => (*order_id, [*price, *stop_price]),
+            Self::SubmitTrailingStop { order_id, trail_amt, .. } => (*order_id, [0, *trail_amt]),
+            Self::SubmitTrailingStopLimit { order_id, lmt_price, trail_amt, .. } => (*order_id, [lmt_price.unwrap_or(0), *trail_amt]),
+            Self::SubmitPegMkt { order_id, price, offset, .. }
+            | Self::SubmitPegMid { order_id, price, offset, .. } => (*order_id, [*price, *offset]),
+            Self::SubmitRel { order_id, offset, .. }
+            | Self::SubmitSnapMkt { order_id, offset, .. }
+            | Self::SubmitSnapMid { order_id, offset, .. }
+            | Self::SubmitSnapPri { order_id, offset, .. } => (*order_id, [0, *offset]),
+            Self::SubmitPegBench { order_id, price, .. } => (*order_id, [0, *price]),
+            Self::SubmitBracket { parent_id, tp_id, sl_id, entry_price, take_profit, stop_loss, .. } => {
+                return [(*parent_id, [*entry_price, 0]), (*tp_id, [*take_profit, 0]), (*sl_id, [0, *stop_loss])]
+                    .into_iter().find(|(_, prices)| off(prices)).map(|(id, _)| id);
             }
-            Self::SubmitTrailingStopPct { trail_stop_price, .. }
-            | Self::SubmitTrailingStopPctEx { trail_stop_price, .. } => s(trail_stop_price),
-            Self::SubmitMidPrice { price_cap, .. } => s(price_cap),
-            Self::SubmitPegMkt { price, offset, .. }
-            | Self::SubmitPegMid { price, offset, .. } => { s(price); s(offset); }
-            Self::SubmitRel { offset, .. }
-            | Self::SubmitSnapMkt { offset, .. }
-            | Self::SubmitSnapMid { offset, .. }
-            | Self::SubmitSnapPri { offset, .. } => s(offset),
-            Self::SubmitBracket { entry_price, take_profit, stop_loss, .. } => {
-                s(entry_price); s(take_profit); s(stop_loss);
-            }
-            Self::SubmitPegBench { price, pegged_change_amount, ref_change_amount, .. } => {
-                s(price); s(pegged_change_amount); s(ref_change_amount);
-            }
-            Self::SubmitAdjustableStop {
-                stop_price, trigger_price, adjusted_stop_price, adjusted_stop_limit_price,
-                adjusted_trailing_amount, adjustable_trailing_unit, ..
-            } => {
-                s(stop_price); s(trigger_price); s(adjusted_stop_price); s(adjusted_stop_limit_price);
-                // Snap the trailing amount only when it is an absolute price
-                // offset; a percent (unit 100) is not a price and must not snap.
-                if *adjustable_trailing_unit == 0 { s(adjusted_trailing_amount); }
-            }
-            Self::SubmitEx { kind, .. } => kind.snap_prices(tick),
-        }
+        };
+        off(&checked.1).then_some(checked.0)
     }
 }
 
@@ -2485,89 +2458,54 @@ mod tests {
         }
     }
 
-    // ── ibx#216: snap-to-tick ──
+    // ── ibx#263: a price off the grid is refused, not snapped (ibx#216) ──
 
     const TICK_CENT: i64 = PRICE_SCALE / 100; // 0.01
 
     #[test]
-    fn snap_to_tick_rounds_to_nearest() {
-        // 150.123 on a 0.01 grid -> 150.12
-        assert_eq!(snap_to_tick(15_012_300_000, TICK_CENT), 15_012_000_000);
-        // 150.126 -> 150.13
-        assert_eq!(snap_to_tick(15_012_600_000, TICK_CENT), 15_013_000_000);
-        // Exact multiples unchanged.
-        assert_eq!(snap_to_tick(15_012_000_000, TICK_CENT), 15_012_000_000);
-        // Tie (150.125) rounds away from zero -> 150.13
-        assert_eq!(snap_to_tick(15_012_500_000, TICK_CENT), 15_013_000_000);
-        // Negative price mirrors: -150.125 -> -150.13
-        assert_eq!(snap_to_tick(-15_012_500_000, TICK_CENT), -15_013_000_000);
-        // 0.05 grid: 10.02 -> 10.00, 10.03 -> 10.05
+    fn off_grid_is_a_negative_price_or_one_off_the_tick() {
+        assert!(!off_grid(15_012_000_000, TICK_CENT));
+        assert!(off_grid(15_012_300_000, TICK_CENT));
+        assert!(!off_grid(0, TICK_CENT));
         let nickel = 5 * TICK_CENT;
-        assert_eq!(snap_to_tick(10_02_000_000, nickel), 10_00_000_000);
-        assert_eq!(snap_to_tick(10_03_000_000, nickel), 10_05_000_000);
-        // Unknown tick: unchanged.
-        assert_eq!(snap_to_tick(15_012_345_678, 0), 15_012_345_678);
-        assert_eq!(snap_to_tick(15_012_345_678, -1), 15_012_345_678);
-        // Zero price stays zero (MidPrice "no cap" sentinel).
-        assert_eq!(snap_to_tick(0, TICK_CENT), 0);
+        assert!(off_grid(10_02_000_000, nickel));
+        assert!(!off_grid(10_05_000_000, nickel));
+        // Unknown tick: only a negative price is refused (ib-agent#192 B5:
+        // a REL offset of -0.50).
+        assert!(!off_grid(15_012_345_678, 0));
+        assert!(off_grid(-50_000_000, 0));
+        assert!(off_grid(-50_000_000, TICK_CENT));
     }
 
     #[test]
-    fn snap_prices_limit_and_stop_fields() {
-        let mut req = OrderRequest::SubmitStopLimit {
-            order_id: 1, instrument: 0, side: Side::Buy, qty: 1,
-            price: 15_012_345_678, stop_price: 15_099_999_999,
+    fn off_grid_checks_the_limit_and_the_stop_or_offset_prices() {
+        let stop_limit = |price, stop_price| OrderRequest::SubmitStopLimit {
+            order_id: 3, instrument: 0, side: Side::Buy, qty: 1, price, stop_price,
         };
-        req.snap_prices(TICK_CENT);
-        match req {
-            OrderRequest::SubmitStopLimit { price, stop_price, .. } => {
-                assert_eq!(price, 15_012_000_000);
-                assert_eq!(stop_price, 15_100_000_000);
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn snap_prices_submit_ex_kind() {
-        let mut req = OrderRequest::SubmitEx {
-            order_id: 1, instrument: 0, side: Side::Sell, qty: 1,
-            kind: OrderKind::Stop { stop_price: 24_000_123_456 },
-            tif: b'1', attrs: OrderAttrs::default(),
+        assert_eq!(stop_limit(15_012_000_000, 15_100_000_000).off_grid_order(TICK_CENT), None);
+        assert_eq!(stop_limit(15_012_345_678, 15_100_000_000).off_grid_order(TICK_CENT), Some(3));
+        assert_eq!(stop_limit(15_012_000_000, 15_099_999_999).off_grid_order(TICK_CENT), Some(3));
+        let ex = |kind| OrderRequest::SubmitEx {
+            order_id: 4, instrument: 0, side: Side::Sell, qty: 1, kind, tif: b'1', attrs: OrderAttrs::default(),
         };
-        req.snap_prices(TICK_CENT);
-        match req {
-            OrderRequest::SubmitEx { kind: OrderKind::Stop { stop_price }, .. } => {
-                assert_eq!(stop_price, 24_000_000_000);
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn snap_prices_leaves_percent_trail_alone() {
-        // trail_pct is basis points, not a price — must never be snapped.
-        let mut req = OrderRequest::SubmitTrailingStopPct {
-            order_id: 1, instrument: 0, side: Side::Sell, qty: 1, trail_pct: 137,
-            trail_stop_price: 0,
+        assert_eq!(ex(OrderKind::Stop { stop_price: 24_000_123_456 }).off_grid_order(TICK_CENT), Some(4));
+        assert_eq!(ex(OrderKind::Rel { price: 0, offset: -50_000_000 }).off_grid_order(TICK_CENT), Some(4));
+        // Not checked: a percent, a trailing stop price, a TRAIL LIMIT offset.
+        assert_eq!(ex(OrderKind::TrailPct { trail_percent: 123_900_000, trail_stop_price: 1 }).off_grid_order(TICK_CENT), None);
+        assert_eq!(ex(OrderKind::TrailingStop { trail_amt: TICK_CENT, trail_stop_price: 1 }).off_grid_order(TICK_CENT), None);
+        assert_eq!(ex(OrderKind::TrailingStopLimit { lmt_offset: 1, lmt_price: None, trail_amt: TICK_CENT, trail_stop_price: 0 })
+            .off_grid_order(TICK_CENT), None);
+        assert_eq!(ex(OrderKind::TrailingStop { trail_amt: 1, trail_stop_price: 0 }).off_grid_order(TICK_CENT), Some(4));
+        // A what-if is checked as its order; a bracket answers for its leg.
+        let what_if = OrderRequest::SubmitWhatIf { request: Box::new(stop_limit(15_012_345_678, 0)) };
+        assert_eq!(what_if.off_grid_order(TICK_CENT), Some(3));
+        let bracket = OrderRequest::SubmitBracket {
+            parent_id: 10, tp_id: 11, sl_id: 12, instrument: 0, side: Side::Buy, qty: 1,
+            entry_price: 100 * PRICE_SCALE, take_profit: 110 * PRICE_SCALE, stop_loss: 90 * PRICE_SCALE + 1,
         };
-        req.snap_prices(TICK_CENT);
-        match req {
-            OrderRequest::SubmitTrailingStopPct { trail_pct, .. } => assert_eq!(trail_pct, 137),
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn snap_prices_unknown_tick_is_noop() {
-        let mut req = OrderRequest::SubmitLimit {
-            order_id: 1, instrument: 0, side: Side::Buy, qty: 1, price: 15_012_345_678,
-        };
-        req.snap_prices(0);
-        match req {
-            OrderRequest::SubmitLimit { price, .. } => assert_eq!(price, 15_012_345_678),
-            _ => unreachable!(),
-        }
+        assert_eq!(bracket.off_grid_order(TICK_CENT), Some(12));
+        // Unknown tick: nothing off the grid but a negative price.
+        assert_eq!(stop_limit(15_012_345_678, 0).off_grid_order(0), None);
     }
 
     #[test]

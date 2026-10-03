@@ -871,8 +871,8 @@ fn place_order_trailing_stop_percent() {
 
     let cmd = rx.try_recv().unwrap();
     match cmd {
-        ControlCommand::Order(OrderRequest::SubmitTrailingStopPct { trail_pct, .. }) => {
-            assert_eq!(trail_pct, 500); // 5.0 * 100
+        ControlCommand::Order(OrderRequest::SubmitTrailingStopPct { trail_percent, .. }) => {
+            assert_eq!(trail_percent, 5 * crate::types::PRICE_SCALE); // 5.0%
         }
         _ => panic!("expected SubmitTrailingStopPct, got {:?}", cmd),
     }
@@ -3882,7 +3882,7 @@ fn modify_trailing_keeps_the_trail() {
         action: "SELL".into(), total_quantity: 1.0, order_type: "TRAIL".into(), trailing_percent: p, ..Default::default()
     };
     let (_, kind, _, _) = modify_of(pct(1.0), pct(2.5));
-    assert!(matches!(kind, OrderKind::TrailPct { trail_pct: 250, .. }), "{:?}", kind);
+    assert!(matches!(kind, OrderKind::TrailPct { trail_percent: 250_000_000, .. }), "{:?}", kind);
 }
 
 // ibx#339: a percent is rounded to basis points, not truncated: 1.15 %
@@ -3897,10 +3897,10 @@ fn percent_trail_rounds_to_basis_points() {
     };
     client.place_order(91, &spy(), &order).unwrap();
     match rx.try_recv().unwrap() {
-        ControlCommand::Order(OrderRequest::SubmitTrailingStopPct { trail_pct, .. }) => assert_eq!(trail_pct, 115),
+        ControlCommand::Order(OrderRequest::SubmitTrailingStopPct { trail_percent, .. }) => assert_eq!(trail_percent, 115_000_000),
         other => panic!("expected SubmitTrailingStopPct, got {:?}", other),
     }
-    assert!(matches!(ClientCore::order_kind(&order).unwrap(), OrderKind::TrailPct { trail_pct: 115, .. }));
+    assert!(matches!(ClientCore::order_kind(&order).unwrap(), OrderKind::TrailPct { trail_percent: 115_000_000, .. }));
 }
 
 // ibx#313: a fractional quantity was cut to a whole number and sent (1.5
