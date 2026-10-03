@@ -1896,6 +1896,157 @@ fn api_contract_lookups_live() {
     }
 }
 
+// ── Contract details fields (ibx#436), focused ──
+
+#[derive(Default)]
+struct DetailsWrapper {
+    events: Vec<String>,
+    rows: Vec<(i64, bool, ContractDetails)>,
+    ends: Vec<i64>,
+    issuers: Vec<String>,
+    chains: Vec<(String, Vec<String>, Vec<f64>)>,
+    chain_end: bool,
+}
+
+impl Wrapper for DetailsWrapper {
+    fn error(&mut self, req_id: i64, code: i64, text: &str, _: &str) { self.events.push(format!("error {req_id} {code} {text}")); }
+    fn contract_details(&mut self, req_id: i64, d: &ContractDetails) { self.rows.push((req_id, false, d.clone())); }
+    fn bond_contract_details(&mut self, req_id: i64, d: &ContractDetails) { self.rows.push((req_id, true, d.clone())); }
+    fn contract_details_end(&mut self, req_id: i64) { self.ends.push(req_id); }
+    fn symbol_samples(&mut self, _req_id: i64, descriptions: &[ContractDescription]) {
+        self.issuers.extend(descriptions.iter().filter(|d| !d.issuer_id.is_empty()).map(|d| d.issuer_id.clone()));
+    }
+    fn security_definition_option_parameter(&mut self, _req_id: i64, exchange: &str, _under: i64,
+        _class: &str, _mult: &str, expirations: &[String], strikes: &[f64]) {
+        self.chains.push((exchange.to_string(), expirations.to_vec(), strikes.to_vec()));
+    }
+    fn security_definition_option_parameter_end(&mut self, _req_id: i64) { self.chain_end = true; }
+}
+
+/// The fields of the reference's rows, as captured on paper 28/09/2026
+/// and 02/10/2026; any market session (the lookups need no market data).
+/// AAPL: industry Technology / Computers / Computers, stock type COMMON,
+/// the ISIN as only id, a market rule id per valid exchange, US/Eastern
+/// hours from today, fractional sizes 0.0001. MNQ futures: date and time
+/// of the last trade (08:30:00), month, underlying MNQ IND, long name on
+/// every row. An AAPL call: right C, underlying 265598 STK, last trade time
+/// 16:00:00. IBM bonds: bond rows, local symbol as CUSIP, a description
+/// append, ISIN and CUSIP ids.
+/// Run with: cargo test --test rust_api_gt api_contract_details_fields_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_contract_details_fields_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => { println!("Skipping: IB credentials not set"); return; }
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = DetailsWrapper::default();
+    let wait_end = |client: &EClient, w: &mut DetailsWrapper, req: i64| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !w.ends.contains(&req) && Instant::now() < deadline {
+            client.process_msgs(w);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    std::thread::sleep(Duration::from_secs(3));
+    let aapl = Contract { symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+    client.req_contract_details(9601, &aapl).unwrap();
+    wait_end(&client, &mut w, 9601);
+    let mnq = Contract { symbol: "MNQ".into(), sec_type: "FUT".into(), exchange: "CME".into(), currency: "USD".into(), ..Default::default() };
+    client.req_contract_details(9602, &mnq).unwrap();
+    wait_end(&client, &mut w, 9602);
+    // An AAPL call of the chain: the first expiry, a strike in the middle.
+    client.req_sec_def_opt_params(9603, "AAPL", "", "STK", 265598).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !w.chain_end && Instant::now() < deadline {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let chain = w.chains.iter().find(|c| c.0 == "SMART").cloned().expect("an AAPL chain on SMART");
+    let mut expiries = chain.1.clone();
+    expiries.sort();
+    let mut strikes = chain.2.clone();
+    strikes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let call = Contract {
+        symbol: "AAPL".into(), sec_type: "OPT".into(), exchange: "SMART".into(), currency: "USD".into(),
+        last_trade_date_or_contract_month: expiries[expiries.len() / 2].clone(), strike: strikes[strikes.len() / 2],
+        right: "C".into(), multiplier: "100".into(), ..Default::default()
+    };
+    client.req_contract_details(9604, &call).unwrap();
+    wait_end(&client, &mut w, 9604);
+    client.req_matching_symbols(9605, "IBM").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while w.issuers.is_empty() && Instant::now() < deadline {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let issuer = w.issuers.first().cloned().unwrap_or_else(|| "e1400789".into());
+    let bond = Contract { sec_type: "BOND".into(), issuer_id: issuer, currency: "USD".into(), ..Default::default() };
+    client.req_contract_details(9606, &bond).unwrap();
+    wait_end(&client, &mut w, 9606);
+    client.disconnect();
+    let of = |req: i64| w.rows.iter().filter(|r| r.0 == req).map(|r| (r.1, r.2.clone())).collect::<Vec<_>>();
+    for req in [9601, 9602, 9604, 9606] {
+        let rows = of(req);
+        println!("  {req}: {} rows, end {}", rows.len(), w.ends.contains(&req));
+        if let Some((_, d)) = rows.first() {
+            println!("    {:?}", d);
+        }
+    }
+    println!("  events {:?}", w.events);
+    let today = jiff::Zoned::now().with_time_zone(jiff::tz::TimeZone::get("US/Eastern").unwrap()).date().strftime("%Y%m%d").to_string();
+
+    let rows = of(9601);
+    assert_eq!(rows.len(), 1);
+    let d = &rows[0].1;
+    assert_eq!((d.contract.con_id, d.contract.sec_type.as_str(), d.contract.primary_exchange.as_str()), (265598, "STK", "NASDAQ"));
+    assert_eq!((d.industry.as_str(), d.category.as_str(), d.subcategory.as_str()), ("Technology", "Computers", "Computers"));
+    assert_eq!((d.stock_type.as_str(), d.under_con_id, d.agg_group, d.price_magnifier), ("COMMON", 0, 1, 1));
+    assert_eq!(d.sec_id_list, vec![TagValue { tag: "ISIN".into(), value: "US0378331005".into() }]);
+    assert_eq!(d.market_rule_ids.split(',').count(), d.valid_exchanges.split(',').count(), "{} / {}", d.market_rule_ids, d.valid_exchanges);
+    assert_eq!(d.time_zone_id, "US/Eastern");
+    assert!(d.trading_hours.starts_with(&format!("{today}:")) && d.liquid_hours.starts_with(&format!("{today}:")),
+        "{} / {}", d.trading_hours, d.liquid_hours);
+    assert_eq!((d.min_size, d.size_increment), (0.0001, 0.0001));
+    assert!(d.suggested_size_increment >= 1.0 && d.min_tick == 0.01);
+    assert!(!d.order_types.contains('/'), "{}", d.order_types);
+
+    let rows = of(9602);
+    assert!(rows.len() >= 2, "{} MNQ rows", rows.len());
+    for (_, d) in &rows {
+        assert_eq!(d.contract.last_trade_date_or_contract_month.len(), 8, "{:?}", d.contract);
+        assert_eq!(d.contract.last_trade_date, d.contract.last_trade_date_or_contract_month);
+        assert_eq!((d.last_trade_time.as_str(), d.contract.multiplier.as_str()), ("08:30:00", "2"));
+        assert_eq!(d.contract_month, d.contract.last_trade_date[..6]);
+        assert_eq!((d.under_symbol.as_str(), d.under_sec_type.as_str()), ("MNQ", "IND"));
+        assert!(d.under_con_id > 0 && !d.long_name.is_empty() && !d.real_expiration_date.is_empty());
+        assert_eq!(d.time_zone_id, "US/Central");
+    }
+
+    let rows = of(9604);
+    assert_eq!(rows.len(), 1, "the call {:?}", call);
+    let d = &rows[0].1;
+    assert_eq!((d.contract.right.as_str(), d.contract.multiplier.as_str()), ("C", "100"));
+    assert_eq!((d.under_con_id, d.under_symbol.as_str(), d.under_sec_type.as_str()), (265598, "AAPL", "STK"));
+    assert_eq!(d.last_trade_time, "16:00:00");
+    assert_eq!(d.contract.last_trade_date_or_contract_month, call.last_trade_date_or_contract_month);
+
+    let rows = of(9606);
+    assert!(!rows.is_empty() && rows.iter().all(|(bond, d)| *bond && d.contract.sec_type == "BOND"));
+    for (_, d) in &rows {
+        assert_eq!(d.cusip, d.contract.local_symbol);
+        assert!(!d.desc_append.is_empty());
+        assert!(d.sec_id_list.iter().any(|t| t.tag == "ISIN"));
+    }
+    assert!(rows.iter().any(|(_, d)| d.sec_id_list.iter().any(|t| t.tag == "CUSIP")));
+}
+
 // ── Historical ticks, keepUpToDate and date strings (ibx#432, ibx#429, ibx#431), focused ──
 
 #[derive(Default)]
