@@ -43,11 +43,8 @@ impl EClient {
 
         let tx = self.tx()?;
 
-        let oid = if order_id > 0 {
-            order_id
-        } else {
-            self.next_order_id.fetch_add(1, Ordering::Relaxed)
-        };
+        // The id as given: the reference refuses 0 with 10149 below.
+        let oid = order_id;
 
         // Warnings the reference sends while it reads the order (ibx#416).
         let shared = self.shared_state()?;
@@ -64,6 +61,7 @@ impl EClient {
             .or_else(|| ClientCore::good_till_date_refusal(&api_order, contract_zone.as_deref()))
             .or_else(|| ClientCore::condition_time_zone_refusal(&api_order, contract_zone.as_deref()))
             .or_else(|| ClientCore::price_refusal(&api_order))
+            .or_else(|| ClientCore::order_id_refusal(oid))
             .or_else(|| self.core.refusal_for_order_id(oid, &api_order, &shared))
         {
             shared.orders.push_order_error(oid, code, message);

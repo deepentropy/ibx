@@ -244,6 +244,13 @@ fn fractional_quantity() {
 // ── The order id flow ──
 
 #[test]
+fn order_id_zero() {
+    let mut engine = Engine::start();
+    engine.client.place_order(0, &aapl(), &order("LMT")).expect("a refusal is an error callback");
+    assert_refused(&mut engine, 0, "10149 bH.W@44");
+}
+
+#[test]
 fn a_new_order_id_below_the_highest_used() {
     let mut engine = Engine::start();
     engine.client.place_order(50, &aapl(), &order("LMT")).unwrap();
@@ -351,10 +358,8 @@ fn touched_order_without_a_trigger_price() {
     refused("361 bH.S@6766", &aapl(), &Order { aux_price: f64::MAX, ..order("MIT") });
 }
 
-// ibx answers an unknown action with an error of the call (ibx#115), not
-// with the gateway's 321 callback.
 #[test]
-#[ignore = "ibx#485: an unknown action is a place_order error (ibx#115 fail-fast), not the gateway's 321 callback"]
 fn unknown_action() {
     refused("321 bH.S@1380", &aapl(), &Order { action: "HOLD".into(), ..order("LMT") });
+    refused("321 bH.S@1380", &aapl(), &Order { action: String::new(), ..order("LMT") });
 }

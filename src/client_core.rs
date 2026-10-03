@@ -3707,7 +3707,12 @@ impl ClientCore {
     /// Pre-validate order fields that don't depend on instrument ID.
     /// Call this before `find_or_register_instrument` to fail fast.
     pub fn validate_order(order: &ApiOrder) -> Result<(), String> {
-        order.side()?;
+        // An action the reference does not know is its 321 refusal
+        // (`order_rule_refusal`); one it knows that ibx cannot send
+        // (SSHORTX, SELL LONG) fails here.
+        if Self::action_known(&order.action) {
+            order.side()?;
+        }
 
         // transmit=false cannot be honoured: every order is sent to the
         // broker immediately when place_order is called; there is no
@@ -4373,6 +4378,23 @@ impl ClientCore {
         }
     }
 
+    /// Whether the reference knows an order action (`jfix.eU.a(String,
+    /// boolean)`, case ignored): BUY, SELL, SSHORT, SSHRT, SSHORTX, SSHRTX,
+    /// SELL LONG and Exchange_Action. Any other reads as side 0.
+    pub fn action_known(action: &str) -> bool {
+        ["BUY", "SELL", "SSHORT", "SSHRT", "SSHORTX", "SSHRTX", "SELL LONG", "Exchange_Action"]
+            .iter().any(|a| a.eq_ignore_ascii_case(action))
+    }
+
+    /// An order id the reference refuses with 10149 when no order has it:
+    /// 0 and the two int bounds (`jextend.bH.W()@29-55`,
+    /// `twslaunch.jutils.av.c(int)`; ibx#485). ibx used to take the next id
+    /// for 0.
+    pub fn order_id_refusal(order_id: OrderId) -> Option<(i64, String)> {
+        matches!(order_id, 0 | 2147483647 | -2147483648)
+            .then(|| (10149, format!("Invalid order id: {}", order_id)))
+    }
+
     /// Order rules the reference checks before sending, answered as error
     /// 321 with the rule text (ibx#468), in the reference's order
     /// (`jextend.bH.S()` stops at the first). The text after "cause - " is
@@ -4380,6 +4402,11 @@ impl ClientCore {
     fn order_rule_refusal(order: &ApiOrder) -> Option<(i64, String)> {
         let refuse = |cause: &str| Some((321, format!("Error validating request.-'bH' : cause - {}", cause)));
         let order_type = order.order_type.to_uppercase();
+        // An action the reference does not know reads as side 0, refused
+        // first (`jextend.bH.S()@1311`, ibx#485).
+        if !Self::action_known(&order.action) {
+            return refuse("Invalid side field was entered");
+        }
         // A quantity below 0 or above 999,999,999 (ibx#263).
         if order.total_quantity < 0.0 || order.total_quantity > 999_999_999.0 {
             return refuse("Order size does not conform to market rule.");

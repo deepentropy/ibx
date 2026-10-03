@@ -1696,34 +1696,37 @@ fn place_order_explicit_stk_contract_accepted() {
     assert!(rx.try_recv().is_ok());
 }
 
+// ibx#485: an action the reference does not know is its 321 refusal, an
+// error callback; nothing goes to the engine.
 #[test]
-fn place_order_invalid_action_returns_error() {
-    let (client, _rx, shared) = test_client();
+fn place_order_invalid_action_is_refused_with_321() {
+    let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     let order = Order {
         action: "INVALID".into(), total_quantity: 100.0, order_type: "MKT".into(), ..Default::default()
     };
-    let result = client.place_order(1, &spy(), &order);
-    assert!(result.is_err());
+    client.place_order(1, &spy(), &order).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.contains(&"error:1:321:Error validating request.-'bH' : cause - Invalid side field was entered".to_string()),
+        "{:?}", w.events);
 }
 
+// ibx#485: order id 0 is refused with 10149, as the reference
+// (`jextend.bH.W()@29-55`); ibx used to take the next id.
 #[test]
-fn place_order_auto_assigns_id_when_zero() {
+fn place_order_with_id_zero_is_refused_with_10149() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "MKT".into(), ..Default::default()
     };
-    // order_id = 0 → auto-assign
     client.place_order(0, &spy(), &order).unwrap();
-
-    let cmd = rx.try_recv().unwrap();
-    match cmd {
-        ControlCommand::Order(OrderRequest::SubmitMarket { order_id, .. }) => {
-            assert!(order_id > 0);
-        }
-        _ => panic!("expected SubmitMarket"),
-    }
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.contains(&"error:0:10149:Invalid order id: 0".to_string()), "{:?}", w.events);
 }
 
 #[test]

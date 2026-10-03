@@ -62,29 +62,34 @@ fn spy() -> Contract {
 //  ERROR PATHS — place_order
 // ═══════════════════════════════════════════════════════════════════════
 
+// ibx#485: an unknown action is the reference's 321 callback, not an
+// error of the call.
 #[test]
-fn place_order_invalid_action_returns_error() {
-    let (client, _rx, shared) = test_client();
+fn place_order_invalid_action_is_refused_by_callback() {
+    let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     let order = Order {
         action: "INVALID".into(), total_quantity: 100.0,
         order_type: "MKT".into(), ..Default::default()
     };
-    let result = client.place_order(1, &spy(), &order);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Invalid action"));
+    client.place_order(1, &spy(), &order).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    let errors = shared.orders.drain_order_errors();
+    assert_eq!(errors, [(1, 321, "Error validating request.-'bH' : cause - Invalid side field was entered".to_string())]);
 }
 
 #[test]
-fn place_order_empty_action_returns_error() {
-    let (client, _rx, shared) = test_client();
+fn place_order_empty_action_is_refused_by_callback() {
+    let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
     let order = Order {
         action: String::new(), total_quantity: 100.0,
         order_type: "MKT".into(), ..Default::default()
     };
-    let result = client.place_order(1, &spy(), &order);
-    assert!(result.is_err());
+    client.place_order(1, &spy(), &order).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    let errors = shared.orders.drain_order_errors();
+    assert_eq!(errors, [(1, 321, "Error validating request.-'bH' : cause - Invalid side field was entered".to_string())]);
 }
 
 #[test]
@@ -624,7 +629,8 @@ fn concurrent_place_order_and_process_msgs() {
                 action: "BUY".into(), total_quantity: 1.0,
                 order_type: "MKT".into(), ..Default::default()
             };
-            let _ = client_b.place_order(0, &Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() }, &order);
+            let id = client_b.next_order_id();
+            let _ = client_b.place_order(id, &Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() }, &order);
         }
     });
 

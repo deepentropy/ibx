@@ -406,13 +406,16 @@ impl Default for Order {
 }
 
 impl Order {
-    /// Parse the action string to Side.
+    /// Parse the action string to Side: the reference's names, case
+    /// ignored (`jfix.eU.a(String, boolean)`; SSHRT is its short form of
+    /// SSHORT). An action the reference does not know is refused by it
+    /// with 321 (`ClientCore::refusal_before_sending`).
     pub fn side(&self) -> Result<Side, String> {
         match self.action.to_uppercase().as_str() {
-            "BUY" | "B" => Ok(Side::Buy),
-            "SELL" | "S" => Ok(Side::Sell),
-            "SSHORT" | "SS" => Ok(Side::ShortSell),
-            _ => Err(format!("Invalid action '{}': use BUY or SELL", self.action)),
+            "BUY" => Ok(Side::Buy),
+            "SELL" => Ok(Side::Sell),
+            "SSHORT" | "SSHRT" => Ok(Side::ShortSell),
+            _ => Err(format!("Invalid action '{}': use BUY, SELL or SSHORT", self.action)),
         }
     }
 
@@ -1186,10 +1189,13 @@ mod tests {
         assert_eq!(o.side().unwrap(), Side::Sell);
         o.action = "SSHORT".into();
         assert_eq!(o.side().unwrap(), Side::ShortSell);
+        // The reference's names only, case ignored (ibx#485): no B or S.
+        o.action = "sshrt".into();
+        assert_eq!(o.side().unwrap(), Side::ShortSell);
         o.action = "B".into();
-        assert_eq!(o.side().unwrap(), Side::Buy);
+        assert!(o.side().is_err());
         o.action = "S".into();
-        assert_eq!(o.side().unwrap(), Side::Sell);
+        assert!(o.side().is_err());
     }
 
     // ibx#417: the clearing intent and the short-sale instructions reach
