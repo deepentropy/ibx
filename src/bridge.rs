@@ -50,6 +50,38 @@ pub struct FillExec {
     pub model_code: String,
     /// Tag 6010.
     pub order_ref: String,
+    /// A report of a combo order (ibx#470): the contract its execution
+    /// shows, and for a leg report the leg's own execution values.
+    pub combo: Option<Box<ComboExec>>,
+}
+
+/// The execution of a combo report (ibx#470): the reference shows the
+/// combo contract on the report of the combo, the leg's contract and its
+/// own side, size and prices on the report of a leg.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ComboExec {
+    pub contract: api::Contract,
+    pub leg: Option<LegExec>,
+}
+
+/// What the report of one leg of a combo fill says (ibx#470).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LegExec {
+    /// BOT or SLD.
+    pub side: String,
+    pub shares: f64,
+    pub price: f64,
+    pub cum_qty: f64,
+    pub avg_price: f64,
+}
+
+/// What the reference shows of a combo order in openOrder (ibx#470): the
+/// combo contract with its legs, and the per-leg prices in the contract's
+/// leg order, f64::MAX for a leg without one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ComboView {
+    pub contract: api::Contract,
+    pub leg_prices: Vec<f64>,
 }
 
 /// Events emitted by the IB engine.
@@ -508,11 +540,14 @@ pub struct OrderState {
     /// Set from a lost auth link to the end of the order replay after the
     /// new logon: open-order requests wait for the replay (ibx#251).
     open_orders_held: AtomicBool,
+    /// The combo of each combo order sent this session (ibx#470).
+    combo_views: Mutex<HashMap<OrderId, ComboView>>,
 }
 
 impl OrderState {
     fn new() -> Self {
         Self {
+            combo_views: Mutex::new(HashMap::new()),
             fills: Mutex::new(Vec::with_capacity(64)),
             commission_reports: Mutex::new(Vec::with_capacity(64)),
             untracked_executions: Mutex::new(Vec::new()),
@@ -589,6 +624,22 @@ impl OrderState {
             .filter(|(_, v)| crate::client_core::is_open_status(&v.order_state.status))
             .map(|(&k, v)| (k, v.clone()))
             .collect()
+    }
+
+    /// The combo of a combo order (ibx#470), None for any other order.
+    pub fn combo_view(&self, order_id: OrderId) -> Option<ComboView> {
+        self.combo_views.lock().unwrap().get(&order_id).cloned()
+    }
+
+    #[doc(hidden)] pub fn set_combo_view(&self, order_id: OrderId, view: ComboView) {
+        self.combo_views.lock().unwrap().insert(order_id, view);
+    }
+
+    /// The per-leg prices a report of a combo order carries (ibx#470).
+    #[doc(hidden)] pub fn set_combo_leg_prices(&self, order_id: OrderId, leg_prices: Vec<f64>) {
+        if let Some(view) = self.combo_views.lock().unwrap().get_mut(&order_id) {
+            view.leg_prices = leg_prices;
+        }
     }
 
     /// Get enriched order info by order_id.
@@ -712,6 +763,9 @@ pub struct ReferenceState {
     /// a short-side order pass the side check.
     super_user: AtomicBool,
     omnibus: AtomicBool,
+    /// The smart combo conId of each currency, from logon tag 6611
+    /// (ibx#470).
+    smart_combo_con_ids: Mutex<HashMap<String, i64>>,
     /// The API client id the new orders carry (ibx#466); 0 until set.
     api_client_id: std::sync::atomic::AtomicI64,
     /// The algo definitions the server sent (ibx#263).
@@ -788,6 +842,7 @@ impl ReferenceState {
             fa_session: std::sync::atomic::AtomicBool::new(false),
             super_user: AtomicBool::new(false),
             omnibus: AtomicBool::new(false),
+            smart_combo_con_ids: Mutex::new(HashMap::new()),
             api_client_id: std::sync::atomic::AtomicI64::new(0),
             algo_definitions: Mutex::new(Default::default()),
             tick_by_tick_limit: AtomicU64::new(u64::MAX),
@@ -1277,6 +1332,21 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_api_client_id(&self, client_id: i64) {
         self.api_client_id.store(client_id, Ordering::Relaxed);
+    }
+
+    /// The smart combo conId of a currency, from logon tag 6611 (ibx#470);
+    /// None when the logon has none for it.
+    pub fn smart_combo_con_id(&self, currency: &str) -> Option<i64> {
+        self.smart_combo_con_ids.lock().unwrap().get(currency).copied()
+    }
+
+    /// Keep logon tag 6611, `CUR:conId,...` (ibx#470).
+    #[doc(hidden)] pub fn set_smart_combo_con_ids(&self, raw: &str) {
+        let table = raw.split(',').filter_map(|entry| {
+            let (currency, con_id) = entry.split_once(':')?;
+            Some((currency.trim().to_string(), con_id.trim().parse::<i64>().ok().filter(|&c| c > 0)?))
+        }).collect();
+        *self.smart_combo_con_ids.lock().unwrap() = table;
     }
 
     #[doc(hidden)] pub fn set_short_sale_flags(&self, super_user: bool, omnibus: bool) {

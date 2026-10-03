@@ -2740,6 +2740,9 @@ fn extract_text_tag(msg: &[u8], tag: u32) -> Option<String> {
 }
 
 #[cfg(test)]
+mod combo_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;

@@ -264,6 +264,63 @@ impl EClient {
         Ok(())
     }
 
+    /// Map a conId to an instrument slot, as a registration would
+    /// (test-only).
+    #[doc(hidden)]
+    fn _test_seed_instrument(&self, con_id: i64, instrument: u32) {
+        self.core.con_id_to_instrument.lock().unwrap().insert(con_id, instrument);
+    }
+
+    /// Set the smart combo conIds of the logon, tag 6611 (ibx#470,
+    /// test-only).
+    #[doc(hidden)]
+    fn _test_set_smart_combo_con_ids(&self, raw: &str) -> PyResult<()> {
+        self.shared_state()?.reference.set_smart_combo_con_ids(raw);
+        Ok(())
+    }
+
+    /// The combo of the first combo order queued for the engine (ibx#470,
+    /// test-only): (exchange, currency, symbol, smart combo conId, legs as
+    /// (conId, ratio, buy), per-leg prices, routing attributes). The
+    /// queued commands are taken.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    fn _test_take_combo(&self) -> PyResult<Option<(String, String, String, i64, Vec<(i64, i32, bool)>, Vec<f64>, Vec<(u32, String)>)>> {
+        let rx = self._test_control_rx.lock().unwrap().clone()
+            .ok_or_else(|| PyRuntimeError::new_err("No test command channel"))?;
+        while let Ok(cmd) = rx.try_recv() {
+            if let ControlCommand::Order(req) = cmd {
+                if let Some(c) = req.combo() {
+                    return Ok(Some((
+                        c.exchange.clone(), c.currency.clone(), c.symbol.clone(), c.smart_con_id,
+                        c.legs.iter().map(|l| (l.con_id, l.ratio, l.buy)).collect(),
+                        c.leg_prices.iter().map(|p| *p as f64 / PRICE_SCALE as f64).collect(),
+                        c.routing_attrs.clone(),
+                    )));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Set the combo openOrder shows for an order, as the engine does when
+    /// the order goes out (ibx#470, test-only). `legs` are (conId, ratio,
+    /// action, exchange).
+    #[doc(hidden)]
+    fn _test_set_combo_view(&self, order_id: OrderId, con_id: i64, symbol: &str,
+        legs: Vec<(i64, i32, String, String)>, descrip: &str, leg_prices: Vec<f64>) -> PyResult<()> {
+        let contract = crate::api::types::Contract {
+            con_id, symbol: symbol.into(), sec_type: "BAG".into(), exchange: "SMART".into(), currency: "USD".into(),
+            local_symbol: symbol.into(), trading_class: "COMB".into(), combo_legs_descrip: descrip.into(),
+            combo_legs: legs.into_iter().map(|(con_id, ratio, action, exchange)| crate::api::types::ComboLeg {
+                con_id, ratio, action, exchange, ..Default::default()
+            }).collect(),
+            ..Default::default()
+        };
+        self.shared_state()?.orders.set_combo_view(order_id, crate::bridge::ComboView { contract, leg_prices });
+        Ok(())
+    }
+
     /// Track an order locally (for req_open_orders regression tests).
     #[doc(hidden)]
     fn _test_track_order(

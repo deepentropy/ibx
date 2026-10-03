@@ -667,6 +667,34 @@ pub struct OrderView {
     pub client_id: i64,
 }
 
+/// Text of error 10027, a smartComboRoutingParams name the reference does
+/// not know (ibx#470).
+pub const INVALID_COMBO_ROUTING_TAG: &str = "Invalid combo routing tag. Valid tags are LeginPrio, MaxSegSize,     DontLeginNext, ChangeToMktTime1, ChangeToMktTime2, ChangeToMktOffset, DiscretionaryPct, NonGuaranteed,     CondPriceMin, CondPriceMax, and PriceCondConid.";
+
+/// The order attribute tag of a smartComboRoutingParams name
+/// (`jattrib.Attributes.f`, ibx#470); None for a name the reference does
+/// not know.
+fn combo_routing_tag(name: &str) -> Option<u32> {
+    Some(match name {
+        "LeginPrio" => 6851,
+        "MaxSegSize" => 6852,
+        "DontLeginNext" => 6867,
+        "ChangeToMktTime1" => 6860,
+        "ChangeToMktTime2" => 6861,
+        "ChangeToMktOffset" => 6866,
+        "DiscretionaryPct" => 6862,
+        "PriceCondConid" => 6876,
+        "CondPriceMax" => 6878,
+        "CondPriceMin" => 6877,
+        "NonGuaranteed" => 6248,
+        _ => return None,
+    })
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
 /// The reference's answer to a place or modify on an order id that is no
 /// longer working: filled, cancelled, or with a cancel pending. Nothing is
 /// sent (ibx#463; captured 25/09/2026).
@@ -2624,11 +2652,13 @@ impl ClientCore {
             (None, Some(i)) => (i.contract, i.order, 0.0, 0),
             (None, None) => return None,
         };
-        let contract = if contract.con_id != 0 {
+        let mut contract = if contract.con_id != 0 && !contract.sec_type.eq_ignore_ascii_case("BAG") {
             self.get_contract(contract.con_id, shared).unwrap_or(contract)
         } else {
             contract
         };
+        let mut order = order;
+        Self::apply_combo_view(order_id, &mut contract, &mut order, shared);
         Some(OrderView { contract, order, state, last_fill_price, client_id })
     }
 
@@ -2742,7 +2772,7 @@ impl ClientCore {
             let orders = self.open_orders.lock().unwrap();
             for (&oid, o) in orders.iter() {
                 if is_open_status(&o.status) {
-                    let contract = if o.contract.con_id != 0 {
+                    let mut contract = if o.contract.con_id != 0 {
                         self.get_contract(o.contract.con_id, shared).unwrap_or_else(|| o.contract.clone())
                     } else {
                         o.contract.clone()
@@ -2753,6 +2783,7 @@ impl ClientCore {
                         reported_trail_limit(&mut order, &info.order);
                     }
                     reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
+                    Self::apply_combo_view(oid, &mut contract, &mut order, shared);
                     result.push((oid, TrackedOrder {
                         contract,
                         order,
@@ -3827,16 +3858,189 @@ impl ClientCore {
     /// stock callers that omit the field are unaffected.
     /// See: https://github.com/deepentropy/ibx/issues/202
     pub fn validate_order_contract(sec_type: &str) -> Result<(), String> {
-        if sec_type.is_empty() || sec_type.eq_ignore_ascii_case("STK") {
+        // A combo (BAG) goes out with its legs, as the reference builds it
+        // (ibx#470).
+        if sec_type.is_empty() || sec_type.eq_ignore_ascii_case("STK") || sec_type.eq_ignore_ascii_case("BAG") {
             return Ok(());
         }
         Err(format!(
-            "Unsupported contract sec_type '{}': only STK orders are supported. \
-             Non-STK contracts (OPT/FUT/BAG/…) are not yet wire-encoded and would \
+            "Unsupported contract sec_type '{}': only STK and BAG orders are supported. \
+             Other contracts (OPT/FUT/…) are not yet wire-encoded and would \
              otherwise be silently sent as a stock order on the underlying symbol. \
              See https://github.com/deepentropy/ibx/issues/202",
             sec_type
         ))
+    }
+
+    /// The combo of a BAG order, read and checked as the reference reads a
+    /// placeOrder (ibx#470); `Ok(None)` for any other contract, `Err` with
+    /// the code and text of a refusal, sent before anything goes out.
+    ///
+    /// Reading (`jextend.bH.q(ee)`, error 320): per-leg prices whose count
+    /// is not the leg count (10057), a smartComboRoutingParams name the
+    /// reference does not know (10027). Checking (`jextend.bH.S()`, error
+    /// 321): no leg (314), a smart combo in a currency with no smart combo
+    /// conId in the logon (10011), then each leg in order
+    /// (`jextend.at.a(OrderCreator)`): a per-leg price on an order type
+    /// other than LMT or REL + LMT (10055), a leg without price after a
+    /// priced first leg (10056), a conId or ratio not above 0 or an action
+    /// that is not BUY, SELL, SSHORT or SSHORTX, an open/close code that
+    /// is not 0, 1 or 2 for an institutional order, a short leg or a short
+    /// sale slot for one that is not (346); then a limit price with per-leg
+    /// prices (10054) and ratios with a common divisor (476). The rule
+    /// texts of the leg checks follow the leg's text "The combo details
+    /// for leg 'i' are invalid. - ". The institutional short-sale rules of
+    /// the legs (494, 348, 347, 353, 352, 495) are not checked.
+    pub fn combo_order(
+        contract: &ApiContract,
+        order: &ApiOrder,
+        reference: &crate::bridge::ReferenceState,
+        account_id: &str,
+    ) -> Result<Option<ComboSpec>, (i64, String)> {
+        if !contract.sec_type.eq_ignore_ascii_case("BAG") {
+            return Ok(None);
+        }
+        let read_error = |cause: &str| (320, format!("Error reading request:{}", cause));
+        let refuse = |cause: &str| (321, format!("Error validating request.-'bH' : cause - {}", cause));
+        let legs = &contract.combo_legs;
+        let prices = &order.order_combo_legs;
+        if !prices.is_empty() && prices.len() != legs.len() {
+            return Err(read_error("Mismatch per-leg price number with combo leg specification."));
+        }
+        let mut routing_attrs = Vec::with_capacity(order.smart_combo_routing_params.len());
+        let mut non_guaranteed = false;
+        for tv in &order.smart_combo_routing_params {
+            let Some(tag) = combo_routing_tag(&tv.tag) else {
+                return Err(read_error(INVALID_COMBO_ROUTING_TAG));
+            };
+            if tag == 6248 { non_guaranteed = tv.value.trim() == "1"; }
+            routing_attrs.push((tag, tv.value.clone()));
+        }
+        if legs.is_empty() {
+            return Err(refuse("Security type 'BAG' requires combo leg details."));
+        }
+        let smart = matches!(contract.exchange.to_uppercase().as_str(), "" | "SMART");
+        let smart_con_id = if smart {
+            match reference.smart_combo_con_id(&contract.currency) {
+                Some(con_id) => con_id,
+                None => return Err(refuse(&format!("Currency {} isn't supported for smart combo.", contract.currency))),
+            }
+        } else {
+            0
+        };
+        let (super_user, _) = reference.short_sale_flags();
+        let institutional = super_user
+            || crate::engine::hot_loop::order_builder::clearing_away(&order.clearing_intent, account_id, super_user);
+        let order_type = order.order_type.to_uppercase();
+        let priced = |i: usize| prices.get(i).is_some_and(|p| *p != f64::MAX);
+        for (i, leg) in legs.iter().enumerate() {
+            let leg_error = |rule: &str| refuse(&format!("The combo details for leg '{}' are invalid. - {}", i, rule));
+            if priced(i) && !matches!(order_type.as_str(), "LMT" | "REL + LMT") {
+                return Err(leg_error("Only LMT or REL+LMT order allows using per-leg prices."));
+            }
+            if i > 0 && priced(0) && !priced(i) {
+                return Err(leg_error("All leg prices are needed when specifying per-leg prices."));
+            }
+            let (action, short) = match leg.action.to_uppercase().as_str() {
+                "BUY" => ('1', false),
+                "SELL" => ('2', false),
+                "SSHORT" | "SSHORTX" => ('2', true),
+                _ => ('0', false),
+            };
+            if leg.con_id <= 0 || leg.ratio <= 0 || action == '0' {
+                return Err(leg_error(&format!(" conid, ratio, side: {}, {}, {}", leg.con_id, leg.ratio, action)));
+            }
+            if institutional && !(0..=2).contains(&leg.open_close) {
+                return Err(leg_error(&format!("Open/Close: {}", leg.open_close)));
+            }
+            if !institutional && (short || leg.short_sale_slot != 0) {
+                return Err(leg_error("Not an institutional account, or an away clearing order"));
+            }
+        }
+        let all_priced = (0..legs.len()).all(priced);
+        let lmt_set = order.lmt_price != f64::MAX && !(order.lmt_price == 0.0 && all_priced);
+        if all_priced && lmt_set {
+            return Err(refuse("Can't specify combo price when using per-leg prices."));
+        }
+        let divisor = legs.iter().fold(0u32, |g, l| gcd(g, l.ratio.unsigned_abs()));
+        if divisor != 1 {
+            return Err(refuse("Invalid leg ratio."));
+        }
+        Ok(Some(ComboSpec {
+            exchange: contract.exchange.clone(),
+            currency: contract.currency.clone(),
+            symbol: contract.symbol.clone(),
+            smart_con_id,
+            legs: legs.iter().map(|l| ComboLegSpec {
+                con_id: l.con_id,
+                ratio: l.ratio,
+                buy: l.action.eq_ignore_ascii_case("BUY"),
+                exchange: l.exchange.clone(),
+            }).collect(),
+            leg_prices: if all_priced {
+                prices.iter().map(|p| (p * PRICE_SCALE_F).round() as Price).collect()
+            } else {
+                Vec::new()
+            },
+            routing_attrs,
+            non_guaranteed,
+        }))
+    }
+
+    /// A modify of a combo order must name the legs of the working order
+    /// (ibx#470): else 10059 and nothing is sent
+    /// (`jextend.bH.c(jclient.pe, jsecdef.dl)@965-1070`).
+    pub fn combo_modify_refusal(contract: &ApiContract, working: &ApiContract) -> Option<(i64, String)> {
+        if !contract.sec_type.eq_ignore_ascii_case("BAG") || contract.combo_legs.is_empty() {
+            return None;
+        }
+        let known = |con_id: i64| working.combo_legs.iter().any(|l| l.con_id == con_id);
+        (!contract.combo_legs.iter().all(|l| known(l.con_id)))
+            .then(|| (10059, "Mismatch leg contract.".to_string()))
+    }
+
+    /// The combo order as the engine builds it (ibx#470): the order as
+    /// placed, through the extended encoder, with its combo. A limit price
+    /// left unset with per-leg prices goes as 0; the engine writes the
+    /// price the leg prices give.
+    pub fn build_combo_order_request(
+        order: &ApiOrder,
+        order_id: OrderId,
+        instrument: InstrumentId,
+        combo: ComboSpec,
+    ) -> Result<ControlCommand, String> {
+        let mut order = order.clone();
+        if !combo.leg_prices.is_empty() {
+            order.lmt_price = 0.0;
+        }
+        Self::build_order_request_with(&order, order_id, instrument, Some(Box::new(combo)))
+    }
+
+    /// The contract and order openOrder shows for a combo order (ibx#470):
+    /// the combo contract with its legs, and the per-leg prices the server
+    /// reports in leg order (no limit price with per-leg prices).
+    pub fn apply_combo_view(order_id: OrderId, contract: &mut ApiContract, order: &mut ApiOrder, shared: &SharedState) {
+        let Some(view) = shared.orders.combo_view(order_id) else { return };
+        *contract = view.contract;
+        if view.leg_prices.iter().any(|p| *p != f64::MAX) {
+            order.lmt_price = f64::MAX;
+        }
+        order.order_combo_legs = view.leg_prices;
+    }
+
+    /// The execution a combo report shows (ibx#470): the combo contract on
+    /// the combo's report; the leg's contract, side, size, prices and
+    /// totals on a leg's report.
+    pub fn apply_combo_exec(fe: &crate::bridge::FillExec, contract: &mut ApiContract, exec: &mut ApiExecution) {
+        let Some(combo) = &fe.combo else { return };
+        *contract = combo.contract.clone();
+        if let Some(leg) = &combo.leg {
+            exec.side = leg.side.clone();
+            exec.shares = leg.shares;
+            exec.price = leg.price;
+            exec.cum_qty = leg.cum_qty;
+            exec.avg_price = leg.avg_price;
+        }
     }
 
     /// The reference refuses a fractional quantity before sending anything,
@@ -4139,6 +4343,11 @@ impl ClientCore {
         self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.clone())
     }
 
+    /// The contract a tracked order was placed with.
+    pub fn tracked_contract(&self, order_id: OrderId) -> Option<ApiContract> {
+        self.open_orders.lock().unwrap().get(&order_id).map(|t| t.contract.clone())
+    }
+
     /// The order kind with its prices, as the extended submit path builds it
     /// from the same `Order` fields. Used for a replace, which restates the
     /// order type and its prices (ibx#247).
@@ -4350,11 +4559,22 @@ impl ClientCore {
         order_id: OrderId,
         instrument: InstrumentId,
     ) -> Result<ControlCommand, String> {
+        Self::build_order_request_with(order, order_id, instrument, None)
+    }
+
+    /// `build_order_request` with the combo of a BAG order (ibx#470), which
+    /// takes the extended encoder.
+    fn build_order_request_with(
+        order: &ApiOrder,
+        order_id: OrderId,
+        instrument: InstrumentId,
+        combo: Option<Box<ComboSpec>>,
+    ) -> Result<ControlCommand, String> {
         // A what-if first (ibx#462): the order as it would be placed, of
         // any type or algo, previewed, never placed.
         if order.what_if {
             let real = ApiOrder { what_if: false, ..order.clone() };
-            return match Self::build_order_request(&real, order_id, instrument)? {
+            return match Self::build_order_request_with(&real, order_id, instrument, combo)? {
                 ControlCommand::Order(request) => Ok(ControlCommand::Order(
                     OrderRequest::SubmitWhatIf { request: Box::new(request) })),
                 other => Ok(other),
@@ -4376,8 +4596,9 @@ impl ClientCore {
         // is treated as DAY, matching the official API default.
         let extended = order.has_extended_attrs()
             || !matches!(order.tif.as_str(), "" | "DAY")
-            || algo.is_some();
-        let attrs = || crate::types::OrderAttrs { algo: algo.clone(), ..order.attrs() };
+            || algo.is_some()
+            || combo.is_some();
+        let attrs = || crate::types::OrderAttrs { algo: algo.clone(), combo: combo.clone(), ..order.attrs() };
         let ex = |kind: OrderKind| OrderRequest::SubmitEx {
             order_id, instrument, side, qty,
             kind,

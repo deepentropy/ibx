@@ -12,22 +12,33 @@ pub const QTY_SCALE_F: f64 = QTY_SCALE as f64;
 // ── ComboLeg ──
 
 /// ibapi-compatible ComboLeg for combination orders.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ComboLeg {
     pub con_id: i64,
     pub ratio: i32,
     pub action: String,
     pub exchange: String,
+    /// 0 same as the order, 1 open, 2 close, 3 unknown.
     pub open_close: i32,
-    pub shorting_policy: i32,
+    pub short_sale_slot: i32,
     pub designated_location: String,
+    /// -1 when no exempt code, as the official API's default.
     pub exempt_code: i32,
+}
+
+impl Default for ComboLeg {
+    fn default() -> Self {
+        Self {
+            con_id: 0, ratio: 0, action: String::new(), exchange: String::new(), open_close: 0,
+            short_sale_slot: 0, designated_location: String::new(), exempt_code: -1,
+        }
+    }
 }
 
 // ── DeltaNeutralContract ──
 
 /// ibapi-compatible DeltaNeutralContract for delta-neutral orders.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DeltaNeutralContract {
     pub con_id: i64,
     pub delta: f64,
@@ -37,7 +48,7 @@ pub struct DeltaNeutralContract {
 // ── Contract ──
 
 /// ibapi-compatible Contract. Matches C++ `Contract` struct fields.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Contract {
     pub con_id: i64,
     pub symbol: String,
@@ -488,6 +499,8 @@ impl Order {
             use_price_mgmt_algo: self.price_mgmt_algo(),
             // Set where a new order is built (ibx#263).
             algo: None,
+            // Set where a combo order is built, from its contract (ibx#470).
+            combo: None,
         }
     }
 

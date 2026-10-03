@@ -88,6 +88,34 @@ pub(crate) fn drain_and_send_orders(
                 }
             }
         }
+        // A combo order goes out once its combo is built: the reference's
+        // set-up requests the first time, the session's combo after; the
+        // built combo's checks refuse it with their code (ibx#470).
+        context.combo_send = None;
+        let mut combo_track: Option<(crate::engine::combo::ComboOrder, crate::bridge::ComboView)> = None;
+        if let Some(spec) = order_req.combo().cloned() {
+            use crate::engine::combo::{self, Ready};
+            match context.combos.ready(oid, &spec, &chrono_free_timestamp()) {
+                Ready::Waiting(frames) => {
+                    send_frames(conn, hb, &frames);
+                    context.rth_parked.push(rewrap(order_req));
+                    continue;
+                }
+                Ready::Refused(code, message) => {
+                    log::warn!("Combo order {} refused: {} {}", oid, code, message);
+                    shared.orders.push_order_error(oid, code, message);
+                    continue;
+                }
+                Ready::Built(built) => {
+                    if let Some((code, message)) = combo::order_refusal(&built, &spec) {
+                        log::warn!("Combo order {} refused: {} {}", oid, code, message);
+                        shared.orders.push_order_error(oid, code, message);
+                        continue;
+                    }
+                    combo_track = Some(combo_order_setup(context, shared, &mut order_req, built, spec));
+                }
+            }
+        }
         // A pegged or protection type the contract's list does not allow
         // on the order's exchange is refused, as the reference (ibx#414,
         // ibx#493).
@@ -1353,15 +1381,23 @@ pub(crate) fn drain_and_send_orders(
                     }
                 };
                 let bracket_key = context.bracket_keys.get(&order_id).map(|k| k.to_string());
-                let fields = modify_fields(
+                let mut fields = modify_fields(
                     &clord_str, &orig_clord, account_id, qty, side_str, &symbol,
                     &sec_type_str, &con_id_str, kind, tif, &attrs, trail_limit_offset,
                     bracket_key.as_deref(), context.price_mgmt_send);
+                if let Some(combo) = context.combos.orders.get(&order_id) {
+                    combo_modify_fields(&mut fields, combo);
+                }
                 let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
                 conn.send_fix(&refs)
             }
         };
         context.short_sale_send = None;
+        context.combo_send = None;
+        if let Some((combo_order, view)) = combo_track && result.is_ok() {
+            shared.orders.set_combo_view(oid, view);
+            if !what_if { context.combos.track(oid, combo_order); }
+        }
         if let Some((order, version)) = held {
             let clord = context.what_if_send.take().unwrap_or_default();
             match order {
@@ -1398,6 +1434,81 @@ pub(crate) fn drain_and_send_orders(
             }
         }
     }
+}
+
+/// Send the frames of a combo set-up (ibx#470).
+pub(crate) fn send_frames(conn: &mut Connection, hb: &mut HeartbeatState, frames: &[crate::engine::combo::Fields]) {
+    for f in frames {
+        let refs: Vec<(u32, &str)> = f.iter().map(|(t, v)| (*t, v.as_str())).collect();
+        match conn.send_fix(&refs) {
+            Ok(()) => hb.last_ccp_sent = Instant::now(),
+            Err(e) => log::error!("Combo set-up request not sent: {}", e),
+        }
+    }
+}
+
+/// The answer of a combo set-up request (ibx#470): its next requests go
+/// out; once the combo is built, or its set-up failed, the orders that
+/// waited are handled again.
+pub(crate) fn combo_progress(
+    context: &mut Context,
+    conn: &mut Option<Connection>,
+    hb: &mut HeartbeatState,
+    progress: crate::engine::combo::Progress,
+) {
+    if let Some(c) = conn.as_mut() {
+        send_frames(c, hb, &progress.send);
+    }
+    if progress.release {
+        release_rth_parked(context);
+    }
+}
+
+/// A built combo order before it is encoded (ibx#470): it goes out on the
+/// BAG's conId (a directed combo's is known only now), its outside-RTH
+/// rule reads the BAG definition, and the encoder gets the combo's
+/// symbol, block and per-leg prices. Returns what is kept once it is sent.
+fn combo_order_setup(
+    context: &mut Context,
+    shared: &Arc<SharedState>,
+    req: &mut OrderRequest,
+    combo: crate::engine::combo::Combo,
+    spec: crate::types::ComboSpec,
+) -> (crate::engine::combo::ComboOrder, crate::bridge::ComboView) {
+    if let Some(instrument) = req.ex_instrument_mut()
+        && context.market.con_id(*instrument) != Some(combo.bag_con_id)
+        && let Some(id) = context.market.try_register(combo.bag_con_id)
+    {
+        context.market.set_symbol(id, combo.symbol());
+        context.market.set_routing(id, "BAG", &spec.exchange);
+        context.market.set_currency(id, &spec.currency);
+        shared.market.set_instrument_count(context.market.count());
+        *instrument = id;
+    }
+    if let Some(types) = context.combos.bag_types(&combo).cloned() {
+        context.rth_types.entry((combo.bag_con_id, combo.routed.clone())).or_insert(types);
+    }
+    let leg_prices = combo.leg_prices(&spec);
+    let price = combo.price_of_legs(&leg_prices);
+    context.combo_send = Some(crate::engine::combo::ComboSend {
+        symbol: combo.symbol(),
+        block: combo.order_block(),
+        leg_prices: leg_prices.clone(),
+        price,
+    });
+    let view = crate::bridge::ComboView {
+        contract: combo.api_contract(&spec),
+        leg_prices: if leg_prices.is_empty() {
+            vec![f64::MAX; combo.legs.len()]
+        } else {
+            leg_prices.iter().map(|p| *p as f64 / crate::types::PRICE_SCALE as f64).collect()
+        },
+    };
+    let order = crate::engine::combo::ComboOrder {
+        combo, spec, leg_prices, price,
+        cum_qty: 0, leaves_qty: 0, avg_price: 0, last_price: 0,
+    };
+    (order, view)
 }
 
 /// A cancel as the reference writes it (ibx#464; captured 25/09/2026):
@@ -1476,7 +1587,7 @@ const SLOT_1_NO_LOCATION: &str = "Short sale slot value of 1 requires no locatio
 /// PTA intent. An order without one takes Away for a super user, for an
 /// account id that starts with T, and for one with G as its second or
 /// third character; else the broker's own clearing, as the reference.
-fn clearing_away(intent: &str, account_id: &str, super_user: bool) -> bool {
+pub(crate) fn clearing_away(intent: &str, account_id: &str, super_user: bool) -> bool {
     if !intent.is_empty() {
         return !intent.eq_ignore_ascii_case("IB");
     }
@@ -1662,6 +1773,10 @@ fn send_new_order(
     }
     out.extend(short_sale.iter().map(|(t, v)| (*t, v.as_str())));
     if con_id > 0 { out.push((6008, &con_id_str)); }
+    // A combo's block after its conId (ibx#470).
+    if let Some(combo) = &context.combo_send {
+        out.extend(combo.block.iter().map(|(t, v)| (*t, v.as_str())));
+    }
     if what_if.is_some() { out.push((6091, "1")); }
     out.push((6122, "c"));
     // The price management flag, decided for the request before encoding;
@@ -1690,12 +1805,13 @@ fn in_reference_order(fields: &mut [(u32, &str)]) {
 }
 
 /// The place of a field in the reference's new-order writer (ibx#375).
-fn reference_rank(tag: u32) -> u16 {
+pub(super) fn reference_rank(tag: u32) -> u16 {
     match tag {
         fix::TAG_MSG_TYPE => 0,
         fix::TAG_SENDING_TIME => 1,
         11 => 10,
-        44 => 20,
+        // The per-leg prices of a combo follow the limit price (ibx#470).
+        44 | 6879 => 20,
         99 => 21,
         1 => 30,
         126 | 432 => 32,
@@ -1719,6 +1835,9 @@ fn reference_rank(tag: u32) -> u16 {
         // The bracket key, after the origin (ib-agent captures/pd-orders,
         // 01/10/2026).
         6531 => 73,
+        // The smartComboRoutingParams of a combo (ibx#470; captured after
+        // the origin and the orderRef).
+        6248 | 6851 | 6852 | 6860 | 6861 | 6862 | 6866 | 6867 | 6876 | 6877 | 6878 => 74,
         6433 => 75,
         6115 => 76,
         6370 => 77,
@@ -1760,7 +1879,8 @@ fn reference_rank(tag: u32) -> u16 {
         6436 => 129,
         100 => 131,
         6210 => 132,
-        6008 => 133,
+        // The combo block follows the conId (ibx#470).
+        6008 | 6079 | 6080 | 6081 | 6082 | 6175 | 6134 => 133,
         6209 => 134,
         6088 => 135,
         6091 => 136,
@@ -2033,6 +2153,43 @@ fn modify_fields(
     f.push((6211, String::new()));
     f.push((6238, String::new()));
     f
+}
+
+/// The replace of a combo order as the reference writes it (ibx#470;
+/// captured 26/09/2026): the legs' symbols, the smartComboRoutingParams
+/// after the other attributes, and no combo block, except for an order
+/// with per-leg prices, which restates the price and the leg prices it was
+/// placed with (a new leg price does not reach the wire) and the combo
+/// block after the conId.
+fn combo_modify_fields(fields: &mut Vec<(u32, String)>, combo: &crate::engine::combo::ComboOrder) {
+    let symbol = combo.combo.symbol();
+    for (tag, value) in fields.iter_mut() {
+        if matches!(*tag, 55 | 6035) { *value = symbol.clone(); }
+    }
+    if let Some(at) = fields.iter().position(|(t, _)| *t == 38) {
+        for (i, attr) in combo.spec.routing_attrs.iter().enumerate() {
+            fields.insert(at + i, attr.clone());
+        }
+    }
+    if combo.leg_prices.is_empty() { return; }
+    if let Some(price) = combo.price {
+        match fields.iter().position(|(t, _)| *t == 44) {
+            Some(i) => fields[i].1 = format_price(price).to_string(),
+            None => if let Some(i) = fields.iter().position(|(t, _)| *t == 41) {
+                fields.insert(i + 1, (44, format_price(price).to_string()));
+            },
+        }
+    }
+    if let Some(at) = fields.iter().position(|(t, _)| *t == 44) {
+        for (i, p) in combo.leg_prices.iter().enumerate() {
+            fields.insert(at + 1 + i, (6879, format_price_ref(*p).to_string()));
+        }
+    }
+    if let Some(at) = fields.iter().position(|(t, _)| *t == 6008) {
+        for (i, f) in combo.combo.order_block().into_iter().enumerate() {
+            fields.insert(at + 1 + i, f);
+        }
+    }
 }
 
 /// The definition an order rule reads for an instrument on its exchange
@@ -2312,6 +2469,10 @@ fn push_extended_attrs(
     if !attrs.order_ref.is_empty() {
         fields.push((6010, attrs.order_ref.clone()));
     }
+    // The smartComboRoutingParams of a combo, as order attributes (ibx#470).
+    if let Some(combo) = &attrs.combo {
+        fields.extend(combo.routing_attrs.iter().cloned());
+    }
     if attrs.display_size > 0 {
         fields.push((111, format_uint(attrs.display_size as u64).to_string()));
     }
@@ -2449,8 +2610,12 @@ fn send_order_ex(
     ));
 
     let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-    let symbol = context.market.symbol(instrument).to_string();
-                let (sec_type_str, destination) = context.market.order_routing(instrument);
+    // A combo goes out under its legs' symbols (ibx#470).
+    let symbol = match &context.combo_send {
+        Some(combo) => combo.symbol.clone(),
+        None => context.market.symbol(instrument).to_string(),
+    };
+    let (sec_type_str, destination) = context.market.order_routing(instrument);
     let now = chrono_free_timestamp().to_string();
     let tif_str = tif_str(tif);
 
@@ -2468,7 +2633,14 @@ fn send_order_ex(
         K::Market => fields.push((40, "1".to_string())),
         K::Limit { price } => {
             fields.push((40, "2".to_string()));
+            // A combo with per-leg prices: the price they give, then each
+            // leg's price in leg order (ibx#470, captured 26/09/2026:
+            // `44=-73.15|6879=721.35|6879=794.50`).
+            let price = context.combo_send.as_ref().and_then(|c| c.price).unwrap_or(price);
             fields.push((44, format_price(price).to_string()));
+            if let Some(combo) = &context.combo_send {
+                fields.extend(combo.leg_prices.iter().map(|p| (6879, format_price_ref(*p).to_string())));
+            }
         }
         K::Stop { stop_price } => {
             fields.push((40, "3".to_string()));

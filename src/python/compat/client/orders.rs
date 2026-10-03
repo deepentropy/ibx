@@ -21,6 +21,10 @@ impl EClient {
         // Convert and validate order params first (fail fast, no connection needed)
         let mut api_order = order.to_api();
         api_order.conditions = order.convert_conditions(py);
+        api_order.order_combo_legs = order.convert_order_combo_legs(py);
+        // The contract with its combo legs (ibx#470).
+        let mut full_contract = contract.to_api();
+        full_contract.combo_legs = contract.convert_combo_legs(py);
         // The reference's other names for an order type (ibx#469).
         if let Some(name) = ClientCore::canonical_order_type(&api_order.order_type) {
             api_order.order_type = name.to_string();
@@ -65,21 +69,40 @@ impl EClient {
             shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }
+        // A combo (BAG) order, read and checked as the reference reads it
+        // (ibx#470).
+        let combo = match ClientCore::combo_order(&full_contract, &api_order, &shared.reference, &session_account) {
+            Ok(combo) => combo,
+            Err((code, message)) => {
+                shared.orders.push_order_error(oid, code, message);
+                return Ok(());
+            }
+        };
         // The condition times as the reference sends them (ibx#416); the
         // order is tracked as the caller placed it.
         let sent = ClientCore::with_condition_times(&api_order);
 
-        let instrument = self.find_or_register_instrument(py, contract)?;
+        // A smart combo goes out on its currency's smart combo conId.
+        let con_id = combo.as_ref().map(|c| c.smart_con_id).filter(|&c| c > 0).unwrap_or(contract.con_id);
+        let instrument = self.find_or_register_con_id(py, con_id, contract)?;
         // A send only for a new currency, then with the interpreter lock
         // released (ibx#271).
-        if !self.core.currency_noted(contract.con_id, &contract.currency) {
-            py.detach(|| self.core.note_currency(&tx, contract.con_id, &contract.currency));
+        if !self.core.currency_noted(con_id, &contract.currency) {
+            py.detach(|| self.core.note_currency(&tx, con_id, &contract.currency));
         }
 
         // If orderId is already tracked, this is a modification: replace it
         // with the full wanted state (ibx#247). A what-if never modifies:
         // it previews a new order (ibx#462).
         let working = if api_order.what_if { None } else { self.core.tracked_order(oid) };
+        if working.is_some() {
+            let refusal = self.core.tracked_contract(oid)
+                .and_then(|placed| ClientCore::combo_modify_refusal(&full_contract, &placed));
+            if let Some((code, message)) = refusal {
+                shared.orders.push_order_error(oid, code, message);
+                return Ok(());
+            }
+        }
         let cmd = if let Some(working) = working {
             match ClientCore::build_modify_request(&sent, oid, &working)
                 .map_err(|e| PyRuntimeError::new_err(e))?
@@ -92,6 +115,9 @@ impl EClient {
                     return Ok(());
                 }
             }
+        } else if let Some(combo) = combo {
+            ClientCore::build_combo_order_request(&sent, oid, instrument, combo)
+                .map_err(|e| PyRuntimeError::new_err(e))?
         } else {
             ClientCore::build_order_request(&sent, oid, instrument)
                 .map_err(|e| PyRuntimeError::new_err(e))?
@@ -105,6 +131,7 @@ impl EClient {
             sec_type: contract.sec_type.clone(),
             exchange: contract.exchange.clone(),
             currency: contract.currency.clone(),
+            combo_legs: full_contract.combo_legs.clone(),
             ..Default::default()
         };
         let mut tracked_order = api_order.clone();
@@ -409,14 +436,8 @@ impl EClient {
     pub(crate) fn answer_open_orders(&self, py: Python<'_>, shared: &SharedState) -> PyResult<()> {
         let orders = self.core.collect_open_orders(shared);
         for (order_id, tracked) in &orders {
-            let c_py = Py::new(py, Contract {
-                con_id: tracked.contract.con_id,
-                symbol: tracked.contract.symbol.clone(),
-                sec_type: tracked.contract.sec_type.clone(),
-                exchange: tracked.contract.exchange.clone(),
-                currency: tracked.contract.currency.clone(),
-                ..Default::default()
-            })?.into_any();
+            // A combo with its legs (ibx#470).
+            let c_py = Py::new(py, Contract::from_api(py, &tracked.contract)?)?.into_any();
             let mut o = Order::default();
             o.order_id = tracked.order.order_id;
             o.action = tracked.order.action.clone();
@@ -431,6 +452,12 @@ impl EClient {
             o.use_price_mgmt_algo = (tracked.order.use_price_mgmt_algo != i32::MAX).then_some(tracked.order.use_price_mgmt_algo != 0);
             o.trail_stop_price = tracked.order.trail_stop_price;
             o.algo_strategy = tracked.order.algo_strategy.clone();
+            // A combo's per-leg prices and routing (ibx#470).
+            for price in &tracked.order.order_combo_legs {
+                o.order_combo_legs.push(Py::new(py, super::super::contract::OrderComboLeg { price: *price })?.into_any());
+            }
+            o.smart_combo_routing_params = tracked.order.smart_combo_routing_params.iter()
+                .map(|tv| super::super::contract::TagValue { tag: tv.tag.clone(), value: tv.value.clone() }).collect();
             let o_py = Py::new(py, o)?.into_any();
             let mut state = super::super::contract::OrderState::default();
             state.status = tracked.status.clone();
