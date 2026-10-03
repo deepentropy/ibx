@@ -14,6 +14,7 @@
 //! longer by hand. The fuzz targets of `fuzz/` take the same decoders.
 
 mod decoders;
+mod locks;
 mod mutation;
 
 use std::cell::Cell;

@@ -338,3 +338,22 @@ fn a_full_instrument_table_refuses_and_goes_on() {
     assert!(farm_peer.messages().iter().any(|m| is_heartbeat(m, "full-farm")));
     assert!(ccp_peer.messages().iter().any(|m| is_heartbeat(m, "full-auth")));
 }
+
+// Order requests wait in the engine while the auth link is down; past 64
+// of them a debug assertion stopped the engine (found by the lock tests
+// of ibx#488). The reference has no such limit: they all wait.
+#[test]
+fn orders_waiting_for_a_lost_auth_link_have_no_limit() {
+    let (farm, _farm_peer) = link(None);
+    let (ccp, _ccp_peer) = link(None);
+    let (mut engine, control) = HotLoop::with_connections(
+        Arc::new(SharedState::new()), None, "DUXXXXXXX".into(), farm, ccp, None, None);
+    engine.ccp.disconnected = true;
+    for round in 0..4 {
+        for k in 0..60 {
+            control.send(ControlCommand::Order(crate::types::OrderRequest::Cancel { order_id: round * 100 + k })).unwrap();
+        }
+        engine.step_for_test();
+    }
+    assert!(!engine.context.pending_orders.is_empty(), "the orders wait for the link");
+}

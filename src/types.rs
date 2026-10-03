@@ -1491,7 +1491,9 @@ impl OrderRequest {
     }
 }
 
-/// Pre-allocated buffer for pending order requests. Never allocates on the hot path.
+/// Pre-allocated buffer for pending order requests. Allocates on the hot
+/// path only for a burst past its capacity (more than 64 orders in one
+/// pass, or held while the auth link is down): the reference has no limit.
 /// Created once with capacity, then push/clear cycle each tick.
 pub struct OrderBuffer {
     buf: Vec<OrderRequest>,
@@ -1505,7 +1507,6 @@ impl OrderBuffer {
     }
 
     pub fn push(&mut self, req: OrderRequest) {
-        debug_assert!(self.buf.len() < MAX_PENDING_ORDERS, "order buffer overflow");
         self.buf.push(req);
     }
 
