@@ -1,0 +1,22 @@
+# cargo-mutants (https://mutants.rs): which changes of the code no test
+# notices. Not a gate. The wire code and the hot loop only:
+#
+#   cargo mutants                    # every mutant (about 4,500: hours)
+#   cargo mutants --shard 0/20 --sharding round-robin -j 8
+#                                    # a sample of one in 20 (17 min on
+#                                    # 32 threads)
+#
+# Results go to mutants.out/ (ignored by git).
+
+examine_globs = ["src/protocol/**/*.rs", "src/engine/hot_loop/**/*.rs"]
+
+# Test-only modules.
+exclude_globs = ["src/engine/hot_loop/combo_tests.rs"]
+
+# Built and run for each mutant: the unit tests (they hold the engine
+# tests), the wire vectors and the scripted peer. The other targets would
+# be built for each mutant and add little.
+additional_cargo_args = ["--lib", "--test", "protocol_vectors", "--test", "scripted_peer"]
+
+# Test-only code built into the unit-test library (test-support).
+exclude_re = ["inject_", "_for_test", "mem::"]
