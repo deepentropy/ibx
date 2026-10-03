@@ -533,6 +533,9 @@ pub struct OrderState {
     /// Errors raised before sending: (request or order id as the API gives
     /// it, -1 for none; code; message) (ibx#349, ibx#285).
     order_errors: Mutex<Vec<(i64, i64, String)>>,
+    /// Notices of a server report given after the status of that report:
+    /// the reject 201 and the cancel 202 (ibx#486).
+    order_notices: Mutex<Vec<(i64, i64, String)>>,
     what_if_responses: Mutex<Vec<WhatIfResponse>>,
     completed_orders: Mutex<Vec<CompletedOrder>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
@@ -557,6 +560,7 @@ impl OrderState {
             order_updates: Mutex::new(Vec::with_capacity(64)),
             cancel_rejects: Mutex::new(Vec::with_capacity(16)),
             order_errors: Mutex::new(Vec::new()),
+            order_notices: Mutex::new(Vec::new()),
             what_if_responses: Mutex::new(Vec::with_capacity(8)),
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             order_cache: Mutex::new(HashMap::new()),
@@ -608,6 +612,11 @@ impl OrderState {
     /// Order errors raised before anything was sent: (order id, code, message).
     pub fn drain_order_errors(&self) -> Vec<(i64, i64, String)> {
         self.order_errors.lock().unwrap().drain(..).collect()
+    }
+
+    /// The notices to give after the order statuses (ibx#486).
+    pub fn drain_order_notices(&self) -> Vec<(i64, i64, String)> {
+        self.order_notices.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_what_if_responses(&self) -> Vec<WhatIfResponse> {
@@ -696,6 +705,12 @@ impl OrderState {
 
     #[doc(hidden)] pub fn push_order_error(&self, order_id: i64, code: i64, message: String) {
         self.order_errors.lock().unwrap().push((order_id, code, message));
+    }
+
+    /// A notice of a server report (201, 202), given after the status the
+    /// same report gives, as the reference writes them (ibx#486).
+    #[doc(hidden)] pub fn push_order_notice(&self, order_id: i64, code: i64, message: String) {
+        self.order_notices.lock().unwrap().push((order_id, code, message));
     }
 
     #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {

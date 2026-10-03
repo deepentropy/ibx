@@ -689,7 +689,7 @@ error,165,Historical Market Data Service query message,no test
 error,166,HMDS Expired Contract Violation,no test
 error,168,Discretionary amount does not conform to the minimum price variation for this contract,no test
 error,200,No security definition has been found for the request,src/engine/hot_loop/ccp.rs::sweep_times_out_a_negative_request_id_as_the_callers ; src/engine/hot_loop/ccp.rs::empty_secdef_reply_gives_error_200_and_no_end ; src/engine/hot_loop/ccp.rs::empty_reply_to_a_strike_lookup_retries_once_then_gives_error_200
-error,201,Order rejected - reason,src/api/client/tests.rs::refused_what_if_gives_open_order_then_201 ; src/api/client/tests.rs::process_msgs_delivers_a_reject_error_before_the_status ; src/api/client/tests.rs::negative_ids_round_trip
+error,201,Order rejected - reason,src/api/client/tests.rs::refused_what_if_gives_open_order_then_201 ; src/api/client/tests.rs::process_msgs_delivers_a_reject_error_after_the_status_and_the_status_again ; src/api/client/tests.rs::negative_ids_round_trip
 error,202,Order Canceled - reason,src/engine/hot_loop/ccp.rs::a_cancel_gives_202_with_the_reason
 error,203,The security (security) is not available or allowed for this account,no test
 error,300,Can't find EId with tickerId,src/api/client/tests.rs::market_data_duplicate_id_and_unknown_cancel ; src/api/client/tests.rs::regulatory_snapshot_delivers_one_batch_then_the_end ; src/api/client/tests.rs::plain_snapshot_sends_each_tick_type_once_then_the_end

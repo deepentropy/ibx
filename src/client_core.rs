@@ -644,6 +644,23 @@ pub enum OpenOrdersRequest {
     All,
 }
 
+/// The last openOrder and orderStatus given for an order: the reference
+/// gives them again when the commission of one of its executions comes
+/// (ibx#486).
+#[derive(Clone)]
+pub struct OrderReport {
+    /// None: no openOrder (a cancel).
+    pub view: Option<OrderView>,
+    pub status: String,
+    pub filled: f64,
+    pub remaining: f64,
+    pub avg_fill_price: f64,
+    pub perm_id: i64,
+    pub parent_id: i64,
+    pub last_fill_price: f64,
+    pub client_id: i64,
+}
+
 /// A locally tracked order for `req_open_orders` / dispatch status updates.
 #[derive(Clone)]
 pub struct TrackedOrder {
@@ -659,6 +676,7 @@ pub struct TrackedOrder {
 
 /// What the client reports for an order in `open_order` / `order_status`
 /// after a server report (ibx#473).
+#[derive(Clone)]
 pub struct OrderView {
     pub contract: ApiContract,
     pub order: ApiOrder,
@@ -1039,6 +1057,11 @@ pub struct ClientCore {
     // The API client id given at connect (0 in the Rust client, which has
     // none): the clientId of this client's executions (ibx#474).
     pub client_id: AtomicI64,
+    /// Orders that went out without outside RTH (warning 2109): their
+    /// openOrder shows it off, as the reference's order record (ibx#486).
+    rth_dropped: Mutex<HashSet<OrderId>>,
+    /// The last report given for each order (ibx#486).
+    last_reports: Mutex<HashMap<OrderId, OrderReport>>,
     // Commission reports that came before their execution, by execution id
     // without its revision (ibx#471). Bounded: reports for executions this
     // client never sees (earlier sessions, other clients) are dropped oldest
@@ -1305,6 +1328,8 @@ impl ClientCore {
             last_portfolio: Mutex::new(None),
             executions: Mutex::new(Vec::new()),
             client_id: AtomicI64::new(0),
+            rth_dropped: Mutex::new(HashSet::new()),
+            last_reports: Mutex::new(HashMap::new()),
             pending_commissions: Mutex::new(PendingCommissions::default()),
             open_orders: Mutex::new(HashMap::new()),
             held_open_orders: Mutex::new(Vec::new()),
@@ -2808,7 +2833,26 @@ impl ClientCore {
                     reported_trail_limit(&mut order, &i.order);
                 }
                 reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
-                (t.contract, order, t.last_fill_price, self.client_id.load(Ordering::Relaxed))
+                // The order of this client carries its client id, as the
+                // reference's openOrder (ibx#486).
+                let client_id = self.client_id.load(Ordering::Relaxed);
+                order.client_id = client_id as i32;
+                // Outside RTH as sent (not when it was dropped with 2109), or
+                // as a report gave it.
+                // A PEG BENCH order's starting price is its 99 on the wire;
+                // the reference's openOrder shows it as auxPrice (ibx#486,
+                // rth_order_types of 28/09/2026: 718.26, then 718.36 after
+                // the replace).
+                if order.order_type.eq_ignore_ascii_case("PEG BENCH")
+                    && (order.aux_price == 0.0 || order.aux_price == f64::MAX)
+                    && order.starting_price != f64::MAX && order.starting_price != 0.0
+                {
+                    order.aux_price = order.starting_price;
+                }
+                let dropped = self.rth_dropped.lock().unwrap().contains(&order_id);
+                order.outside_rth = (order.outside_rth && !dropped)
+                    || info.as_ref().is_some_and(|i| i.order.outside_rth);
+                (t.contract, order, t.last_fill_price, client_id)
             }
             (None, Some(i)) => (i.contract, i.order, 0.0, 0),
             (None, None) => return None,
@@ -2821,6 +2865,35 @@ impl ClientCore {
         let mut order = order;
         Self::apply_combo_view(order_id, &mut contract, &mut order, shared);
         Some(OrderView { contract, order, state, last_fill_price, client_id })
+    }
+
+    /// An order error on its way to the caller: a 2109 (outside RTH
+    /// ignored) marks the order as sent without it (ibx#486, the STP and
+    /// TRAIL orders of premarket_order_types, 28/09/2026: openOrder shows
+    /// outsideRth false, also after a replace).
+    pub fn note_order_error(&self, order_id: OrderId, code: i64) {
+        if code == 2109 {
+            self.rth_dropped.lock().unwrap().insert(order_id);
+        }
+    }
+
+    /// Keep the openOrder and orderStatus just given for an order.
+    pub fn remember_report(&self, order_id: OrderId, report: OrderReport) {
+        self.last_reports.lock().unwrap().insert(order_id, report);
+    }
+
+    /// The order of a commission report that `apply_commission` took, with
+    /// the openOrder and orderStatus last given for it: the reference gives
+    /// them again before the commission report (ibx#486; every commission
+    /// frame of the four-leg recordings of 28/09 and 30/09/2026).
+    pub fn report_of_commission(&self, report: &ApiCommissionAndFeesReport) -> Option<(OrderId, OrderReport)> {
+        let (base, _) = crate::engine::hot_loop::ccp::split_exec_revision(&report.exec_id);
+        let order_id = self.executions.lock().unwrap().iter().rev()
+            .find(|se| !se.execution.exec_id.is_empty()
+                && crate::engine::hot_loop::ccp::split_exec_revision(&se.execution.exec_id).0 == base)
+            .map(|se| se.execution.order_id)?;
+        let last = self.last_reports.lock().unwrap().get(&order_id).cloned()?;
+        Some((order_id, last))
     }
 
     /// Keep the price of an order's last print for later order_status

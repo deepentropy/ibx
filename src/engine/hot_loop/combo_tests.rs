@@ -287,8 +287,9 @@ const COMBO_CONTRACT: &str = "28812380 QQQ,SPY BAG SMART USD QQQ,SPY COMB [75673
 // first combo order of a session sends the reference's set-up requests,
 // then its 35=D; the reports of its fill give the combo's execution, then
 // one execution per leg on the leg's contract, each with openOrder and
-// orderStatus at the combo's totals. The opposite combo on the same legs
-// sends no set-up request.
+// orderStatus at the combo's totals; each commission report after the
+// order's openOrder and orderStatus once more (ibx#486). The opposite
+// combo on the same legs sends no set-up request.
 #[test]
 fn combo_fill_session_is_the_captured_one() {
     let frames = fixture("20260930/i105_combo_fill.jsonl");
@@ -315,7 +316,11 @@ fn combo_fill_session_is_the_captured_one() {
         "execDetails -1 320227571 QQQ STK ARCA QQQ | 00025b49.6abe16da.01.01.01 ARCA SLD 1 743.34 1 743.34".to_string(),
         open("Filled"),
         "orderStatus 42 Filled 1 0 23.38 23.38".to_string(),
+        open("Filled"),
+        "orderStatus 42 Filled 1 0 23.38 23.38".to_string(),
         "commission 00025b49.6abe16db.01.01.01 1.000003".to_string(),
+        open("Filled"),
+        "orderStatus 42 Filled 1 0 23.38 23.38".to_string(),
         "commission 00025b49.6abe16da.01.01.01 1.015511".to_string(),
     ];
     assert_eq!(buy, want);
@@ -374,7 +379,9 @@ fn combo_symbol_refusal_then_order_modify_and_cancel_are_the_captured_ones() {
     assert!(calls.iter().any(|l| l.starts_with("openOrder 28 28812380 QQQ,SPY BAG SMART USD QQQ,SPY COMB") && l.contains("lmt=-23.05")), "{calls:#?}");
     assert!(calls.iter().any(|l| l.starts_with("error 28 399 Order Message:")), "{calls:#?}");
     assert_eq!(calls.iter().filter(|l| l.starts_with("error 28 202 ")).count(), 1, "{calls:#?}");
-    assert!(calls.last().unwrap().starts_with("orderStatus 28 Cancelled"), "{calls:#?}");
+    // The Cancelled status, then 202 (ibx#486).
+    assert!(calls[calls.len() - 2].starts_with("orderStatus 28 Cancelled"), "{calls:#?}");
+    assert!(calls.last().unwrap().starts_with("error 28 202 "), "{calls:#?}");
 }
 
 // ibx#470 (captured 26/09/2026, i105_combo_leg_prices): per-leg prices
