@@ -7,7 +7,7 @@ use crate::protocol::connection::{Connection, Frame};
 use crate::protocol::fix;
 use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
-use crate::engine::depth_book::{Change, DeepBook, Scale, SingleView, SmartMerge, TopQuote, RESET_TEXT};
+use crate::engine::depth_book::{Change, DeepBook, Scale, SingleView, SmartMerge, SmartStatus, TopQuote, RESET_TEXT, SMART_STATUS_WAIT};
 use crate::protocol::depth_decoder;
 use crate::types::{DepthUpdate, InstrumentId, ReqId};
 use std::sync::Arc;
@@ -53,7 +53,8 @@ pub(crate) fn round_lot_reply(context: &mut Context, req_id: &str, msg: &[u8]) -
 }
 
 /// Keep what routing needs from a contract definition (#445, #452): its
-/// aggregate group (-1 when absent) and its SMART component exchanges.
+/// aggregate group (-1 when absent), its SMART component exchanges, its
+/// valid exchanges and its description in depth refusals.
 pub(crate) fn note_definition(context: &mut Context, con_id: i64, msg: &[u8]) {
     let group = crate::control::contracts::agg_group_from_secdef(msg).unwrap_or(-1);
     context.agg_groups.insert(con_id, group);
@@ -65,6 +66,15 @@ pub(crate) fn note_definition(context: &mut Context, con_id: i64, msg: &[u8]) {
     let components = crate::control::contracts::smart_components_from_secdef(msg);
     if !components.is_empty() {
         context.smart_components.insert(con_id, components);
+    }
+    let records = crate::control::contracts::parse_secdef_records(msg).unwrap_or_default();
+    if let Some(def) = records.iter().find(|d| d.con_id == con_id) {
+        if !def.valid_exchanges.is_empty() {
+            context.valid_exchanges.insert(con_id, def.valid_exchanges.clone());
+        }
+        if let Some(description) = depth_description(def) {
+            context.depth_descriptions.insert(con_id, description);
+        }
     }
 }
 
@@ -245,6 +255,29 @@ pub(crate) struct DepthEntry {
     name: Arc<str>,
     /// After a reset, the entry goes out again at this time (#451).
     pub(crate) resubscribe_at: Option<Instant>,
+    /// What the farm said of it (#452).
+    pub(crate) access: DepthAccess,
+    /// Farm ids the reference spends after this one: the LAST entry of a
+    /// top of book that went into the request's one BEST entry (#452).
+    skip_ids: u32,
+}
+
+/// The farm's answer to a depth entry (#452): none yet, its
+/// acknowledgement, or its refusal (an API subscription needed or not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DepthAccess {
+    Unknown,
+    Allowed,
+    Refused { api_subscription: bool },
+}
+
+/// What a depth request subscribes (#452): the book of an exchange, or its
+/// top of book, the LAST entry of which goes to `last` (farm, exchange)
+/// when it has one.
+#[derive(Debug, Clone)]
+pub(crate) enum DepthSpec {
+    Book { farm: FarmId, exchange: String },
+    Top { farm: FarmId, exchange: String, last: Option<(FarmId, String)> },
 }
 
 /// How a depth request's callbacks are made (#451).
@@ -283,6 +316,63 @@ pub(crate) struct DepthReq {
     /// Round lot of the contract's sizes (#451).
     lot: i64,
     view: DepthView,
+    /// SmartDepth: the components' answers, for warning 2152 (#452).
+    status: Option<SmartStatus>,
+    /// The contract as a refusal (354, 10089) names it: description and
+    /// `/DEEP` (#452); empty when the description is not known.
+    refusal_suffix: String,
+}
+
+/// The definition of each SmartDepth component exchange, asked before its
+/// books (#452): the reference looks up the contract on each of its valid
+/// exchanges and subscribes once all answered, or after 10 s.
+#[derive(Debug, Clone)]
+pub(crate) struct DepthGather {
+    pub(crate) req_id: ReqId,
+    pub(crate) con_id: i64,
+    pub(crate) sec_type: String,
+    pub(crate) num_rows: i32,
+    pub(crate) components: Vec<DepthComponent>,
+    pub(crate) deadline: Instant,
+}
+
+/// One component exchange of a SmartDepth request and its definition.
+#[derive(Debug, Clone)]
+pub(crate) struct DepthComponent {
+    pub(crate) exchange: String,
+    /// The name of its lookup (320).
+    pub(crate) lookup: String,
+    pub(crate) definition: ComponentDefinition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComponentDefinition {
+    Waiting,
+    /// The lookup found no contract.
+    Missing,
+    /// Found; `not2d`: its order types hold NOT2D, which keeps its top of
+    /// book out of SmartDepth.
+    Found { not2d: bool },
+}
+
+/// How long the reference waits for the components' definitions.
+pub(crate) const DEPTH_GATHER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A definition reply for a SmartDepth component lookup (#452). False
+/// when the reply is not for one.
+pub(crate) fn depth_component_reply(context: &mut Context, req_id: &str, msg: &[u8]) -> bool {
+    let Some(c) = context.depth_gathers.iter_mut().flat_map(|g| g.components.iter_mut()).find(|c| c.lookup == req_id) else {
+        return false;
+    };
+    let records = crate::control::contracts::parse_secdef_records(msg).unwrap_or_default();
+    c.definition = match records.first() {
+        Some(def) => ComponentDefinition::Found {
+            not2d: def.order_types.iter().any(|t| t.split('/').next() == Some("NOT2D")),
+        },
+        None => ComponentDefinition::Missing,
+    };
+    log::info!("SmartDepth component {} ({}): {:?}", c.exchange, req_id, c.definition);
+    true
 }
 
 /// How long a reset book waits before it is asked again, as the
@@ -305,6 +395,8 @@ pub(crate) struct FarmState {
     /// Depth callbacks and changes being built (#451).
     depth_out: Vec<DepthUpdate>,
     depth_changes: Vec<Change>,
+    /// The entries of a server tag being handled (#452).
+    depth_hits: Vec<(usize, usize)>,
     /// Depth callbacks and reset errors made away from a farm message (a
     /// farm lost), given out at the next sweep (#451).
     depth_pending: Vec<DepthUpdate>,
@@ -344,6 +436,7 @@ impl FarmState {
             user_book: false,
             depth_out: Vec::new(),
             depth_changes: Vec::new(),
+            depth_hits: Vec::new(),
             depth_pending: Vec::new(),
             depth_pending_resets: Vec::new(),
             md_resub_info: Vec::new(),
@@ -627,7 +720,7 @@ impl FarmState {
         }
 
         // A depth entry: its tag, price tick and size increment (#451).
-        if self.depth_ack(req_id, server_tag, min_tick, parts.get(8).and_then(|v| v.parse::<f64>().ok())) {
+        if self.depth_ack(req_id, server_tag, min_tick, parts.get(8).and_then(|v| v.parse::<f64>().ok()), shared) {
             return;
         }
 
@@ -1120,7 +1213,7 @@ impl FarmState {
             let Some(&(_, instrument)) = self.md_req_to_instrument.iter().find(|(r, _)| *r == id) else {
                 // A depth entry (#452).
                 let needs_sub = access.get(i).is_some_and(|a| api_subscription_needed(a));
-                self.depth_rejected(id, needs_sub, shared);
+                self.depth_rejected(id, needs_sub, shared, farm_conn);
                 continue;
             };
             let delayed = delayed_flags.get(i).is_some_and(|f| f == "1");
@@ -1232,12 +1325,17 @@ impl FarmState {
         out
     }
 
-    /// Start a depth request (#452) with its entries, each on the farm of
-    /// its route: a book entry for each `deep` exchange, a top-of-book
-    /// pair for each `top` exchange (SmartDepth components with no book).
-    /// The caller made the local checks and picked the farms. `lot` is the
-    /// round lot of the contract's sizes; `l2` says a single book has
-    /// market makers (updateMktDepthL2) (#451).
+    /// Start a depth request (#452) with what it subscribes, each entry on
+    /// the farm of its route: a book entry for each book; for each top of
+    /// book a bid/ask entry and its LAST entry where `last` says (one LAST
+    /// entry per farm and exchange in a request: the others only take a
+    /// farm id, as in the reference). The caller made the local checks and
+    /// picked the farms. `lot` is the round lot of the contract's sizes;
+    /// `l2` says a single book has market makers (updateMktDepthL2) (#451);
+    /// `description` is the contract as a refusal names it. An entry that
+    /// another request has on the wire is shared, as the reference shares
+    /// its book: not sent again, and what the farm said of it applies at
+    /// once.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn start_depth(
         &mut self,
@@ -1248,89 +1346,198 @@ impl FarmState {
         num_rows: i32,
         lot: i64,
         l2: bool,
-        entries: Vec<(FarmId, String, bool)>,
+        specs: Vec<DepthSpec>,
+        description: Option<&str>,
+        shared: &SharedState,
     ) -> Vec<(FarmId, Vec<(u32, String)>)> {
         let view = if smart {
             DepthView::Smart(SmartMerge::new(req_id, num_rows))
         } else {
             DepthView::Single(SingleView::new(req_id, num_rows, l2))
         };
-        let mut req = DepthReq {
-            req_id, con_id, smart, entries: Vec::new(), lot: lot.max(1), view,
-        };
         let fix_type = fix_sec_type(sec_type).to_string();
-        for (farm, exchange, book) in entries {
-            let kinds: &[&'static str] = if book { &["0"] } else { &["442", "443"] };
-            let name: Arc<str> = Arc::from(exchange.as_str());
-            for kind in kinds {
-                req.entries.push(DepthEntry {
-                    farm_req: 0, farm, con_id: con_id.to_string(), exchange: exchange.clone(),
-                    sec_type: fix_type.clone(), req_type: kind, live: false,
-                    server_tag: None, scale: None, book: None, top: TopQuote::default(), name: name.clone(),
-                    resubscribe_at: None,
-                });
+        let con = con_id.to_string();
+        let entry = |farm: FarmId, exchange: &str, req_type: &'static str, name: &Arc<str>| DepthEntry {
+            farm_req: 0, farm, con_id: con.clone(), exchange: exchange.to_string(), sec_type: fix_type.clone(), req_type,
+            live: false, server_tag: None, scale: None, book: None, top: TopQuote::default(), name: name.clone(),
+            resubscribe_at: None, access: DepthAccess::Unknown, skip_ids: 0,
+        };
+        let mut entries: Vec<DepthEntry> = Vec::new();
+        let (mut books, mut tops) = (Vec::new(), Vec::new());
+        for spec in specs {
+            match spec {
+                DepthSpec::Book { farm, exchange } => {
+                    let name: Arc<str> = Arc::from(exchange.as_str());
+                    entries.push(entry(farm, &exchange, "0", &name));
+                    books.push(name);
+                }
+                DepthSpec::Top { farm, exchange, last } => {
+                    let name: Arc<str> = Arc::from(exchange.as_str());
+                    entries.push(entry(farm, &exchange, "442", &name));
+                    if let Some((last_farm, last_exchange)) = last {
+                        if entries.iter().any(|e| e.req_type == "443" && e.farm == last_farm && e.exchange == last_exchange) {
+                            if let Some(e) = entries.last_mut() {
+                                e.skip_ids = 1;
+                            }
+                        } else {
+                            entries.push(entry(last_farm, &last_exchange, "443", &name));
+                        }
+                    }
+                    tops.push(name);
+                }
             }
         }
-        self.depth_reqs.push(req);
+        let status = smart.then(|| SmartStatus::new(books, tops, Instant::now() + SMART_STATUS_WAIT));
+        let refusal_suffix = description.map(|d| format!("{d}/DEEP")).unwrap_or_default();
+        self.depth_reqs.push(DepthReq { req_id, con_id, smart, entries, lot: lot.max(1), view, status, refusal_suffix });
         let idx = self.depth_reqs.len() - 1;
-        self.depth_messages(idx, None)
+        let (msgs, joined) = self.depth_messages(idx, None);
+        if !joined.is_empty() {
+            self.depth_joined(idx, &joined, shared);
+        }
+        msgs
+    }
+
+    /// Entries of request `idx` that joined entries already on the wire
+    /// (#452): what the farm said of them applies at once, as for a new
+    /// listener of the reference's book. A single book the farm accepted
+    /// gives its whole book now; one it refused ends the request (354 or
+    /// 10089). A SmartDepth component gives its rows now and is answered.
+    fn depth_joined(&mut self, idx: usize, joined: &[usize], shared: &SharedState) {
+        let mut out = std::mem::take(&mut self.depth_out);
+        let mut refused = None;
+        let DepthReq { req_id, entries, view, status, .. } = &mut self.depth_reqs[idx];
+        for &ei in joined {
+            let e = &entries[ei];
+            match (&mut *view, e.access) {
+                (_, DepthAccess::Unknown) => {}
+                (DepthView::Single(v), DepthAccess::Allowed) => {
+                    if let Some(book) = &e.book {
+                        v.on_change(book, &[], &mut out);
+                    }
+                }
+                (DepthView::Single(_), DepthAccess::Refused { api_subscription }) => refused = Some(api_subscription),
+                (DepthView::Smart(m), access) => {
+                    let ok = access == DepthAccess::Allowed;
+                    if ok {
+                        if let Some(book) = &e.book {
+                            m.set_book(&e.name, book, &mut out);
+                        } else if let (true, Some(scale)) = (e.req_type == "442", e.scale.as_ref()) {
+                            m.set_top(&e.name, &e.top, scale, &mut out);
+                        }
+                    }
+                    if matches!(e.req_type, "0" | "442")
+                        && let Some(text) = status.as_mut().and_then(|s| s.answer(&e.name, e.req_type == "0", ok))
+                    {
+                        shared.orders.push_order_error(*req_id, 2152, text);
+                    }
+                }
+            }
+        }
+        for u in out.drain(..) {
+            shared.market.push_depth_update(u);
+        }
+        self.depth_out = out;
+        if let Some(api_subscription) = refused {
+            // The entry stays with the request that has it.
+            let req = self.depth_reqs.remove(idx);
+            let (code, text) = depth_refusal(api_subscription, &req.refusal_suffix);
+            shared.orders.push_order_error(req.req_id, code, text);
+        }
     }
 
     /// Send the entries of a depth request that are not on the wire (all of
-    /// them, or those of one farm after it came back), with new farm ids;
-    /// one message per farm, for the caller to send. An entry waiting
-    /// after a reset waits on.
-    fn depth_messages(&mut self, idx: usize, only_farm: Option<FarmId>) -> Vec<(FarmId, Vec<(u32, String)>)> {
+    /// them, or those of one farm after it came back), with new farm ids,
+    /// for the caller to send: each book in a message of its own, then the
+    /// top-of-book entries in one message per farm, as the reference sends
+    /// them. An entry waiting after a reset waits on. An entry that another
+    /// request has on the wire is shared, not sent (#452): the indexes of
+    /// those come back too.
+    fn depth_messages(&mut self, idx: usize, only_farm: Option<FarmId>) -> (Vec<(FarmId, Vec<(u32, String)>)>, Vec<usize>) {
+        let mut joined = Vec::new();
+        let mut sent: Vec<usize> = Vec::new();
+        for ei in 0..self.depth_reqs[idx].entries.len() {
+            let e = &self.depth_reqs[idx].entries[ei];
+            if e.live || e.resubscribe_at.is_some() || only_farm.is_some_and(|f| f != e.farm) {
+                continue;
+            }
+            let same = self.depth_reqs.iter().enumerate()
+                .filter(|(ri, _)| *ri != idx)
+                .flat_map(|(_, r)| r.entries.iter())
+                .find(|o| o.live && o.farm == e.farm && o.req_type == e.req_type && o.exchange == e.exchange
+                    && o.con_id == e.con_id && o.sec_type == e.sec_type)
+                .map(|o| (o.farm_req, o.server_tag, o.scale, o.book.clone(), o.top, o.access));
+            let e = &mut self.depth_reqs[idx].entries[ei];
+            e.live = true;
+            if let Some((farm_req, server_tag, scale, book, top, access)) = same {
+                e.farm_req = farm_req;
+                e.server_tag = server_tag;
+                e.scale = scale;
+                e.book = book;
+                e.top = top;
+                e.access = access;
+                joined.push(ei);
+                continue;
+            }
+            e.farm_req = self.next_md_req_id;
+            self.next_md_req_id += 1 + e.skip_ids;
+            e.server_tag = None;
+            sent.push(ei);
+        }
+        let entries = &self.depth_reqs[idx].entries;
+        let mut groups: Vec<(FarmId, Vec<usize>)> = sent.iter()
+            .filter(|ei| entries[**ei].req_type == "0")
+            .map(|ei| (entries[*ei].farm, vec![*ei]))
+            .collect();
+        let books = groups.len();
+        for &ei in sent.iter().filter(|ei| entries[**ei].req_type != "0") {
+            match groups[books..].iter_mut().find(|(f, _)| *f == entries[ei].farm) {
+                Some((_, list)) => list.push(ei),
+                None => groups.push((entries[ei].farm, vec![ei])),
+            }
+        }
         let mut out = Vec::new();
-        let user_req = self.depth_reqs[idx].req_id;
-        let ready = |e: &DepthEntry| !e.live && e.resubscribe_at.is_none() && only_farm.is_none_or(|f| f == e.farm);
-        let mut farms: Vec<FarmId> = self.depth_reqs[idx].entries.iter()
-            .filter(|e| ready(e))
-            .map(|e| e.farm).collect();
-        farms.sort_unstable();
-        farms.dedup();
-        for farm in farms {
+        for (farm, list) in groups {
             let mut msg: Vec<(u32, String)> = vec![
                 (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
                 (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
                 (263, "1".into()),
+                (146, list.len().to_string()),
             ];
-            let mut body: Vec<(u32, String)> = Vec::new();
-            let mut count = 0;
-            for e in self.depth_reqs[idx].entries.iter_mut().filter(|e| ready(e) && e.farm == farm) {
-                let id = self.next_md_req_id;
-                self.next_md_req_id += 1;
-                e.farm_req = id;
-                e.live = true;
-                e.server_tag = None;
-                count += 1;
-                body.push((262, id.to_string()));
-                body.push((6008, e.con_id.clone()));
-                body.push((207, e.exchange.clone()));
-                body.push((167, e.sec_type.clone()));
-                body.push((264, e.req_type.to_string()));
+            for ei in list {
+                let e = &entries[ei];
+                msg.push((262, e.farm_req.to_string()));
+                msg.push((6008, e.con_id.clone()));
+                msg.push((207, e.exchange.clone()));
+                msg.push((167, e.sec_type.clone()));
+                msg.push((264, e.req_type.to_string()));
                 if e.req_type != "0" {
-                    body.push((6088, "Socket".into()));
+                    msg.push((6088, "Socket".into()));
                 }
-                body.push((9830, "1".into()));
+                msg.push((9830, "1".into()));
             }
-            msg.push((146, count.to_string()));
-            msg.extend(body);
-            log::info!("Depth req {}: {} entries for farm {}", user_req, count, farm);
             out.push((farm, msg));
         }
-        out
+        if !out.is_empty() || !joined.is_empty() {
+            log::info!("Depth req {}: {} entries sent, {} shared", self.depth_reqs[idx].req_id, sent.len(), joined.len());
+        }
+        (out, joined)
     }
 
-    /// The cancel of some entries of a depth request, one message per
-    /// farm, with the entries as they were sent (#452).
+    /// The cancel of some entries, as they were sent: the top-of-book
+    /// entries in one message per farm, then each book in a message of its
+    /// own, as the reference cancels them (#452).
     fn depth_cancels(entries: &[&DepthEntry]) -> Vec<(FarmId, Vec<(u32, String)>)> {
-        let mut farms: Vec<FarmId> = entries.iter().map(|e| e.farm).collect();
-        farms.sort_unstable();
-        farms.dedup();
+        let mut groups: Vec<(FarmId, Vec<&DepthEntry>)> = Vec::new();
+        for e in entries.iter().filter(|e| e.req_type != "0") {
+            match groups.iter_mut().find(|(f, _)| *f == e.farm) {
+                Some((_, list)) => list.push(e),
+                None => groups.push((e.farm, vec![e])),
+            }
+        }
+        groups.extend(entries.iter().filter(|e| e.req_type == "0").map(|e| (e.farm, vec![*e])));
         let mut out = Vec::new();
-        for farm in farms {
-            let mine: Vec<&&DepthEntry> = entries.iter().filter(|e| e.farm == farm).collect();
+        for (farm, mine) in groups {
             let mut msg: Vec<(u32, String)> = vec![
                 (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
                 (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
@@ -1348,6 +1555,11 @@ impl FarmState {
             out.push((farm, msg));
         }
         out
+    }
+
+    /// A live entry of some request has this farm id (#452).
+    fn depth_wire_used(&self, farm: FarmId, farm_req: u32) -> bool {
+        self.depth_reqs.iter().flat_map(|r| r.entries.iter()).any(|e| e.live && e.farm == farm && e.farm_req == farm_req)
     }
 
     /// Contracts with a depth request, for the reference's limit (#452).
@@ -1368,13 +1580,13 @@ impl FarmState {
         self.depth_reqs.iter().any(|r| r.entries.iter().any(|e| e.farm == farm))
     }
 
-    /// End a depth request: its cancels, one message per farm with the
-    /// entries that were sent, as the reference cancels (#452). None for
-    /// an unknown request id.
+    /// End a depth request: its cancels, for the entries that were sent
+    /// and that no other request has, as the reference cancels (#452).
+    /// None for an unknown request id.
     pub(crate) fn stop_depth(&mut self, req_id: ReqId) -> Option<Vec<(FarmId, Vec<(u32, String)>)>> {
         let pos = self.depth_reqs.iter().position(|r| r.req_id == req_id)?;
         let req = self.depth_reqs.remove(pos);
-        let live: Vec<&DepthEntry> = req.entries.iter().filter(|e| e.live).collect();
+        let live: Vec<&DepthEntry> = req.entries.iter().filter(|e| e.live && !self.depth_wire_used(e.farm, e.farm_req)).collect();
         Some(Self::depth_cancels(&live))
     }
 
@@ -1414,12 +1626,13 @@ impl FarmState {
 
     /// Send again the depth entries of a farm that came back.
     pub(crate) fn resend_depth(&mut self, farm: FarmId) -> Vec<(FarmId, Vec<(u32, String)>)> {
-        (0..self.depth_reqs.len()).flat_map(|idx| self.depth_messages(idx, Some(farm))).collect()
+        (0..self.depth_reqs.len()).flat_map(|idx| self.depth_messages(idx, Some(farm)).0).collect()
     }
 
     /// Depth work due now (#451): the callbacks and reset errors made
-    /// when a farm was lost, and the entries a reset took off the wire,
-    /// asked again after the reference's delay. The messages to send.
+    /// when a farm was lost, the SmartDepth warnings whose wait is over
+    /// (#452), and the entries a reset took off the wire, asked again
+    /// after the reference's delay. The messages to send.
     pub(crate) fn sweep_depth(&mut self, shared: &SharedState) -> Vec<(FarmId, Vec<(u32, String)>)> {
         if self.depth_reqs.is_empty() && self.depth_pending.is_empty() && self.depth_pending_resets.is_empty() {
             return Vec::new();
@@ -1430,11 +1643,16 @@ impl FarmState {
         for u in self.depth_pending.drain(..) {
             shared.market.push_depth_update(u);
         }
+        let now = Instant::now();
+        for r in &mut self.depth_reqs {
+            if let Some(text) = r.status.as_mut().and_then(|s| s.expire(now)) {
+                shared.orders.push_order_error(r.req_id, 2152, text);
+            }
+        }
         let mut out = Vec::new();
         if self.depth_reqs.iter().all(|r| r.entries.iter().all(|e| e.resubscribe_at.is_none())) {
             return out;
         }
-        let now = Instant::now();
         for idx in 0..self.depth_reqs.len() {
             let mut due = false;
             for e in &mut self.depth_reqs[idx].entries {
@@ -1444,105 +1662,143 @@ impl FarmState {
                 }
             }
             if due {
-                out.extend(self.depth_messages(idx, None));
+                out.extend(self.depth_messages(idx, None).0);
             }
         }
         out
     }
 
     /// The acknowledgement of a depth entry (#451): its tag, price tick
-    /// and size increment; a book entry gets its book. False when the
+    /// and size increment, in every request that has it; a book entry gets
+    /// its book. A SmartDepth component is accepted (#452). False when the
     /// request id is not a depth entry's.
-    fn depth_ack(&mut self, farm_req: u32, server_tag: u32, min_tick: f64, size_increment: Option<f64>) -> bool {
+    fn depth_ack(&mut self, farm_req: u32, server_tag: u32, min_tick: f64, size_increment: Option<f64>, shared: &SharedState) -> bool {
         let user_book = self.user_book;
+        let mut found = false;
         for r in &mut self.depth_reqs {
-            let lot = r.lot;
-            let Some(e) = r.entries.iter_mut().find(|e| e.live && e.farm_req == farm_req) else { continue };
-            let unit = size_increment.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(1.0) * lot as f64;
-            let scale = Scale::new(min_tick, unit);
-            e.server_tag = Some(server_tag);
-            e.scale = Some(scale);
-            if e.req_type == "0" {
-                e.book = Some(DeepBook::new(user_book, scale));
+            let DepthReq { req_id, entries, lot, status, .. } = r;
+            for e in entries.iter_mut().filter(|e| e.live && e.farm_req == farm_req) {
+                found = true;
+                let unit = size_increment.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(1.0) * *lot as f64;
+                let scale = Scale::new(min_tick, unit);
+                e.server_tag = Some(server_tag);
+                e.scale = Some(scale);
+                e.access = DepthAccess::Allowed;
+                if e.req_type == "0" {
+                    e.book = Some(DeepBook::new(user_book, scale));
+                }
+                log::info!("Depth ack: server_tag {} -> req_id {} {} {} (min_tick={})",
+                    server_tag, req_id, e.exchange, e.req_type, min_tick);
+                if matches!(e.req_type, "0" | "442")
+                    && let Some(text) = status.as_mut().and_then(|s| s.answer(&e.name, e.req_type == "0", true))
+                {
+                    shared.orders.push_order_error(*req_id, 2152, text);
+                }
             }
-            log::info!("Depth ack: server_tag {} -> req_id {} {} {} (min_tick={})",
-                server_tag, r.req_id, e.exchange, e.req_type, min_tick);
-            return true;
         }
-        false
+        found
     }
 
-    /// The request and entry of a depth tag of the farm being read.
+    /// The live entries of the farm being read with this tag, as
+    /// (request, entry) indexes.
     #[inline]
-    fn depth_entry_of(&self, server_tag: u32) -> Option<(usize, usize)> {
+    fn depth_entries_of(&self, server_tag: u32, hits: &mut Vec<(usize, usize)>) {
         let farm = self.rx_farm;
-        self.depth_reqs.iter().enumerate().find_map(|(ri, r)| {
-            r.entries.iter().position(|e| e.live && e.farm == farm && e.server_tag == Some(server_tag)).map(|ei| (ri, ei))
-        })
+        hits.clear();
+        for (ri, r) in self.depth_reqs.iter().enumerate() {
+            for (ei, e) in r.entries.iter().enumerate() {
+                if e.live && e.farm == farm && e.server_tag == Some(server_tag) {
+                    hits.push((ri, ei));
+                }
+            }
+        }
     }
 
-    /// A depth entry the farm refused (#452): a single-exchange request ends
-    /// with 354, or 10089 when an API subscription is needed, as the
-    /// reference; a SmartDepth component is dropped from its request.
-    fn depth_rejected(&mut self, farm_req: u32, needs_api_subscription: bool, shared: &SharedState) -> bool {
-        let Some(pos) = self.depth_reqs.iter().position(|r| r.entries.iter().any(|e| e.live && e.farm_req == farm_req)) else {
-            return false;
-        };
-        let req = &mut self.depth_reqs[pos];
-        if req.smart {
-            req.entries.retain(|e| e.farm_req != farm_req);
-            log::warn!("SmartDepth req {}: a component was refused", req.req_id);
-            return true;
+    /// A depth entry the farm refused (#452), in every request that has
+    /// it: a single-exchange request ends with 354, or 10089 when an API
+    /// subscription is needed, and its entry is cancelled unless another
+    /// request has it, as the reference; a SmartDepth component stays on
+    /// the wire until the request's cancel and is answered as refused.
+    fn depth_rejected(&mut self, farm_req: u32, needs_api_subscription: bool, shared: &SharedState, farm_conn: &mut Option<Connection>) -> bool {
+        let access = DepthAccess::Refused { api_subscription: needs_api_subscription };
+        let mut found = false;
+        let mut ended: Vec<usize> = Vec::new();
+        for (ri, r) in self.depth_reqs.iter_mut().enumerate() {
+            let DepthReq { req_id, entries, status, smart, .. } = r;
+            for e in entries.iter_mut().filter(|e| e.live && e.farm_req == farm_req) {
+                found = true;
+                e.access = access;
+                if !*smart {
+                    ended.push(ri);
+                    continue;
+                }
+                log::warn!("SmartDepth req {}: the farm refused {} {}", req_id, e.exchange, e.req_type);
+                if matches!(e.req_type, "0" | "442")
+                    && let Some(text) = status.as_mut().and_then(|s| s.answer(&e.name, e.req_type == "0", false))
+                {
+                    shared.orders.push_order_error(*req_id, 2152, text);
+                }
+            }
         }
-        let req = self.depth_reqs.remove(pos);
-        let (code, text) = if needs_api_subscription {
-            (10089, "Requested market data requires additional subscription for API. See link in 'Market Data Connections' dialog for more details.")
-        } else {
-            (354, "Requested market data is not subscribed.")
-        };
-        shared.orders.push_order_error(i64::from(req.req_id), code, text.to_string());
-        true
+        ended.dedup();
+        for ri in ended.into_iter().rev() {
+            let req = self.depth_reqs.remove(ri);
+            let (code, text) = depth_refusal(needs_api_subscription, &req.refusal_suffix);
+            shared.orders.push_order_error(req.req_id, code, text);
+            let live: Vec<&DepthEntry> = req.entries.iter().filter(|e| e.live && !self.depth_wire_used(e.farm, e.farm_req)).collect();
+            for (_, msg) in Self::depth_cancels(&live) {
+                let fields: Vec<(u32, &str)> = msg.iter().map(|(t, v)| (*t, v.as_str())).collect();
+                farm_conn.send_comp(&fields);
+            }
+        }
+        found
     }
 
     /// A depth message (35=Y, or 35=Z with extended fields) (#451): each
-    /// group goes to the book of its tag, as one change; the request's
-    /// callbacks follow. A group the book refuses resets it: the book is
-    /// emptied, a single book gets 317, its entry is cancelled and asked
-    /// again after the reference's delay, and its next data sends the
-    /// whole book.
+    /// group goes to the book of its tag in every request that has it, as
+    /// one change; the request's callbacks follow. A group the book refuses
+    /// resets it: the book is emptied, a single book gets 317, its entry is
+    /// cancelled and asked again after the reference's delay, and its next
+    /// data sends the whole book.
     fn handle_depth(&mut self, msg: &[u8], farm_conn: &mut Option<Connection>, shared: &SharedState) {
         let Some((body, extended)) = depth_decoder::depth_body(msg) else { return };
         let groups = depth_decoder::decode_depth(body, extended);
         let mut out = std::mem::take(&mut self.depth_out);
         let mut changes = std::mem::take(&mut self.depth_changes);
+        let mut hits = std::mem::take(&mut self.depth_hits);
         let mut cancels: Vec<DepthEntry> = Vec::new();
         for group in &groups {
-            let Some((ri, ei)) = self.depth_entry_of(group.server_tag) else {
+            self.depth_entries_of(group.server_tag, &mut hits);
+            if hits.is_empty() {
                 log::debug!("Depth group for server tag {}: no book", group.server_tag);
                 continue;
-            };
-            let req = &mut self.depth_reqs[ri];
-            let entry = &mut req.entries[ei];
-            let Some(book) = entry.book.as_mut() else { continue };
-            match book.apply(&group.entries, &mut changes) {
-                Ok(()) => match &mut req.view {
-                    DepthView::Single(v) => v.on_change(book, &changes, &mut out),
-                    DepthView::Smart(m) => m.set_book(&entry.name, book, &mut out),
-                },
-                Err(_) => {
-                    log::warn!("Depth req {} {}: the farm sent an entry the book cannot take: reset", req.req_id, entry.exchange);
-                    book.clear();
-                    match &mut req.view {
-                        DepthView::Single(v) => {
-                            v.reset();
-                            shared.orders.push_order_error(req.req_id, 317, RESET_TEXT.to_string());
-                        }
+            }
+            for &(ri, ei) in &hits {
+                let req = &mut self.depth_reqs[ri];
+                let entry = &mut req.entries[ei];
+                let Some(book) = entry.book.as_mut() else { continue };
+                match book.apply(&group.entries, &mut changes) {
+                    Ok(()) => match &mut req.view {
+                        DepthView::Single(v) => v.on_change(book, &changes, &mut out),
                         DepthView::Smart(m) => m.set_book(&entry.name, book, &mut out),
+                    },
+                    Err(_) => {
+                        log::warn!("Depth req {} {}: the farm sent an entry the book cannot take: reset", req.req_id, entry.exchange);
+                        book.clear();
+                        match &mut req.view {
+                            DepthView::Single(v) => {
+                                v.reset();
+                                shared.orders.push_order_error(req.req_id, 317, RESET_TEXT.to_string());
+                            }
+                            DepthView::Smart(m) => m.set_book(&entry.name, book, &mut out),
+                        }
+                        if !cancels.iter().any(|c| c.farm == entry.farm && c.farm_req == entry.farm_req) {
+                            cancels.push(entry.clone());
+                        }
+                        entry.live = false;
+                        entry.server_tag = None;
+                        entry.resubscribe_at = Some(Instant::now() + DEPTH_RESUBSCRIBE_DELAY);
                     }
-                    cancels.push(entry.clone());
-                    entry.live = false;
-                    entry.server_tag = None;
-                    entry.resubscribe_at = Some(Instant::now() + DEPTH_RESUBSCRIBE_DELAY);
                 }
             }
         }
@@ -1551,6 +1807,7 @@ impl FarmState {
         }
         self.depth_out = out;
         self.depth_changes = changes;
+        self.depth_hits = hits;
         if !cancels.is_empty() {
             let refs: Vec<&DepthEntry> = cancels.iter().collect();
             for (_, msg) in Self::depth_cancels(&refs) {
@@ -1562,15 +1819,17 @@ impl FarmState {
 
     /// The ticks of a 35=P message for the top-of-book entries of
     /// SmartDepth requests (#451): each block of such a tag sets the
-    /// exchange's bid and ask, then its SmartDepth rows.
+    /// exchange's bid and ask, then its SmartDepth rows, in every request
+    /// that has the entry.
     fn depth_tops(&mut self, ticks: &[tick_decoder::RawTick], shared: &SharedState) {
         let mut out = std::mem::take(&mut self.depth_out);
+        let mut hits = std::mem::take(&mut self.depth_hits);
         let mut i = 0;
         while i < ticks.len() {
             // One block: its first tick, then the ticks that follow it.
             let end = ticks[i + 1..].iter().position(|t| t.first).map_or(ticks.len(), |p| i + 1 + p);
-            let tag = ticks[i].server_tag;
-            if let Some((ri, ei)) = self.depth_entry_of(tag) {
+            self.depth_entries_of(ticks[i].server_tag, &mut hits);
+            for &(ri, ei) in &hits {
                 let req = &mut self.depth_reqs[ri];
                 let entry = &mut req.entries[ei];
                 if let (true, Some(scale), DepthView::Smart(m)) = (entry.req_type == "442", entry.scale, &mut req.view) {
@@ -1592,6 +1851,7 @@ impl FarmState {
             shared.market.push_depth_update(u);
         }
         self.depth_out = out;
+        self.depth_hits = hits;
     }
 
     pub(crate) fn handle_disconnect(&mut self, context: &mut Context, _event_tx: &Option<Sender<Event>>) {
@@ -1855,6 +2115,48 @@ fn tick_req_params(instrument: InstrumentId, min_tick: f64, parts: &[&str], sec_
 /// not (354) (ibx#444).
 fn api_subscription_needed(access: &str) -> bool {
     access.contains(',') || access.contains('#') || (!access.is_empty() && access.parse::<i64>().is_ok())
+}
+
+/// The reference's overnight venues (`jfix.R.C`): a top of book there
+/// keeps its LAST entry on the venue (#452).
+pub(crate) fn overnight_venue(exchange: &str) -> bool {
+    matches!(exchange, "OVERNIGHT" | "IBEOS")
+}
+
+/// The error of a refused depth book (#452), as the reference builds it
+/// (`jextend.F.a(ApiAccess,dy,DEEP,NONE,false)`): 10089 when an API
+/// subscription is needed, else 354, in the texts of the reference's
+/// English language file, then the contract and `/DEEP` (`suffix`).
+/// Captured: "...for more details.AAPL NASDAQ.NMS/DEEP" (25/09/2026) and
+/// "...availability of delayed data.MNQ DEC'26 (MNQZ6) /DEEP" (23/09/2026).
+pub(crate) fn depth_refusal(api_subscription: bool, suffix: &str) -> (i64, String) {
+    if api_subscription {
+        (10089, format!("Requested market data requires additional subscription for API. \
+            See link in 'Market Data Connections' dialog for more details.{suffix}"))
+    } else {
+        (354, format!("Requested market data is not subscribed. Check API status by selecting the Account menu then \
+            under Management choose Market Data Subscription Manager and/or availability of delayed data.{suffix}"))
+    }
+}
+
+/// The contract as a depth refusal names it (#452,
+/// `jclient.dy.cU()`): a stock is its symbol, then its primary exchange
+/// with the market after a dot (`AAPL NASDAQ.NMS`). None for the other
+/// security types, whose descriptions are not read yet.
+pub(crate) fn depth_description(def: &crate::control::contracts::ContractDefinition) -> Option<String> {
+    use crate::control::contracts::SecurityType;
+    if def.sec_type != SecurityType::Stock {
+        return None;
+    }
+    // The definition may give the primary exchange with its market
+    // already (when that full name is a valid exchange).
+    let mut place = def.primary_exchange.clone();
+    let full = !def.primary_suffix.is_empty() && place.ends_with(&format!(".{}", def.primary_suffix));
+    if !place.is_empty() && !def.primary_suffix.is_empty() && !full {
+        place.push('.');
+        place.push_str(&def.primary_suffix);
+    }
+    Some(format!("{} {}", def.symbol, place).trim().to_string())
 }
 
 #[cfg(test)]

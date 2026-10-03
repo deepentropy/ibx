@@ -381,7 +381,10 @@ fn api_sec_type(fix: &str) -> String {
 }
 
 impl ComboBook {
-    fn next_req(&mut self, label: &str) -> String {
+    /// The next name of a definition lookup in the reference's form
+    /// (`SecDefReqMsgReqByConid81`): one counter for the combos' lookups
+    /// and the SmartDepth component lookups (#452), so no two names meet.
+    pub(crate) fn next_req(&mut self, label: &str) -> String {
         self.next_id = self.next_id.wrapping_add(1);
         format!("{}{}", label, self.next_id)
     }

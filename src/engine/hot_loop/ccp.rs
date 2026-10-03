@@ -2572,6 +2572,8 @@ impl CcpState {
             if super::order_builder::rth_definition_reply(context, rid, msg) { return; }
             // Asked for a round lot (ibx#287): not a user reply.
             if super::farm::round_lot_reply(context, rid, msg) { return; }
+            // Asked for a SmartDepth component (#452): not a user reply.
+            if super::farm::depth_component_reply(context, rid, msg) { return; }
             // Asked for the conId of a market data request (ibx#278).
             if super::farm::md_contract_reply(context, shared, rid, msg) { return; }
             // Asked for the conId of a historical-data request (ibx#427).
