@@ -832,7 +832,8 @@ pub struct StreamState {
 /// The fields of a stream step, in the order the reference sends them
 /// (indexes of the polled quote fields).
 const STEP_ALL: [usize; 14] = [0, 1, 2, 3, 4, 5, 8, 6, 7, 9, 10, 12, 13, 11];
-/// The delayed data sender's order: the volume after the low.
+/// The delayed data sender's order: the volume after the low; it sends no
+/// exchanges (12, 13 are skipped for delayed data).
 const STEP_ALL_DELAYED: [usize; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 11];
 const STEP_DAILY: [usize; 5] = [8, 6, 7, 9, 10];
 const STEP_DAILY_DELAYED: [usize; 5] = [6, 7, 8, 9, 10];
@@ -896,8 +897,10 @@ impl StreamPass<'_> {
                 9 => self.price(TICK_CLOSE, 9, false),
                 10 => self.price(TICK_OPEN, 10, false),
                 11 => self.ticks.push(MdTick::Text {
-                    tick_type: TICK_LAST_TIMESTAMP, value: (self.fields[11] / 1_000_000_000).to_string(),
+                    tick_type: self.api(TICK_LAST_TIMESTAMP), value: (self.fields[11] / 1_000_000_000).to_string(),
                 }),
+                // The delayed sender sends no exchanges.
+                12 | 13 if self.delayed => {}
                 12 | 13 => {
                     let tick_type = if idx == 12 { TICK_BID_EXCHANGE } else { TICK_ASK_EXCHANGE };
                     self.ticks.push(MdTick::Text { tick_type, value: render_exchange_mask(self.fields[idx], self.instrument, self.shared) });
@@ -910,7 +913,8 @@ impl StreamPass<'_> {
 
     fn halted(&mut self, value: Option<f64>) {
         if let Some(value) = value {
-            self.ticks.push(MdTick::Generic { tick_type: TICK_HALTED, value });
+            let tick_type = self.api(TICK_HALTED);
+            self.ticks.push(MdTick::Generic { tick_type, value });
         }
     }
 }
@@ -1041,12 +1045,16 @@ pub struct ClientCore {
 
 /// The delayed tick type of a real-time one, from the API tick type table
 /// (bid 1 -> 66, ask 2 -> 67, last 4 -> 68, sizes 0/3/5 -> 69/70/71, high
-/// 6 -> 72, low 7 -> 73, volume 8 -> 74, close 9 -> 75, open 14 -> 76);
-/// others unchanged (ibx#447).
+/// 6 -> 72, low 7 -> 73, volume 8 -> 74, close 9 -> 75, open 14 -> 76, last
+/// time 45 -> 88, halted 49 -> 90); others unchanged (ibx#447). The
+/// reference's delayed sender writes 88 and 90 where the real-time one
+/// writes 45 and 49 (ibx#446, `jextend.dL.b(List, s, int, pa, dy, o,
+/// SnapshotPreference, Set)@2165-2524`).
 pub fn delayed_tick_type(tick_type: i32) -> i32 {
     match tick_type {
         1 => 66, 2 => 67, 4 => 68, 0 => 69, 3 => 70, 5 => 71,
         6 => 72, 7 => 73, 8 => 74, 9 => 75, 14 => 76,
+        45 => 88, 49 => 90,
         other => other,
     }
 }
@@ -2924,7 +2932,8 @@ impl ClientCore {
         } else {
             (true, true)
         };
-        let halted = if delayed { None } else { marks.halted().map(crate::types::QuoteMarks::halted_tick_value) };
+        // Delayed data has its own halted tick (90), with the same rule.
+        let halted = marks.halted().map(crate::types::QuoteMarks::halted_tick_value);
         let mut pending = st.halted_pending;
 
         let mut out = StreamPass { ticks: Vec::new(), todo, fields: &fields, delayed, shared, instrument: iid, bid_auto, ask_auto };
@@ -3086,9 +3095,9 @@ impl ClientCore {
 
         let mut ticks = Vec::new();
         let trade = |ticks: &mut Vec<MdTick>, snap: &mut crate::control::snapshot::PlainSnapshot| {
-            if q.timestamp_ns != 0 && snap.take(TICK_LAST_TIMESTAMP) {
+            if q.timestamp_ns != 0 && snap.take(api(TICK_LAST_TIMESTAMP)) {
                 ticks.push(MdTick::Text {
-                    tick_type: TICK_LAST_TIMESTAMP, value: (q.timestamp_ns / 1_000_000_000).to_string(),
+                    tick_type: api(TICK_LAST_TIMESTAMP), value: (q.timestamp_ns / 1_000_000_000).to_string(),
                 });
             }
             if q.last != 0 && snap.take(api(4)) {
@@ -3132,7 +3141,7 @@ impl ClientCore {
             }
         }
         for (mask, tt) in [(q.bid_exch_mask, TICK_BID_EXCHANGE), (q.ask_exch_mask, TICK_ASK_EXCHANGE)] {
-            if mask != 0 && snap.take(tt) {
+            if !delayed && mask != 0 && snap.take(tt) {
                 ticks.push(MdTick::Text { tick_type: tt, value: render_exchange_mask(mask, iid, shared) });
             }
         }
