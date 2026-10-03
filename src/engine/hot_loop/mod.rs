@@ -1896,6 +1896,14 @@ impl HotLoop {
         self.ccp.reconnect(conn, &mut self.ccp_conn, &mut self.hb, &self.account_id);
     }
 
+    /// The logon sent its order status replay request: open-order requests
+    /// wait for the end of that replay, as the reference answers them only
+    /// once the first order recovery of the session is complete (ibx#251).
+    pub fn await_login_replay(&mut self) {
+        self.ccp.awaiting_login_replay = true;
+        self.shared.orders.set_open_orders_held(true);
+    }
+
     /// Set the market-data farm name used in the farm status messages.
     pub fn set_farm_name(&mut self, name: String) {
         if !name.is_empty() {
@@ -3211,6 +3219,18 @@ mod tests {
         engine.report_link_changes();
         assert_eq!(shared.drain_connection_notices().iter().map(|n| n.0).collect::<Vec<_>>(), vec![1100]);
         assert!(shared.orders.open_orders_held(), "open-order requests wait from the 1100 (ibx#251)");
+    }
+
+    // ibx#251: from the logon, open-order requests wait for the end of its
+    // order status replay, as the reference's start-up.
+    #[test]
+    fn logon_holds_open_order_requests_until_its_replay() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        assert!(!shared.orders.open_orders_held());
+        engine.await_login_replay();
+        assert!(shared.orders.open_orders_held());
+        assert!(engine.ccp.awaiting_login_replay);
     }
 
     // ibx#399: 1102 after the status replay end, at once with the farms up.

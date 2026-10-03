@@ -136,6 +136,12 @@ impl EClient {
             self.core.update_order_fill(fill.order_id, status, filled_f, remaining_f);
         }
 
+        // Orders filled while the auth link was lost: no longer known to
+        // the client, with no callback (ibx#251).
+        for order_id in self.shared.orders.drain_forgotten_orders() {
+            self.core.forget_order(order_id);
+        }
+
         // Executions of orders this session does not track: stored for
         // req_executions, with no live callback (ibx#314).
         for (contract, mut exec, fill_exec) in self.shared.orders.drain_untracked_executions() {

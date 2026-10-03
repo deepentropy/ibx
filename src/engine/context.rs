@@ -1217,15 +1217,9 @@ impl Context {
     /// Remove an order that ended with `status`, and keep that status for a
     /// later cancel of the same id (ibx#464).
     pub fn finish_order(&mut self, order_id: OrderId, status: OrderStatus) {
-        if self.open_orders.remove(&order_id).is_none() {
+        if !self.forget_order(order_id) {
             return;
         }
-        self.cancel_clord.remove(&order_id);
-        self.status_queries.remove(&order_id);
-        self.trail_limit_reported.remove(&order_id);
-        self.reported_stop.remove(&order_id);
-        self.bracket_keys.remove(&order_id);
-        self.bracket_next_child.remove(&order_id);
         if self.finished_orders.insert(order_id, status).is_none() {
             self.finished_order_ids.push_back(order_id);
             while self.finished_order_ids.len() > FINISHED_ORDERS_MAX {
@@ -1234,6 +1228,22 @@ impl Context {
                 }
             }
         }
+    }
+
+    /// Remove an order and what is kept for it, without keeping a final
+    /// status: a later cancel of its id finds no order (10147). False when
+    /// the order was not there.
+    pub fn forget_order(&mut self, order_id: OrderId) -> bool {
+        if self.open_orders.remove(&order_id).is_none() {
+            return false;
+        }
+        self.cancel_clord.remove(&order_id);
+        self.status_queries.remove(&order_id);
+        self.trail_limit_reported.remove(&order_id);
+        self.reported_stop.remove(&order_id);
+        self.bracket_keys.remove(&order_id);
+        self.bracket_next_child.remove(&order_id);
+        true
     }
 
     /// Final status of an order that left the engine (ibx#464).

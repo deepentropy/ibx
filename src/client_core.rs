@@ -2688,6 +2688,13 @@ impl ClientCore {
         }
     }
 
+    /// Drop a tracked order with no status: the engine no longer knows it
+    /// (filled while the auth link was lost, ibx#251). It is no open order
+    /// and no finished one.
+    pub fn forget_order(&self, order_id: OrderId) {
+        self.open_orders.lock().unwrap().remove(&order_id);
+    }
+
     /// Update a tracked order status from an order update event.
     pub fn update_order_status(&self, order_id: OrderId, status: &str, filled: f64, remaining: f64) {
         let mut orders = self.open_orders.lock().unwrap();
@@ -2724,9 +2731,9 @@ impl ClientCore {
         None
     }
 
-    /// Hold an open-order request while the auth link is lost: it gets no
-    /// answer until the order replay of the new logon has ended, as in the
-    /// reference (ibx#251). A second request of the same kind replaces the
+    /// Hold an open-order request from the logon, or from a lost auth link,
+    /// until the order replay of that logon has ended, as in the reference
+    /// (ibx#251). A second request of the same kind replaces the
     /// first. Returns false when the request is to be answered now.
     pub fn hold_open_orders(&self, request: OpenOrdersRequest, shared: &SharedState) -> bool {
         if !shared.orders.open_orders_held() {

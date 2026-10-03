@@ -157,8 +157,9 @@ impl EClient {
 
     /// Request open orders for this client. Matches `reqOpenOrders` in C++.
     ///
-    /// While the auth link is lost the request is answered only after the
-    /// order replay of the new logon, from `process_msgs` (ibx#251).
+    /// Before the order replay of the logon has ended, and while the auth
+    /// link is lost, the request is answered only after the order replay,
+    /// from `process_msgs` (ibx#251).
     pub fn req_open_orders(&self, wrapper: &mut impl Wrapper) {
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::Open, &self.shared) {
             return;
@@ -168,8 +169,8 @@ impl EClient {
 
     /// Request all open orders. Matches `reqAllOpenOrders` in C++.
     ///
-    /// Held like [`req_open_orders`](Self::req_open_orders) while the auth
-    /// link is lost (ibx#251).
+    /// Held like [`req_open_orders`](Self::req_open_orders) until the order
+    /// replay (ibx#251).
     pub fn req_all_open_orders(&self, wrapper: &mut impl Wrapper) {
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::All, &self.shared) {
             return;

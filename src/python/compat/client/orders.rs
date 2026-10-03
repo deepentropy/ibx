@@ -185,8 +185,9 @@ impl EClient {
 
     /// Request all open orders for this client.
     ///
-    /// While the auth link is lost the request is answered only after the
-    /// order replay of the new logon, from the dispatch loop (ibx#251).
+    /// Before the order replay of the logon has ended, and while the auth
+    /// link is lost, the request is answered only after the order replay,
+    /// from the dispatch loop (ibx#251).
     fn req_open_orders(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;
@@ -197,7 +198,7 @@ impl EClient {
     }
 
     /// Request all open orders across all clients. Held like
-    /// `req_open_orders` while the auth link is lost (ibx#251).
+    /// `req_open_orders` until the order replay (ibx#251).
     fn req_all_open_orders(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;

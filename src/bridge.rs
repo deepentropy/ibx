@@ -537,11 +537,14 @@ pub struct OrderState {
     completed_orders: Mutex<Vec<CompletedOrder>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
     order_cache: Mutex<HashMap<OrderId, RichOrderInfo>>,
-    /// Set from a lost auth link to the end of the order replay after the
-    /// new logon: open-order requests wait for the replay (ibx#251).
+    /// Set from the logon, or from a lost auth link, to the end of the order
+    /// replay of the logon: open-order requests wait for the replay (ibx#251).
     open_orders_held: AtomicBool,
     /// The combo of each combo order sent this session (ibx#470).
     combo_views: Mutex<HashMap<OrderId, ComboView>>,
+    /// Orders the engine dropped with no status for the client: filled
+    /// while the auth link was lost (ibx#251).
+    forgotten_orders: Mutex<Vec<OrderId>>,
 }
 
 impl OrderState {
@@ -558,12 +561,13 @@ impl OrderState {
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             order_cache: Mutex::new(HashMap::new()),
             open_orders_held: AtomicBool::new(false),
+            forgotten_orders: Mutex::new(Vec::new()),
         }
     }
 
-    /// Hold the open-order requests (`true`, the auth link is lost) or let
-    /// them be answered (`false`, the order replay has ended), as the
-    /// reference does (ibx#251). Hot-loop side.
+    /// Hold the open-order requests (`true`, at the logon or when the auth
+    /// link is lost) or let them be answered (`false`, the order replay has
+    /// ended), as the reference does (ibx#251). Hot-loop side.
     #[doc(hidden)]
     pub fn set_open_orders_held(&self, held: bool) {
         self.open_orders_held.store(held, Ordering::Release);
@@ -661,6 +665,17 @@ impl OrderState {
 
     #[doc(hidden)] pub fn push_fill_with_exec(&self, fill: Fill, exec: FillExec) {
         self.fills.lock().unwrap().push((fill, exec));
+    }
+
+    /// An order the client no longer knows, with no callback (ibx#251).
+    #[doc(hidden)] pub fn push_forgotten_order(&self, order_id: OrderId) {
+        self.forgotten_orders.lock().unwrap().push(order_id);
+    }
+
+    /// The orders the engine dropped with no status since the last call
+    /// (ibx#251).
+    pub fn drain_forgotten_orders(&self) -> Vec<OrderId> {
+        std::mem::take(&mut *self.forgotten_orders.lock().unwrap())
     }
 
     #[doc(hidden)] pub fn push_untracked_execution(&self, contract: api::Contract, execution: api::Execution, exec: FillExec) {

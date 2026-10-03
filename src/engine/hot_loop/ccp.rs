@@ -312,6 +312,12 @@ pub(crate) struct CcpState {
     pub(crate) next_trades_request: u32,
     /// Set by a reconnect until the end frame of the order status replay.
     pub(crate) awaiting_status_replay: bool,
+    /// Set at the logon until the end frame of its order status replay:
+    /// open-order requests wait for it, as in the reference (ibx#251).
+    pub(crate) awaiting_login_replay: bool,
+    /// The request id (6556) of the trades request sent after a reconnect,
+    /// until the end frame of its reply: the fills of the outage (ibx#251).
+    pub(crate) fill_up_pending: Option<String>,
     /// When the end frame of the post-reconnect status replay came; the
     /// engine reports the restored link from it (ibx#399).
     pub(crate) status_replay_end_at: Option<Instant>,
@@ -660,6 +666,8 @@ impl CcpState {
             // The login sends the first trades request.
             next_trades_request: 5,
             awaiting_status_replay: false,
+            awaiting_login_replay: false,
+            fill_up_pending: None,
             status_replay_end_at: None,
         }
     }
@@ -1141,6 +1149,9 @@ impl CcpState {
         // replay (wildcard order id).
         if let Some(request) = parsed.get(&6556).filter(|r| !r.starts_with("PT.")) {
             log::info!("ExecReport: end of trades request {}", request);
+            if self.fill_up_pending.as_ref() == Some(request) {
+                self.fill_up_pending = None;
+            }
             return;
         }
         if parsed.get(&11).map(|s| s.as_str()) == Some("*") {
@@ -1149,6 +1160,12 @@ impl CcpState {
                 self.status_replay_end_at = Some(Instant::now());
                 // The held open-order requests are answered from the
                 // corrected orders (ibx#251).
+                shared.orders.set_open_orders_held(false);
+                shared.notify();
+            }
+            // The replay of the logon: the requests made since the connect
+            // are answered now, with no restored-link message (ibx#251).
+            if std::mem::take(&mut self.awaiting_login_replay) {
                 shared.orders.set_open_orders_held(false);
                 shared.notify();
             }
@@ -1271,6 +1288,22 @@ impl CcpState {
             if !is_cancel_request && raw_clord != "*" {
                 context.last_clord.insert(clord_id, raw_clord.clone());
             }
+        }
+
+        // A fill of an order of this session in the trades reply after a
+        // reconnect, that is a fill made while the link was lost: the
+        // reference books it (executions, position, commission report) and
+        // gives no execDetails and no orderStatus; once filled, the order is
+        // unknown to the client (a cancel gets 10147). Captured 30/09/2026
+        // (ib-agent#192 C4). A combo keeps its own path.
+        if self.fill_up_pending.is_some()
+            && matches!(parsed.get(&150).map(String::as_str), Some("F" | "1" | "2"))
+            && parsed.get(&32).and_then(|s| parse_qty(s)).is_some_and(|q| q > 0)
+            && context.order(clord_id).is_some()
+            && !context.combos.orders.contains_key(&clord_id)
+        {
+            self.handle_outage_fill(parsed, context, shared, clord_id, account_id);
+            return;
         }
 
         // A combo order (ibx#470): the report of a leg is an execution of
@@ -1934,6 +1967,50 @@ impl CcpState {
         };
         log::info!("Combo order {} leg fill: con_id={} {} {} @ {}", order_id, con_id, if buy { "BOT" } else { "SLD" }, shares, price);
         shared.orders.push_fill_with_exec(fill, exec);
+    }
+
+    /// A fill made while the auth link was lost, in the trades reply after
+    /// the reconnect (ibx#251): booked as the fill of an untracked order
+    /// (kept for `req_executions`, moves the position, its commission
+    /// report goes out), with no fill event and no status. When it ends the
+    /// order, the order leaves the engine and the client without a status,
+    /// and is not kept as finished: a later cancel of its id gets 10147, as
+    /// the reference's (captured 30/09/2026, ib-agent#192 C4).
+    fn handle_outage_fill(
+        &mut self,
+        parsed: &std::collections::HashMap<u32, String>,
+        context: &mut Context,
+        shared: &SharedState,
+        clord_id: OrderId,
+        account_id: &str,
+    ) {
+        let exec_id = parsed.get(&17).map(|s| s.as_str()).unwrap_or("");
+        let last_px = parsed.get(&31).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let last_shares: Qty = parsed.get(&32).and_then(|s| parse_qty(s)).unwrap_or(0);
+        if !exec_id.is_empty() && self.seen_exec_ids.contains(exec_id) {
+            log::warn!("Duplicate ExecID={}: fill not booked again", exec_id);
+        } else {
+            if !exec_id.is_empty() {
+                let time = parsed.get(&60).or_else(|| parsed.get(&52)).cloned().unwrap_or_default();
+                self.last_exec = Some((exec_id.to_string(), time));
+            }
+            if let Some((execution, exec)) = self.book_untracked_fill(
+                parsed, context, shared, clord_id, exec_id, last_px, last_shares, account_id)
+            {
+                if !exec_id.is_empty() {
+                    self.record_exec_id(exec_id);
+                }
+                shared.orders.push_untracked_execution(report_contract(parsed, shared), execution, exec);
+            }
+        }
+        let leaves: Qty = parsed.get(&151).and_then(|s| parse_qty(s)).unwrap_or(0);
+        let ended = leaves == 0 || parsed.get(&39).map(String::as_str) == Some("2");
+        log::info!("Fill {} of order {} made while the link was lost: no fill event{}", exec_id, clord_id,
+            if ended { ", the order is dropped" } else { "" });
+        if ended {
+            context.forget_order(clord_id);
+            shared.orders.push_forgotten_order(clord_id);
+        }
     }
 
     /// Book a fill of an order the engine does not track (ibx#314): an
@@ -3029,6 +3106,8 @@ impl CcpState {
         self.matching_acked.clear();
         self.matching_permits += 1;
         self.awaiting_status_replay = false;
+        self.awaiting_login_replay = false;
+        self.fill_up_pending = None;
         self.status_replay_end_at = None;
         // A company lookup lost with the link is made again by the next
         // derivative row (ibx#436).
@@ -3068,6 +3147,7 @@ impl CcpState {
             // The fills of the gap come only in the answer to this request
             // (ibx#399); they take the normal report path.
             let fill_up = self.fill_up_request(account_id, &ts);
+            self.fill_up_pending = fill_up.iter().find(|(t, _)| *t == 6556).map(|(_, v)| v.clone());
             let fill_up: Vec<(u32, &str)> = fill_up.iter().map(|(t, v)| (*t, v.as_str())).collect();
             let _ = conn.send_fix(&fill_up);
             let _ = conn.send_fix(&[
@@ -3125,6 +3205,24 @@ impl CcpState {
             }
         }
         fields
+    }
+}
+
+/// The contract of an execution report: the cached one when its conId is
+/// known, else the report's own fields.
+fn report_contract(parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) -> api::Contract {
+    let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
+    if con_id != 0 && let Some(cached) = shared.reference.get_contract(con_id) {
+        return cached;
+    }
+    let text = |tag: u32| parsed.get(&tag).cloned().unwrap_or_default();
+    let sec_type = match parsed.get(&167).map(String::as_str) {
+        Some("CS") | Some("COMMON") => "STK".to_string(),
+        _ => text(167),
+    };
+    api::Contract {
+        con_id, symbol: text(55), sec_type, exchange: text(207), currency: text(15),
+        local_symbol: text(6035), ..Default::default()
     }
 }
 
@@ -6378,6 +6476,129 @@ mod reconnect_tests {
         assert!(shared.orders.drain_order_updates().is_empty());
         assert!(!ccp.awaiting_status_replay);
         assert!(ccp.status_replay_end_at.is_some(), "the status replay end is seen");
+    }
+
+    // ibx#251: the end frame of the logon's order status replay lets the
+    // open-order requests through, with no restored-link report (frame of
+    // the cold start of 28/09/2026, captures/192/d1/replay.txt).
+    #[test]
+    fn login_replay_end_releases_the_open_order_requests() {
+        let mut context = Context::new();
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        ccp.awaiting_login_replay = true;
+        shared.orders.set_open_orders_held(true);
+        let end = frame(&[(34, "000141"), (43, "N"), (52, "20260928-15:20:15"), (11, "*"), (17, "140781.1790608815.2"),
+            (150, "0"), (20, "3"), (39, "0"), (55, "*"), (38, "0"), (32, "0"), (31, "0.00"), (14, "0"), (151, "0"),
+            (6, "0"), (54, "1"), (37, "*"), (60, "20260928-15:20:15"), (40, "2"), (59, "0")]);
+        ccp.handle_exec_report(&end, &mut context, &shared, &None, "DU1");
+        assert!(!shared.orders.open_orders_held(), "answered from the end of the logon replay");
+        assert!(!ccp.awaiting_login_replay);
+        assert!(ccp.status_replay_end_at.is_none(), "no restored-link report at the logon");
+        assert!(shared.orders.drain_order_updates().is_empty());
+    }
+
+    // ibx#251: a link lost before the logon replay ended leaves the
+    // requests to the replay of the new logon.
+    #[test]
+    fn link_loss_before_the_login_replay_leaves_it_to_the_reconnect() {
+        let mut context = Context::new();
+        let mut ccp = CcpState::new();
+        ccp.awaiting_login_replay = true;
+        ccp.handle_disconnect(&mut context, &None);
+        assert!(!ccp.awaiting_login_replay);
+    }
+
+    // The fill of an order at the bid made while the link was lost, as the
+    // trades reply after the reconnect gave it (captures/192/netcut2,
+    // i192_c4_cut60 frame 200, account masked); the order is this
+    // session's order 46.
+    fn outage_fill_frame(order: &str, leaves: &str) -> std::collections::HashMap<u32, String> {
+        frame(&[(34, "000004"), (43, "N"), (97, "Y"), (52, "20260930-19:04:10"), (11, order),
+            (17, "0000e0d5.6abd4f9d.01.01"), (6010, "fourleg"), (150, "2"), (20, "0"), (39, "2"), (167, "CS"),
+            (55, "AAPL"), (100, "NASDAQ"), (207, "NASDAQ"), (38, "1"), (44, "336.58"), (32, "1"), (30, "NASDAQ"),
+            (31, "336.58"), (14, "1"), (151, leaves), (851, "1"), (6, "336.58"), (54, "1"),
+            (37, "00cf16ed.000225ed.6abc8fb0.0001"), (1, "DUXXXXXXX"), (60, "20260930-19:04:10"),
+            (6571, "20260930-19:03:59"), (40, "2"), (6119, "198"), (6121, "46"), (59, "0"), (6008, "265598"),
+            (15, "USD"), (6122, "c"), (6088, "Socket"), (6035, "AAPL"), (6419, "IB")])
+    }
+
+    // ibx#251: a fill made while the link was lost comes in the trades
+    // reply after the reconnect. As the reference (ib-agent#192 C4): the
+    // execution is booked and the position moves, but there is no fill
+    // event and no status; the filled order is dropped and not kept as
+    // finished, so a later cancel of its id gets 10147.
+    #[test]
+    fn outage_fill_is_booked_without_callbacks() {
+        let mut context = Context::new();
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        let instrument = context.market.try_register(265598).unwrap();
+        context.insert_order(crate::types::Order::new(46, instrument, Side::Buy, 1, 33658 * PRICE_SCALE / 100, b'2', b'0', 0));
+        context.set_order_status_forced(46, crate::types::OrderStatus::Submitted);
+        ccp.fill_up_pending = Some("todayfillup88".into());
+
+        ccp.handle_exec_report(&outage_fill_frame("46.0", "0"), &mut context, &shared, &None, "DUXXXXXXX");
+        assert!(shared.orders.drain_fills_with_exec().is_empty(), "no execDetails");
+        assert!(shared.orders.drain_order_updates().is_empty(), "no orderStatus");
+        let stored = shared.orders.drain_untracked_executions();
+        assert_eq!(stored.len(), 1, "kept for reqExecutions and its commission report");
+        assert_eq!(stored[0].1.exec_id, "0000e0d5.6abd4f9d.01.01");
+        assert_eq!(stored[0].1.order_id, 46);
+        assert_eq!(stored[0].0.symbol, "AAPL");
+        assert_eq!(context.position_fixed(instrument), QTY_SCALE, "the position moves");
+        assert!(context.order(46).is_none());
+        assert_eq!(context.finished_status(46), None, "unknown, not finished: a cancel gets 10147");
+        assert_eq!(shared.orders.drain_forgotten_orders(), vec![46]);
+        assert_eq!(ccp.last_exec.as_ref().map(|(id, _)| id.as_str()), Some("0000e0d5.6abd4f9d.01.01"));
+
+        // The same execution again is not booked twice.
+        context.insert_order(crate::types::Order::new(46, instrument, Side::Buy, 1, 33658 * PRICE_SCALE / 100, b'2', b'0', 0));
+        ccp.handle_exec_report(&outage_fill_frame("46.0", "0"), &mut context, &shared, &None, "DUXXXXXXX");
+        assert!(shared.orders.drain_untracked_executions().is_empty());
+
+        // The end frame of the trades reply ends the window.
+        let end = frame(&[(34, "000006"), (43, "N"), (52, "20260930-19:05:27"), (6556, "todayfillup88"),
+            (17, "140781.1790795127.0"), (32, "*")]);
+        ccp.handle_exec_report(&end, &mut context, &shared, &None, "DUXXXXXXX");
+        assert_eq!(ccp.fill_up_pending, None);
+    }
+
+    // ibx#251: a part of an order filled during the outage is booked the
+    // same way; the order keeps working, the status replay sets it.
+    #[test]
+    fn outage_partial_fill_keeps_the_order() {
+        let mut context = Context::new();
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        let instrument = context.market.try_register(265598).unwrap();
+        context.insert_order(crate::types::Order::new(46, instrument, Side::Buy, 2, 33658 * PRICE_SCALE / 100, b'2', b'0', 0));
+        context.set_order_status_forced(46, crate::types::OrderStatus::Submitted);
+        ccp.fill_up_pending = Some("todayfillup88".into());
+        let mut partial = outage_fill_frame("46.0", "1");
+        partial.insert(150, "1".into());
+        partial.insert(39, "1".into());
+        ccp.handle_exec_report(&partial, &mut context, &shared, &None, "DUXXXXXXX");
+        assert!(shared.orders.drain_fills_with_exec().is_empty());
+        assert!(shared.orders.drain_order_updates().is_empty());
+        assert_eq!(shared.orders.drain_untracked_executions().len(), 1);
+        assert_eq!(context.order(46).unwrap().status, crate::types::OrderStatus::Submitted);
+        assert!(shared.orders.drain_forgotten_orders().is_empty());
+    }
+
+    // Outside the trades reply of a reconnect a fill is a live fill.
+    #[test]
+    fn a_fill_outside_the_fill_up_reply_is_live() {
+        let mut context = Context::new();
+        let mut ccp = CcpState::new();
+        let shared = SharedState::new();
+        let instrument = context.market.try_register(265598).unwrap();
+        context.insert_order(crate::types::Order::new(46, instrument, Side::Buy, 1, 33658 * PRICE_SCALE / 100, b'2', b'0', 0));
+        context.set_order_status_forced(46, crate::types::OrderStatus::Submitted);
+        ccp.handle_exec_report(&outage_fill_frame("46.0", "0"), &mut context, &shared, &None, "DUXXXXXXX");
+        assert_eq!(shared.orders.drain_fills_with_exec().len(), 1);
+        assert!(shared.orders.drain_forgotten_orders().is_empty());
+        assert_eq!(context.finished_status(46), Some(crate::types::OrderStatus::Filled));
     }
 
     // Outside a reconnect the status replay end marks nothing.

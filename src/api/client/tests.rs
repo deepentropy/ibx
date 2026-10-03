@@ -5289,6 +5289,22 @@ fn ids_outside_the_reference_range_drop_the_request() {
     assert!(shared.orders.drain_order_errors().is_empty());
 }
 
+// ibx#251: an order the engine dropped (filled while the auth link was
+// lost) leaves the client with no callback: no open order, no status.
+#[test]
+fn a_forgotten_order_leaves_without_callbacks() {
+    let (client, _rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 10.0, ..Default::default() };
+    client.place_order(1, &spy(), &order).unwrap();
+    shared.orders.push_forgotten_order(1);
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.is_empty(), "no callback: {:?}", w.events);
+    client.req_open_orders(&mut w);
+    assert_eq!(w.events, vec!["open_order_end".to_string()]);
+}
+
 // ibx#251: an open-order request made while the auth link is lost gets no
 // answer until the order replay of the new logon has ended; then each kind
 // is answered once, after the replayed statuses, as in the reference.

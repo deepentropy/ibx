@@ -2386,6 +2386,9 @@ impl Gateway {
         hot_loop.set_reconnect_auth(reconnect_auth);
         hot_loop.farm_conn = Some(farm_conn);
         hot_loop.ccp_conn = Some(ccp_conn);
+        // The logon's order status replay request went out with the
+        // post-burst messages (ibx#251).
+        hot_loop.await_login_replay();
         hot_loop.ccp.ccp_sign_key = self.ccp_sign_key.clone();
         hot_loop.ccp.ccp_sign_iv = std::sync::Mutex::new(self.ccp_sign_iv.clone());
         hot_loop.hmds_conn = hmds_conn;
