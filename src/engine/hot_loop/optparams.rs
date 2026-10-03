@@ -428,16 +428,14 @@ mod tests {
     use super::*;
     use base64::Engine as _;
 
-    fn socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
+    fn socket_pair() -> (crate::protocol::connection::MemTransport, crate::protocol::connection::MemTransport) {
+        let (client, server) = crate::protocol::connection::mem_pair();
         (client, server)
     }
 
     /// Every message written to `server`, without the framing, sequence
     /// and time fields.
-    fn sent(server: &mut std::net::TcpStream) -> Vec<String> {
+    fn sent(server: &mut crate::protocol::connection::MemTransport) -> Vec<String> {
         use std::io::Read;
         server.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
         let mut buf = Vec::new();
@@ -558,7 +556,7 @@ mod tests {
         let shared = SharedState::new();
         shared.reference.set_api_features(crate::control::logon::ApiFeatures::parse("ISLAND2NASDAQ,SECDEFTA"));
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         let mut op = OptParams::default();
         op.request(77, symbol, "", "STK", con_id, &mut conn, true, &mut hb, &shared);
@@ -632,7 +630,7 @@ mod tests {
     fn a_future_sends_its_futures_option_query_only() {
         let shared = SharedState::new();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         let mut op = OptParams::default();
         op.request(5, "es", "CME", "FUT", 495512563, &mut conn, true, &mut hb, &shared);
@@ -659,7 +657,7 @@ mod tests {
         let mut context = crate::engine::context::Context::new();
         let mut ccp = super::super::ccp::CcpState::new();
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         ccp.optparams.request(9, "XYZ", "", "STK", 99, &mut conn, true, &mut hb, &shared);
         assert_eq!(sent(&mut server), ["35=U|6040=5|55=XYZ|310=STK|6457=99|6320=1"]);
@@ -691,7 +689,7 @@ mod tests {
 
         // The answer has no row for the conId.
         let (client, mut server) = socket_pair();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         op.request(2, "AAPL", "", "STK", 1234, &mut conn, true, &mut hb, &shared);
         assert_eq!(sent(&mut server).len(), 1);
         let answer = "35=U|6040=5|55=AAPL|6455=1|55=AAPL|310=STK|6455=1|55=AAPL|6457=265598|6070=OPT;STK;";

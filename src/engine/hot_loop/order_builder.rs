@@ -3124,20 +3124,14 @@ mod tests {
         assert_eq!(updates[0].remaining_qty_fixed / crate::types::QTY_SCALE, 7);
     }
 
-    /// Encode one order request through `drain_and_send_orders` over a
-    /// loopback socket and return the sent tags in wire order.
+    /// Encode one order request through `drain_and_send_orders` to a
+    /// scripted peer and return the sent tags in wire order.
     fn wire_tags(req: OrderRequest) -> Vec<(u32, String)> {
         wire_tags_with(|_| {}, req)
     }
 
     /// Same as `wire_tags`, with a hook to set up the engine state first.
     fn wire_tags_with(setup: impl FnOnce(&mut Context), req: OrderRequest) -> Vec<(u32, String)> {
-        use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
-        server.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
-
         let mut context = Context::new();
         context.market.register(265598);
         // A definition that keeps outside RTH for every type, so these
@@ -3150,34 +3144,25 @@ mod tests {
         setup(&mut context);
         context.pending_orders.push(req);
         let shared = Arc::new(SharedState::new());
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let (conn, mut peer) = crate::test_support::Peer::pair();
+        let mut conn = Some(conn);
         drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
-
-        let mut buf = vec![0u8; 8192];
-        let n = server.read(&mut buf).unwrap();
-        buf[..n].split(|&b| b == fix::SOH)
-            .filter_map(|f| {
-                let s = std::str::from_utf8(f).ok()?;
-                let (t, v) = s.split_once('=')?;
-                Some((t.parse().ok()?, v.to_string()))
-            })
-            .collect()
+        // Every message sent, its fields one after the other.
+        peer.messages().iter().flat_map(|m| crate::test_support::parse_fields(m)).collect()
     }
 
     /// Encode one order request and return each sent frame's tags, for
     /// requests that send several orders.
     fn wire_frames(req: OrderRequest, frames: usize) -> Vec<Vec<(u32, String)>> {
         use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
+        let (client, mut server) = crate::protocol::connection::mem_pair();
         server.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
 
         let mut context = Context::new();
         context.market.register(265598);
         context.pending_orders.push(req);
         let shared = Arc::new(SharedState::new());
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
 
         let mut out: Vec<Vec<(u32, String)>> = Vec::new();
@@ -3419,13 +3404,8 @@ mod tests {
     // does not send on submit either).
 
     fn parse_frame(s: &str) -> Vec<(u32, String)> {
-        s.split('|')
-            .filter_map(|f| {
-                let (t, v) = f.split_once('=')?;
-                Some((t.parse().ok()?, v.to_string()))
-            })
-            .filter(|(t, _)| !matches!(t, 6205 | 6531))
-            .collect()
+        use crate::test_support::normalise::{parse_pipe, ORDER_UNSTABLE};
+        parse_pipe(s).into_iter().filter(|(t, _)| !ORDER_UNSTABLE.contains(t)).collect()
     }
 
     /// Send one Modify for a working order `order_id` (AAPL, the given side)
@@ -3440,18 +3420,14 @@ mod tests {
             OrderRequest::Modify { new_order_id: order_id, order_id, qty, kind, tif, attrs },
         )
         .into_iter()
-        .filter(|(t, _)| !matches!(t, 8 | 9 | 34 | 52 | 10))
+        .filter(|(t, _)| !crate::test_support::normalise::FRAMING.contains(t))
         .collect()
     }
 
     fn assert_same_replace(ours: &[(u32, String)], reference: &str) {
-        let want = parse_frame(reference);
-        let ours_tags: Vec<u32> = ours.iter().map(|(t, _)| *t).collect();
-        let want_tags: Vec<u32> = want.iter().map(|(t, _)| *t).collect();
-        assert_eq!(ours_tags, want_tags, "field order differs\n ours: {:?}\n want: {:?}", ours, want);
-        for ((t, a), (_, b)) in ours.iter().zip(want.iter()) {
-            assert_eq!(a, b, "field {}: ours {:?}, reference {:?}", t, a, b);
-        }
+        use crate::test_support::normalise::{assert_same_fields, Normaliser, ORDER_UNSTABLE};
+        let n = Normaliser::framing().drop(ORDER_UNSTABLE);
+        assert_same_fields(&n.apply(ours), &n.pipe(reference));
     }
 
     fn px(v: f64) -> i64 { (v * crate::types::PRICE_SCALE as f64).round() as i64 }
@@ -3662,10 +3638,8 @@ mod tests {
     fn what_if_on_a_working_order_id_does_not_touch_it() {
         let lmt = crate::api::types::Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
             lmt_price: 101.0, ..Default::default() };
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
         let shared = Arc::new(SharedState::new());
         let mut context = Context::new();
         context.market.register(265598);
@@ -3805,9 +3779,7 @@ mod tests {
     /// bytes sent and the order errors raised.
     fn modify_of(existing: Option<Order>) -> (usize, Vec<(i64, i64, String)>) {
         use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
+        let (client, mut server) = crate::protocol::connection::mem_pair();
         server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
 
         let mut context = Context::new();
@@ -3821,7 +3793,7 @@ mod tests {
             tif: b'0', attrs: Default::default(),
         });
         let shared = Arc::new(SharedState::new());
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
         drop(conn);
 
@@ -3860,9 +3832,7 @@ mod tests {
     /// `setup`; return the bytes sent and the order errors raised.
     fn cancel_of(setup: impl FnOnce(&mut Context)) -> (usize, Vec<(i64, i64, String)>) {
         use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
+        let (client, mut server) = crate::protocol::connection::mem_pair();
         server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
 
         let mut context = Context::new();
@@ -3870,7 +3840,7 @@ mod tests {
         setup(&mut context);
         context.pending_orders.push(OrderRequest::Cancel { order_id: 5 });
         let shared = Arc::new(SharedState::new());
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
         drop(conn);
 
@@ -4145,7 +4115,7 @@ mod tests {
 
     /// Every frame the engine sends for the queued requests, split per frame.
     fn drain_frames(context: &mut Context, shared: &Arc<SharedState>, conn: &mut Option<Connection>,
-                    server: &mut std::net::TcpStream) -> Vec<Vec<(u32, String)>> {
+                    server: &mut crate::protocol::connection::MemTransport) -> Vec<Vec<(u32, String)>> {
         use std::io::Read;
         drain_and_send_orders(conn, context, "DU1", &mut HeartbeatState::new(), false, shared);
         server.set_read_timeout(Some(std::time::Duration::from_millis(200))).unwrap();
@@ -4172,10 +4142,8 @@ mod tests {
     // LMT keeps it, and a replace drops it without a second warning.
     #[test]
     fn outside_rth_waits_for_the_definition_then_follows_the_rule() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
         let shared = Arc::new(SharedState::new());
         let mut context = Context::new();
         context.market.register(265598);
@@ -4228,10 +4196,8 @@ mod tests {
     // it finds none, so outside RTH is dropped with 2109.
     #[test]
     fn outside_rth_without_a_definition_uses_the_empty_list() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
         let shared = Arc::new(SharedState::new());
         let mut context = Context::new();
         context.market.register(265598);
@@ -4495,10 +4461,8 @@ mod tests {
         const BEST_LIST: &str = "ACTIVETIM/1,AD/5,ADDONT/1,ADJUST/1,ALERT/1,ALGO/1,ALLOC/1,AON/1,AVGCOST/1,BASKET/1,BENCHPX/1,CASHQTY/1,COND/1,CONDORDER/1,DARKONLY/1,DARKPOLL/1,DAY/3,DEACT/1,DEACTDIS/1,DEACTEOD/1,DIS/1,DUR/1,GAT/1,GTC/1,GTD/1,GTT/1,HID/1,IBKRATS/1,ICE/1,IMB/1,IOC/1,LIT/1,LMT/3,LOC/1,MIDPX/1,MIT/1,MKT/1,MOC/1,MTL/1,NGCOMB/1,NODARK/1,NONALGO/3,OCA/1,OPG/1,OPGREROUT/1,PEGBENCH/1,PEGMID/1,POSTATS/1,POSTONLY/1,PREOPGRTH/1,PRICECHK/1,REL/1,REL2MID/1,RELPCTOFS/1,RPI/1,RTH/1,SCALE/1,SCALEODD/1,SCALERST/1,SIZECHK/1,SMARTSTG/1,SNAPMID/1,SNAPMKT/1,SNAPREL/1,STP/1,STPLMT/1,SWEEP/1,TRAIL/1,TRAILLIT/1,TRAILLMT/1,TRAILMIT/1,WHATIF/1";
         const ISLAND_LIST: &str = "ACTIVETIM/1,AD/5,ADJUST/1,ALERT/1,ALGOCLS/1,ALGOOPG/1,ALLOC/1,AON/3,AVGCOST/1,BASKET/1,BENCHPX/1,CASHQTY/1,COND/1,CONDORDER/1,DAY/3,DEACT/1,DEACTDIS/1,DEACTEOD/1,DIS/1,GAT/1,GTC/1,GTD/1,GTT/1,HID/1,IOC/3,LIT/1,LMT/3,LOC/1,MIT/1,MKT/1,MOC/1,MTL/1,NGCOMB/1,NONALGO/3,OCA/1,OPG/1,PEGBENCH/1,RELPCTOFS/1,RTH/1,SCALE/1,SCALERST/1,SNAPMID/1,SNAPMKT/1,SNAPREL/1,STP/1,STPLMT/1,TRAIL/1,TRAILLIT/1,TRAILLMT/1,TRAILMIT/1,WHATIF/1";
         let run = |exchange: &str, list: &str, req: OrderRequest| {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let (mut server, _) = listener.accept().unwrap();
-            let mut conn = Some(Connection::new_raw(client).unwrap());
+            let (client, mut server) = crate::protocol::connection::mem_pair();
+            let mut conn = Some(Connection::new_mem(client));
             let shared = Arc::new(SharedState::new());
             let mut context = Context::new();
             context.market.register(265598);
@@ -4576,10 +4540,8 @@ mod tests {
         -> (Vec<Vec<(u32, String)>>, Vec<(i64, i64, String)>)
     {
         use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
         let shared = Arc::new(SharedState::new());
         shared.reference.set_short_sale_flags(super_user, omnibus);
         let mut context = Context::new();
@@ -4707,7 +4669,8 @@ mod tests {
     /// A new order's fields without the session fields (framing, sequence,
     /// times, checksum).
     fn order_body(tags: Vec<(u32, String)>) -> Vec<(u32, String)> {
-        tags.into_iter().filter(|(t, _)| !matches!(t, 8 | 9 | 34 | 52 | 60 | 10)).collect()
+        use crate::test_support::normalise::{FRAMING, SESSION_TIMES};
+        tags.into_iter().filter(|(t, _)| !FRAMING.contains(t) && !SESSION_TIMES.contains(t)).collect()
     }
 
     // ibx#375: every order type goes out field for field the same through
@@ -4845,11 +4808,6 @@ mod tests {
     #[test]
     fn new_order_is_the_captured_frame() {
         const LMT: &str = "35=D|11=7.0|44=337.93|1=DU1|6010=pm0925-fill-BUY|6122=c|6433=1|6121=7|6119=250|38=100|40=2|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
-        use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
-        server.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
         let mut context = Context::new();
         context.market.register(265598);
         context.set_symbol(0, "AAPL".to_string());
@@ -4861,20 +4819,14 @@ mod tests {
             attrs: crate::types::OrderAttrs { order_ref: "pm0925-fill-BUY".into(), outside_rth: true, ..Default::default() } });
         let shared = Arc::new(SharedState::new());
         shared.reference.set_api_client_id(250);
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let (conn, mut peer) = crate::test_support::Peer::pair();
+        let mut conn = Some(conn);
         drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
-        let mut buf = vec![0u8; 8192];
-        let n = server.read(&mut buf).unwrap();
-        let mut ours: Vec<(u32, String)> = order_body(buf[..n].split(|&b| b == fix::SOH)
-            .filter_map(|f| {
-                let (t, v) = std::str::from_utf8(f).ok()?.split_once('=')?;
-                Some((t.parse().ok()?, v.to_string()))
-            })
-            .collect());
-        ours.retain(|(t, _)| *t != 35);
-        let mut want = parse_frame(LMT);
-        want.retain(|(t, _)| *t != 35);
-        assert_eq!(ours, want);
+        // The session fields and 35 out, the account masked on both sides.
+        let n = crate::test_support::Normaliser::framing().keep_ids().drop(&[35]);
+        let sent = peer.messages();
+        assert_eq!(sent.len(), 1);
+        crate::test_support::assert_same_fields(&n.msg(&sent[0]), &n.pipe(LMT));
     }
 
     // ibx#263 (captured 02/10/2026, paper, AAPL, account masked,
@@ -4898,11 +4850,6 @@ mod tests {
             panic!("not an order");
         };
         assert!(matches!(req, OrderRequest::SubmitEx { kind: crate::types::OrderKind::Stop { .. }, .. }), "{req:?}");
-        use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
-        server.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
         let mut context = Context::new();
         context.market.register(265598);
         context.set_symbol(0, "AAPL".to_string());
@@ -4910,22 +4857,13 @@ mod tests {
         context.pending_orders.push(req);
         let shared = Arc::new(SharedState::new());
         shared.reference.set_api_client_id(198);
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let (conn, mut peer) = crate::test_support::Peer::pair();
+        let mut conn = Some(conn);
         drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
-        let mut buf = vec![0u8; 8192];
-        let n = server.read(&mut buf).unwrap();
-        let mut ours: Vec<(u32, String)> = order_body(buf[..n].split(|&b| b == fix::SOH)
-            .filter_map(|f| {
-                let (t, v) = std::str::from_utf8(f).ok()?.split_once('=')?;
-                Some((t.parse().ok()?, v.to_string()))
-            })
-            .collect());
-        ours.retain(|(t, _)| !matches!(t, 35 | 11));
-        let mut want = parse_frame(STP);
-        want.retain(|(t, _)| !matches!(t, 35 | 11));
-        for (t, v) in want.iter_mut() {
-            if *t == 1 { *v = "DU1".into(); }
-        }
+        // The reference's ClOrdID is its own: 11 out with the session fields.
+        let n = crate::test_support::Normaliser::framing().drop(&[35, 11]);
+        let ours = n.msg(&peer.messages()[0]);
+        let want = n.pipe(STP);
         let (mine, theirs) = common_order(&ours, STP);
         assert_eq!(mine, theirs, "field order");
         let sorted = |mut v: Vec<(u32, String)>| { v.sort(); v };
@@ -5160,7 +5098,7 @@ mod tests {
             OrderRequest::Modify { new_order_id: order_id, order_id, qty: 1, kind, tif, attrs },
         )
         .into_iter()
-        .filter(|(t, _)| !matches!(t, 8 | 9 | 34 | 52 | 10))
+        .filter(|(t, _)| !crate::test_support::normalise::FRAMING.contains(t))
         .collect()
     }
 
@@ -5182,7 +5120,7 @@ mod tests {
         ];
         for (captured, id, side, kind, tif, attrs, price_mgmt) in cases {
             let ours = replace_fields_mgmt(id, side, kind, tif, attrs, price_mgmt);
-            assert_same_replace(&ours, &captured.replace("DUXXXXXXX", "DU1"));
+            assert_same_replace(&ours, captured);
         }
     }
 
@@ -5443,9 +5381,7 @@ mod tests {
     #[test]
     fn a_price_off_the_grid_is_refused_with_110() {
         use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
+        let (client, mut server) = crate::protocol::connection::mem_pair();
         server.set_nonblocking(true).unwrap();
         let mut context = Context::new();
         context.market.register(265598);
@@ -5454,7 +5390,7 @@ mod tests {
         context.pending_orders.push(OrderRequest::SubmitEx { order_id: 32, instrument: 0, side: Side::Buy, qty: 1,
             kind: crate::types::OrderKind::Rel { price: 0, offset: px(-0.5) }, tif: b'0', attrs: Default::default() });
         let shared = Arc::new(SharedState::new());
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
         let mut buf = [0u8; 256];
         assert!(server.read(&mut buf).is_err(), "nothing sent");
@@ -5506,15 +5442,13 @@ mod tests {
         frames: usize,
     ) -> (Vec<Vec<(u32, String)>>, Context) {
         use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
+        let (client, mut server) = crate::protocol::connection::mem_pair();
         server.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
         let mut context = Context::new();
         context.market.register(265598);
         setup(&mut context);
         let shared = Arc::new(SharedState::new());
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         for req in reqs {
             context.pending_orders.push(req);
             drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
@@ -5731,16 +5665,14 @@ mod tests {
     fn orders_that_depend_on_a_waiting_order_go_out_after_it() {
         use std::io::Read;
         use crate::types::OrderKind as K;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (mut server, _) = listener.accept().unwrap();
+        let (client, mut server) = crate::protocol::connection::mem_pair();
         server.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
         let mut context = Context::new();
         context.market.register(265598);
         price_mgmt_session(&mut context);
         let types = context.rth_types.remove(&(265598, "BEST".to_string())).unwrap();
         let shared = Arc::new(SharedState::new());
-        let mut conn = Some(Connection::new_raw(client).unwrap());
+        let mut conn = Some(Connection::new_mem(client));
         let mut hb = HeartbeatState::new();
         let child = |order_id, kind, oca: &str| OrderRequest::SubmitEx {
             order_id, instrument: 0, side: Side::Sell, qty: 1, kind, tif: b'1',
