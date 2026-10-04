@@ -148,24 +148,23 @@ fn overnight_time_in_force() {
 // orders, up to the second SPY request (src/golden/l1.rs
 // `spy_and_qqq_in_the_session`). Left out as in src/golden/orders.rs: TRAIL MIT, TRAIL LIT,
 // PASSV REL, RPI and PEG BEST (ibx#469), the directed OVERNIGHT order
-// (ibx#486). The cancel of an exchange map (264=626) carries 6088=Socket in
-// some recordings and not in others (ibx#487, see
-// `exchange_map_cancel_source`): left out of that frame. The commission
-// reports (no order id) are those of the fills of the orders left out.
+// (ibx#486). The commission reports (no order id) are those of the fills
+// of the orders left out.
 #[test]
 fn rth_order_types() {
     check("20260928/rth_order_types", Options::default().mask(known).skip_orders(&[1, 2, 3, 4, 5, 6, 7, 10]).until(6581)
-        .frame_mask(|f| if exchange_map(f) { f.retain(|(t, _)| *t != 6088) })
         .keep(|l| !l.starts_with("commissionAndFeesReport")));
 }
 
-// The exchange map cancel of QQQ (seq 5489) has no 6088; those of AAPL and
-// SPY in other recordings have 6088=Socket (02/10/2026 seq 2461 and 2590,
-// 28/09/2026 seq 5292 and 22088); ibx always writes it.
+// The exchange map cancel of QQQ (seq 5489) has no 6088: the QQQ request
+// was cancelled before the map came; those of AAPL and SPY in other
+// recordings have 6088=Socket, their requests still running (02/10/2026
+// seq 2461 and 2590, 28/09/2026 seq 5292 and 22088) (ibx#487).
 #[test]
-#[ignore = "ibx#487: the 6088 of an exchange map cancel (264=626) follows a rule not read yet"]
 fn exchange_map_cancel_source() {
-    check("20260928/rth_order_types", Options::default().mask(known).skip_orders(&[1, 2, 3, 4, 5, 6, 7, 10]).until(6581));
+    let o = check("20260928/rth_order_types", Options::default().mask(known).skip_orders(&[1, 2, 3, 4, 5, 6, 7, 10]).until(6581)
+        .keep(|l| !l.starts_with("commissionAndFeesReport")));
+    assert!(o.frames_compared > 10, "{}", o.frames_compared);
 }
 
 // A SMART stock combo (SPY, QQQ) bought and sold in RTH (30/09/2026,

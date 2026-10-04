@@ -305,6 +305,8 @@ pub(crate) struct ExchangeMapSub {
     pub(crate) sec_type: String,
     /// From its acknowledgement.
     pub(crate) server_tag: Option<u32>,
+    /// The instrument whose acknowledgement asked it.
+    pub(crate) instrument: InstrumentId,
 }
 
 /// The generic tick of the exchange map ("EXCH MAP").
@@ -904,6 +906,7 @@ impl FarmState {
             exchange,
             sec_type: fix_sec_type(&sec_type).to_string(),
             server_tag: None,
+            instrument,
         };
         self.next_md_req_id += 1;
         log::info!("Starting to observe the exchange map {}:{} (instrument {}, id {})", code, sec_type, instrument, sub.req_id);
@@ -915,21 +918,30 @@ impl FarmState {
     /// Subscribe ("1") or cancel ("2") an exchange map, as the reference
     /// writes it (captured 02/10/2026):
     /// `35=V|263=1|146=1|262=3|6008=265598|207=BEST|167=CS|264=626|6088=Socket`.
+    /// 6088=Socket only while a streaming API request of the contract
+    /// runs, the rule of every entry of the contract's record (the top
+    /// observer's priority is 8, MKTDATA-L1 3 row 8; ibx#487): none when
+    /// the map was asked by a depth request (depth_single_iex of
+    /// 28/09/2026) or when the request was cancelled before the map came
+    /// (rth_order_types of 28/09/2026, QQQ).
     fn send_exchange_map_request(&self, sub: &ExchangeMapSub, action: &str, sink: &mut dyn FixSink, hb: &mut HeartbeatState) -> bool {
         let id = sub.req_id.to_string();
         let ts = chrono_free_timestamp();
-        let sent = sink.send_comp(&[
+        let mut tags = vec![
             (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-            (fix::TAG_SENDING_TIME, &ts),
+            (fix::TAG_SENDING_TIME, &*ts),
             (263, action),
             (146, "1"),
-            (262, &id),
-            (6008, &sub.con_id),
-            (207, &sub.exchange),
-            (167, &sub.sec_type),
+            (262, id.as_str()),
+            (6008, sub.con_id.as_str()),
+            (207, sub.exchange.as_str()),
+            (167, sub.sec_type.as_str()),
             (264, EXCHANGE_MAP_TICK),
-            (6088, "Socket"),
-        ]);
+        ];
+        if self.top_snapshot(sub.instrument) == Some(false) {
+            tags.push((6088, "Socket"));
+        }
+        let sent = sink.send_comp(&tags);
         if sent && sub.farm == PRIMARY_MD {
             hb.last_farm_sent = Instant::now();
         }
@@ -2595,6 +2607,33 @@ mod tests {
         msg.extend_from_slice(&body);
         msg.extend_from_slice(b"\x018349=70306FA0\x01");
         msg
+    }
+
+    // ibx#487: the exchange map's cancel has 6088=Socket only while the
+    // contract's streaming request runs (rth_order_types of 28/09/2026: the
+    // QQQ request was cancelled before its map came).
+    #[test]
+    fn exchange_map_cancel_after_the_request_has_no_source() {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let mut sink = RecordingSink(Vec::new());
+        let id = context.market.register(320227571);
+        context.market.set_routing(id, "STK", "SMART");
+        farm.send_mktdata_subscribe(320227571, "QQQ", "SMART", "STK", "", 0.0, "", "", id, 0, &mut None, &mut hb);
+        let bid_ask = farm.next_md_req_id - 2;
+        let ack = format!("8=O\x0135=Q\x012486,{bid_ask},0.01,0,0,9c,,0,1");
+        farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
+        let map_id = bid_ask + 2;
+        let has_source = |m: &Vec<(u32, String)>| m.iter().any(|(t, _)| *t == 6088);
+        assert!(has_source(&sink.0[0]), "asked while the request runs");
+        farm.send_mktdata_unsubscribe(id, &mut None, &mut hb);
+        let ack = format!("8=O\x0135=Q\x0112708,{map_id},0.01,0,0,9c,,0,1");
+        farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
+        assert!(farm.handle_exchange_map(&exchange_map_frame(12708, EXCH_MAP_9C), &mut sink, &shared, &mut hb));
+        let cancel = sink.0.last().unwrap();
+        assert!(cancel.iter().any(|(t, v)| *t == 263 && v == "2") && !has_source(cancel), "{cancel:?}");
     }
 
     // ibx#441, captured 02/10/2026: the first ack with BBO exchange 9c
