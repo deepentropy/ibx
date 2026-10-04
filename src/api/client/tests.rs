@@ -33,6 +33,8 @@ fn connect_caches_reconnect_credentials() {
         farm_name: String::new(),
         session_epoch: String::new(),
         ns_secure_refused: false,
+        use_ssl: true,
+        ssl_farms: String::new(),
     });
     assert!(!hot_loop.has_reconnect_host(), "gateway leaves the host empty");
 

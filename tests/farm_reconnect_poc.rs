@@ -170,6 +170,8 @@ fn ccp_reconnect_with_cached_credentials() {
         farm_name: gw.farm_name.clone(),
         session_epoch: gw.session_epoch.clone(),
         ns_secure_refused: gw.ns_secure_refused,
+        use_ssl: gw.use_ssl,
+        ssl_farms: gw.ssl_farms.clone(),
     };
 
     println!("Full auth: {}ms | session_id={}", full_auth_ms, auth.server_session_id);
@@ -228,6 +230,8 @@ fn auth_login_and_reconnect_without_key_exchange_live() {
         farm_name: gw.farm_name.clone(),
         session_epoch: gw.session_epoch.clone(),
         ns_secure_refused: gw.ns_secure_refused,
+        use_ssl: gw.use_ssl,
+        ssl_farms: gw.ssl_farms.clone(),
     };
     drop(ccp_conn);
     let reconnect = reconnect_ccp_session(&auth).expect("auth reconnect without key exchange");

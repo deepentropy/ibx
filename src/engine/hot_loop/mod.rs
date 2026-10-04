@@ -2000,10 +2000,11 @@ impl HotLoop {
         let spawned = std::thread::Builder::new()
             .name(format!("{}-connect", name))
             .spawn(move || {
+                let link = auth.farm_link(&name, crate::gateway::FarmService::of_slot(slot));
                 let result = crate::gateway::connect_farm_opts(
                     &host, &name, &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key, &auth.hw_info, &auth.encoded, slot, false,
-                    !auth.ns_secure_refused,
+                    link,
                 ).map(|(conn, _)| conn);
                 let _ = tx.send(result);
             });
@@ -2135,11 +2136,12 @@ impl HotLoop {
         std::thread::Builder::new()
             .name(format!("farm-reconnect-{}", attempt))
             .spawn(move || {
+                let link = auth.farm_link(&farm_name, crate::gateway::FarmService::MarketData);
                 let result = crate::gateway::connect_farm_opts(
                     &farm_host, &farm_name,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
-                    &auth.hw_info, &auth.encoded, 18, true, !auth.ns_secure_refused,
+                    &auth.hw_info, &auth.encoded, 18, true, link,
                 ).map(|(conn, _)| conn);
                 let _ = tx.send(result);
             })
@@ -2284,11 +2286,12 @@ impl HotLoop {
         std::thread::Builder::new()
             .name(format!("hmds-reconnect-{}", attempt))
             .spawn(move || {
+                let link = auth.farm_link(&auth.hmds_farm, crate::gateway::FarmService::Historical);
                 let result = crate::gateway::connect_farm_opts(
                     &auth.hmds_host, &auth.hmds_farm,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
-                    &auth.hw_info, &auth.encoded, 17, true, !auth.ns_secure_refused,
+                    &auth.hw_info, &auth.encoded, 17, true, link,
                 ).map(|(conn, _)| conn);
                 let _ = tx.send(result);
             })
@@ -3461,6 +3464,8 @@ mod tests {
             farm_name: String::new(),
             session_epoch: String::new(),
             ns_secure_refused: false,
+            use_ssl: true,
+            ssl_farms: String::new(),
         }
     }
 
