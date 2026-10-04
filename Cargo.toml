@@ -11,6 +11,12 @@ crate-type = ["lib", "cdylib"]
 name = "ibx"
 path = "src/main.rs"
 
+# Farm message to API callback, through the in-memory links (ibx#446).
+[[bin]]
+name = "bench_md_dispatch"
+path = "src/bin/bench_md_dispatch.rs"
+required-features = ["test-support"]
+
 [features]
 default = []
 python = ["pyo3"]
