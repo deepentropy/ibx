@@ -5169,6 +5169,26 @@ impl ClientCore {
 mod tests {
     use super::*;
 
+    // ibx#486: whyHeld as jclient.pe.iK(): only PreSubmitted; "child" while
+    // the parent is not done with a fill; "trigger" for the stop types.
+    #[test]
+    fn why_held_child_and_trigger() {
+        let core = ClientCore::new();
+        assert_eq!(core.why_held("PreSubmitted", "STP", 0), "trigger");
+        assert_eq!(core.why_held("PreSubmitted", "trail limit", 0), "trigger");
+        assert_eq!(core.why_held("Submitted", "STP", 0), "");
+        assert_eq!(core.why_held("PreSubmitted", "LMT", 0), "");
+        assert_eq!(core.why_held("PreSubmitted", "STP", 3), "child,trigger");
+        let report = |status: &str, filled: f64| OrderReport {
+            view: None, status: status.into(), filled, remaining: 1.0 - filled, avg_fill_price: 0.0, perm_id: 0,
+            parent_id: 0, last_fill_price: 0.0, client_id: 0, why_held: String::new(),
+        };
+        core.remember_report(3, report("Cancelled", 0.0));
+        assert_eq!(core.why_held("PreSubmitted", "LMT", 3), "child", "cancelled with nothing filled");
+        core.remember_report(3, report("Filled", 1.0));
+        assert_eq!(core.why_held("PreSubmitted", "STP", 3), "trigger");
+    }
+
     // ibx#486: the reference's hash map order (BASE after USD, the order of
     // the account_summary capture of 26/09/2026) and its account values.
     #[test]
