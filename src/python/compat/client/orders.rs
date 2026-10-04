@@ -54,7 +54,8 @@ impl EClient {
         // Refused before sending, like the reference: error() only.
         let session_account = self.account_id.lock().unwrap().clone().unwrap_or_default();
         let contract_zone = shared.reference.time_zone_id(contract.con_id);
-        if let Some((code, message)) = ClientCore::refusal_before_sending(&api_order, &contract.exchange)
+        let account_pending = ClientCore::order_account_pending(&api_order, &shared.reference, &session_account);
+        if let Some((code, message)) = ClientCore::refusal_before_sending_for(&api_order, &contract.exchange, account_pending)
             .or_else(|| ClientCore::algo_definition_refusal(&api_order, &contract.exchange, &shared.reference))
             .or_else(|| ClientCore::account_config_refusal(
                 &api_order, shared.reference.account_features().as_deref(), &session_account))

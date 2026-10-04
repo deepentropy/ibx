@@ -19,7 +19,8 @@ impl EClient {
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_historical_data", &[req_id, contract.con_id]) { return Ok(()); }
         if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration, bar_size, what_to_show,
-            format_date, keep_up_to_date, &contract.sec_type, &contract.exchange, self.shared.reference.backfill_years_limit()) {
+            format_date, keep_up_to_date, &contract.sec_type, &contract.exchange, self.shared.reference.backfill_years_limit(),
+            contract.include_expired) {
             self.shared.reference.push_historical_error(req_id, code, text);
             return Ok(());
         }

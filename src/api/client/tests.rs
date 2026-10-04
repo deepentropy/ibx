@@ -6773,3 +6773,50 @@ fn managed_accounts_are_the_logon_account_list() {
     client.req_managed_accts(&mut w);
     assert_eq!(w.0, ["DU123", "DUXXXXXX2,DUXXXXXX1", "DUXXXXXXX"]);
 }
+
+// ibx#421: accounts whose application is not approved (8092): an order
+// for one is refused with 10136 and nothing is sent (not on an FA
+// session); reqPositions gives 10275 and stops when every account is
+// pending, gives it as a warning and goes on when some are;
+// reqPositionsMulti for one gives 10275 with its request id;
+// reqAccountUpdates gives the warning and goes on.
+#[test]
+fn pending_accounts_refuse_orders_and_positions() {
+    #[derive(Default)]
+    struct Errors(Vec<(i64, i64, String)>);
+    impl Wrapper for Errors {
+        fn error(&mut self, req_id: i64, code: i64, msg: &str, _json: &str) { self.0.push((req_id, code, msg.to_string())); }
+    }
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    shared.reference.set_pending_accounts(vec!["DU123".into()]);
+    let order = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 100.0, ..Default::default() };
+    client.place_order(5, &spy(), &order).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    assert_eq!(shared.orders.drain_order_errors(),
+        [(5, 10136, "Cannot submit trades until the application is finished and approved".to_string())]);
+    shared.reference.set_fa_session(true);
+    client.place_order(6, &spy(), &order).unwrap();
+    assert!(rx.try_recv().is_ok(), "an FA session is not checked");
+    shared.reference.set_fa_session(false);
+
+    let text = |a: &str| format!("Positions info is not available for account(s): {} until the application is finished and approved.", a);
+    shared.reference.set_managed_accounts(vec!["DU123".into()]);
+    client.req_positions(&mut Errors::default());
+    assert_eq!(shared.orders.drain_order_errors(), [(-1, 10275, text("DU123"))]);
+    assert!(!client.core.positions_sub.lock().unwrap().is_some(), "every account pending: the request stops");
+
+    shared.reference.set_managed_accounts(vec!["DU123".into(), "DU456".into()]);
+    client.req_positions(&mut Errors::default());
+    assert_eq!(shared.orders.drain_order_errors(), [(-1, 10275, text("DU123"))]);
+    assert!(client.core.positions_sub.lock().unwrap().is_some(), "some pending: a warning, the request goes on");
+    client.cancel_positions();
+
+    client.req_positions_multi(9, "DU123", "", &mut Errors::default());
+    assert_eq!(shared.orders.drain_order_errors(), [(9, 10275, text("DU123"))]);
+    client.req_positions_multi(10, "DU456", "", &mut Errors::default());
+    assert!(shared.orders.drain_order_errors().is_empty());
+
+    client.req_account_updates(true, "DU123");
+    assert_eq!(shared.orders.drain_order_errors()[0], (-1, 10275, text("DU123")));
+}

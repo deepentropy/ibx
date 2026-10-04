@@ -33,7 +33,8 @@ impl EClient {
         // 10314) and no query (ibx#430).
         let shared = self.shared_state()?;
         if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration_str, bar_size_setting,
-            what_to_show, format_date, keep_up_to_date, &contract.sec_type, &contract.exchange, shared.reference.backfill_years_limit()) {
+            what_to_show, format_date, keep_up_to_date, &contract.sec_type, &contract.exchange, shared.reference.backfill_years_limit(),
+            contract.include_expired) {
             shared.reference.push_historical_error(req_id, code, text);
             return Ok(());
         }

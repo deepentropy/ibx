@@ -235,6 +235,85 @@ pub fn managed_accounts_text(accounts: &[String]) -> String {
     accounts.join(",")
 }
 
+/// The pending accounts of a logon reply or update (tag 8092, ibx#421):
+/// the accounts whose application is not approved yet, a comma set
+/// (`jfix.dr.a(String)`).
+pub fn pending_accounts(tag: &str) -> Vec<String> {
+    tag.split(',').map(str::trim).filter(|a| !a.is_empty()).map(String::from).collect()
+}
+
+/// Text of error 10136: an order or an exercise for an account whose
+/// application is not approved (`jextend.bH.S()@5127`, `jextend.bG.n()@470`).
+pub const PENDING_ACCOUNT: &str = "Cannot submit trades until the application is finished and approved";
+
+/// Text of error 10275 for the pending accounts `accounts`, comma joined
+/// (`jextend.cl.n()@162`, `jextend.bk.n()@29`, `jextend.bl.n()@141`).
+pub fn positions_not_available(accounts: &[&str]) -> String {
+    format!("Positions info is not available for account(s): {} until the application is finished and approved.",
+        accounts.join(","))
+}
+
+/// Text of warning 2134, sent with id -1 to the API clients when the data
+/// permissions changed after a market data request was refused for an API
+/// subscription (`jextend.d9.F`, `jextend.dL.K()`).
+pub const MARKET_DATA_SUBSCRIPTION_CHANGED: &str = "Market Data subscription has been changed.";
+
+/// API error code of [`MARKET_DATA_SUBSCRIPTION_CHANGED`].
+pub const MARKET_DATA_SUBSCRIPTION_CHANGED_CODE: i64 = 2134;
+
+/// A change of the data permissions within this time of the last one is
+/// ignored (`jclient.ij.onPermissionsChanged()@28-38`).
+const PERMISSION_CHANGE_GUARD: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Shortest time between two market data resubscriptions (the reference's
+/// task "ResubscribeMarketData", `jutils.thread.U.a(String, int,
+/// Runnable)` with 30000 ms).
+const RESUBSCRIBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The reference's timing of a data permission change (ibx#421,
+/// `jclient.ij`): a change within 1 s of the last one is ignored; else
+/// the market data resubscription is scheduled, at once when none ran in
+/// the last 30 s, else when 30 s have passed since the last one; a
+/// resubscription already scheduled is not scheduled again
+/// (`jutils.thread.A.a()`).
+#[derive(Debug, Default)]
+pub struct PermissionChange {
+    last_change: Option<std::time::Instant>,
+    last_run: Option<std::time::Instant>,
+    due: Option<std::time::Instant>,
+}
+
+impl PermissionChange {
+    /// A data permission change at `now`. False when it is ignored.
+    pub fn change(&mut self, now: std::time::Instant) -> bool {
+        if self.last_change.is_some_and(|t| now.saturating_duration_since(t) <= PERMISSION_CHANGE_GUARD) {
+            log::info!("Data permission change within 1 s of the last one: ignored");
+            return false;
+        }
+        self.last_change = Some(now);
+        if self.due.is_none() {
+            let delay = match self.last_run {
+                Some(t) => RESUBSCRIBE_INTERVAL.saturating_sub(now.saturating_duration_since(t)),
+                None => std::time::Duration::ZERO,
+            };
+            self.due = Some(now + delay);
+            log::info!("Resubscribing market data is scheduled in {:?}. desubscribe=true", delay);
+        }
+        true
+    }
+
+    /// Whether the scheduled resubscription is due at `now`; it is then
+    /// taken as run.
+    pub fn take_due(&mut self, now: std::time::Instant) -> bool {
+        if self.due.is_some_and(|t| t <= now) {
+            self.due = None;
+            self.last_run = Some(now);
+            return true;
+        }
+        false
+    }
+}
+
 /// Most years of a historical data request: tag 6774 of the logon when
 /// above 0, else 1 (`jclient.gi.a(jfix.dk, jfix.bb, boolean, boolean, boolean)@573-594`).
 pub fn max_backfill_years(tag: Option<&str>) -> i32 {
@@ -372,5 +451,37 @@ mod tests {
         assert_eq!(managed_accounts(" DUXXXXXX1 ,,DUXXXXXX2,"), ["DUXXXXXX1", "DUXXXXXX2"]);
         assert!(managed_accounts("").is_empty());
         assert_eq!(managed_accounts_text(&["DUXXXXXXX".to_string()]), "DUXXXXXXX");
+    }
+
+    // ibx#421: the pending accounts (8092) and the 10275 text.
+    #[test]
+    fn pending_accounts_of_8092() {
+        assert_eq!(pending_accounts("DUXXXXXX1, DUXXXXXX2,"), ["DUXXXXXX1", "DUXXXXXX2"]);
+        assert!(pending_accounts("").is_empty());
+        assert_eq!(positions_not_available(&["DUXXXXXX1", "DUXXXXXX2"]),
+            "Positions info is not available for account(s): DUXXXXXX1,DUXXXXXX2 until the application is finished and approved.");
+    }
+
+    // ibx#421: a permission change within 1 s of the last one is ignored;
+    // the resubscription runs at once, then at most every 30 s, and one
+    // already scheduled is not scheduled again.
+    #[test]
+    fn permission_change_timing() {
+        use std::time::{Duration, Instant};
+        let t = Instant::now();
+        let mut p = PermissionChange::default();
+        assert!(!p.take_due(t));
+        assert!(p.change(t));
+        assert!(p.take_due(t), "first resubscription at once");
+        assert!(!p.take_due(t));
+        assert!(!p.change(t + Duration::from_millis(1000)), "within 1 s");
+        assert!(!p.take_due(t + Duration::from_secs(40)), "the ignored change scheduled nothing");
+        assert!(p.change(t + Duration::from_secs(10)));
+        assert!(!p.take_due(t + Duration::from_secs(29)));
+        assert!(p.change(t + Duration::from_secs(20)), "taken, not scheduled again");
+        assert!(p.take_due(t + Duration::from_secs(30)), "30 s after the last run");
+        assert!(!p.take_due(t + Duration::from_secs(31)));
+        assert!(p.change(t + Duration::from_secs(70)));
+        assert!(p.take_due(t + Duration::from_secs(70)), "more than 30 s after the last run: at once");
     }
 }

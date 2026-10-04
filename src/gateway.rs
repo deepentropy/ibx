@@ -417,6 +417,8 @@ pub struct LogonValues {
     pub features: Option<String>,
     /// Data permission stamp (6764), None when absent or empty.
     pub data_permissions: Option<String>,
+    /// Pending accounts (8092), None when absent (ibx#421).
+    pub pending_accounts: Option<Vec<String>>,
 }
 
 impl LogonValues {
@@ -437,6 +439,7 @@ impl LogonValues {
             clock_offset_ms,
             features: tags.get(&6542).cloned(),
             data_permissions: tags.get(&TAG_DATA_PERMISSIONS).filter(|v| !v.is_empty()).cloned(),
+            pending_accounts: tags.get(&TAG_PENDING_ACCOUNTS).map(|v| crate::control::logon::pending_accounts(v)),
         }
     }
 }
@@ -446,6 +449,12 @@ pub(crate) const TAG_DATA_PERMISSIONS: u32 = 6764;
 
 /// The SSL farm list of a logon reply (ibx#276).
 pub(crate) const TAG_SSL_FARMS: u32 = 8449;
+
+/// The pending accounts of a logon reply (ibx#421).
+pub(crate) const TAG_PENDING_ACCOUNTS: u32 = 8092;
+
+/// The private label misc URLs of a logon reply (ibx#421).
+pub(crate) const TAG_MISC_URLS: u32 = 6321;
 
 /// Build encrypted farm logon message.
 pub fn build_farm_encrypted_logon(
@@ -2700,13 +2709,17 @@ impl Gateway {
 }
 
 /// Apply the values every logon reply sets (ibx#421): the clock offset of
-/// the current time request and the feature tokens that gate API
-/// requests. A reply read with no feature list (every captured reply has
-/// one) leaves the tokens as they are.
+/// the current time request, the feature tokens that gate API requests,
+/// and the pending accounts (8092, none when absent: the reference sets
+/// them from every logon reply, `jclient.gi.a(jfix.dk, jfix.bb, boolean,
+/// boolean, boolean)@1583` → `trader.cm.j.b(jfix.dk)`). A reply read with
+/// no feature list (every captured reply has one) leaves the tokens as
+/// they are.
 pub(crate) fn apply_logon_values(logon: &LogonValues, shared: &SharedState) {
     if let Some(offset) = logon.clock_offset_ms {
         shared.reference.clock().set(offset);
     }
+    shared.reference.set_pending_accounts(logon.pending_accounts.clone().unwrap_or_default());
     if let Some(features) = &logon.features {
         shared.reference.set_api_features(crate::control::logon::ApiFeatures::parse(features));
     }
@@ -3091,7 +3104,8 @@ mod tests {
     // paper reply of 02/10/2026 and the same reply with two accounts.
     #[test]
     fn managed_accounts_of_a_logon_reply() {
-        let captured = "35=A34=00000143=N52=20261002-08:54:0198=0108=10141=Y            6059=17909146461=DUXXXXXXX6558=18364=06095=DUXXXXXXX6961=0";
+        let captured = "35=A\x0134=000001\x0143=N\x0152=20261002-08:54:01\x0198=0\x01108=10\x01141=Y\x01\
+            6059=1790914646\x011=DUXXXXXXX\x016558=1\x018364=0\x016095=DUXXXXXXX\x016961=0\x01";
         let accounts = |frame: &str| {
             let tags = fix_parse(frame.as_bytes());
             crate::control::logon::managed_accounts(tags.get(&6095).map(String::as_str).unwrap_or(""))
@@ -3136,13 +3150,26 @@ mod tests {
         assert_eq!(late.clock_offset_ms, None, "handled too late");
     }
 
+    // ibx#421: every logon reply sets the pending accounts (8092); a reply
+    // without the tag leaves none (the captured replies have none).
+    #[test]
+    fn logon_reply_sets_the_pending_accounts() {
+        let shared = SharedState::new();
+        let mut tags = captured_logon_tags();
+        tags.insert(TAG_PENDING_ACCOUNTS, "DUXXXXXX1".into());
+        apply_logon_values(&LogonValues::read(&tags, 0, 0), &shared);
+        assert!(shared.reference.account_pending("DUXXXXXX1"));
+        apply_logon_values(&LogonValues::read(&captured_logon_tags(), 0, 0), &shared);
+        assert!(!shared.reference.account_pending("DUXXXXXX1"));
+    }
+
     // ibx#421: the first logon sets the clock, the feature tokens and the
     // years limit; a version cutoff above the client's gives 2172 with
     // id -1, none when it does not apply.
     #[test]
     fn first_logon_values_reach_the_api() {
         let shared = SharedState::new();
-        let logon = LogonValues { clock_offset_ms: Some(60_000), features: Some("APIELOG".into()), data_permissions: None };
+        let logon = LogonValues { clock_offset_ms: Some(60_000), features: Some("APIELOG".into()), ..Default::default() };
         apply_first_logon(&logon, Some("10411"), Some("20261201"), 199, &shared);
         assert_eq!(shared.reference.clock().offset_ms(), 60_000);
         assert!(!shared.reference.matching_symbols_allowed());

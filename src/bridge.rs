@@ -791,6 +791,9 @@ pub struct ReferenceState {
     /// The account ids of the logon's account list (6095), in logon order
     /// (ibx#420).
     managed_accounts: Mutex<Vec<String>>,
+    /// The accounts whose application is not approved (8092 of the last
+    /// logon reply or logon update, ibx#421).
+    pending_accounts: Mutex<Vec<String>>,
     /// FA session, from CCP logon tag 6108 (ibx#481).
     fa_session: std::sync::atomic::AtomicBool,
     /// The logon's super user and omnibus flags (ibx#417): either one lets
@@ -875,6 +878,7 @@ impl ReferenceState {
             family_codes: Mutex::new(Vec::new()),
             white_branding_id: Mutex::new(String::new()),
             managed_accounts: Mutex::new(Vec::new()),
+            pending_accounts: Mutex::new(Vec::new()),
             fa_session: std::sync::atomic::AtomicBool::new(false),
             super_user: AtomicBool::new(false),
             omnibus: AtomicBool::new(false),
@@ -1214,6 +1218,19 @@ impl ReferenceState {
         }
     }
 
+    /// Whether `account`'s application is not approved yet (8092,
+    /// ibx#421; `jextend.bi.g(String)`).
+    pub fn account_pending(&self, account: &str) -> bool {
+        self.pending_accounts.lock().unwrap().iter().any(|a| a == account)
+    }
+
+    /// The accounts of the logon's list whose application is not
+    /// approved, in list order (ibx#421).
+    pub fn pending_managed_accounts(&self) -> Vec<String> {
+        let pending = self.pending_accounts.lock().unwrap();
+        self.managed_accounts.lock().unwrap().iter().filter(|a| pending.contains(a)).cloned().collect()
+    }
+
     /// True when the logon says this is an FA session (tag 6108, ibx#481).
     pub fn fa_session(&self) -> bool {
         self.fa_session.load(std::sync::atomic::Ordering::Relaxed)
@@ -1314,6 +1331,10 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_managed_accounts(&self, accounts: Vec<String>) {
         *self.managed_accounts.lock().unwrap() = accounts;
+    }
+
+    #[doc(hidden)] pub fn set_pending_accounts(&self, accounts: Vec<String>) {
+        *self.pending_accounts.lock().unwrap() = accounts;
     }
 
     /// The account's feature list from the account config (6542), None
