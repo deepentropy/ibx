@@ -769,6 +769,9 @@ pub const SECDEF_BY_CONID_NAME: &str = "socket-reqContractDetailsReqByConid";
 /// Name of the lookup of the preferred contract of a conId, the API lookup
 /// by conId without an exchange (ibx#438).
 pub const SECDEF_PREFERRED_NAME: &str = "PreferredReqByConid";
+/// Name of the lookup of a record's market rule on one of its valid
+/// exchanges, as the reference names it (ibx#435, ibx#436).
+pub const SECDEF_EXCHANGE_RULE_NAME: &str = "getECsForConidExchangePairsReqByConid";
 /// Name of the company lookup of an underlying (ibx#436).
 pub const SECDEF_UNDERLYING_NAME: &str = "UnderlyingECNoDupsNDReqByConid";
 

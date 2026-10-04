@@ -298,6 +298,19 @@ impl Connection {
                 .min();
             let earliest = match earliest {
                 Some(e) => e,
+                // A read can end inside a frame header ("8=FIXC" seen live,
+                // ibx#436 paper run of 04/10/2026): those bytes start the
+                // next frame and are kept; dropping them lost a compressed
+                // frame and the reply it held.
+                None if partial_header_len(&self.buf) > 0 => {
+                    let keep = partial_header_len(&self.buf);
+                    let drop = self.buf.len() - keep;
+                    if drop > 0 {
+                        log::warn!("extract_frames: dropping {}B (no header) before a partial header", drop);
+                        self.buf.drain(..drop);
+                    }
+                    break;
+                }
                 None => {
                     // ibx#183 follow-up: dump the FULL payload (hex + ascii) of
                     // anything we're about to discard. We need the whole frame
@@ -570,6 +583,19 @@ impl Connection {
     pub fn inject_buf(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
     }
+}
+
+/// Frame headers the reader recognizes.
+const FRAME_HEADERS: [&[u8]; 5] = [b"8=FIX.", b"8=FIXCOMP\x01", b"8=O\x01", b"8=1\x01", b"8=X\x01"];
+
+/// Length of the longest end of `buf` that is the start of a frame header
+/// (a header cut by the end of a read), 0 when none.
+fn partial_header_len(buf: &[u8]) -> usize {
+    let longest = FRAME_HEADERS.iter().map(|h| h.len()).max().unwrap_or(0);
+    (1..longest.min(buf.len() + 1))
+        .rev()
+        .find(|&n| FRAME_HEADERS.iter().any(|h| n < h.len() && buf[buf.len() - n..] == h[..n]))
+        .unwrap_or(0)
 }
 
 /// Compute total length of a length-prefixed, trailer-free message whose
@@ -1014,6 +1040,38 @@ mod tests {
             Frame::FixComp(data) => assert_eq!(data, &comp),
             other => panic!("expected Frame::FixComp, got {:?}", other),
         }
+    }
+
+    // ibx#436: a read that ends inside the header of a compressed frame
+    // ("8=FIXC", seen live) keeps those bytes: the frame is read whole with
+    // the next bytes, for every cut of its header.
+    #[test]
+    fn frame_extraction_header_cut_by_the_read_end() {
+        let first = fixcomp_build(&fix_build(&[(35, "Q")], 1));
+        let second = fixcomp_build(&fix_build(&[(35, "P")], 2));
+        for cut in 1..="8=FIXCOMP\x01".len() {
+            let mut conn = test_connection_with_buf(first.clone());
+            conn.inject_buf(&second[..cut]);
+            let frames = conn.extract_frames();
+            assert_eq!(frames.len(), 1, "cut {cut}");
+            assert_eq!(conn.buffered(), cut, "cut {cut}: the header start is kept");
+            conn.inject_buf(&second[cut..]);
+            let frames = conn.extract_frames();
+            match frames.as_slice() {
+                [Frame::FixComp(data)] => assert_eq!(data, &second, "cut {cut}"),
+                other => panic!("cut {cut}: {:?}", other),
+            }
+        }
+        // Bytes that cannot start a header are still dropped.
+        let mut conn = test_connection_with_buf(b"zz8=FIXC".to_vec());
+        assert!(conn.extract_frames().is_empty());
+        assert_eq!(conn.buffered(), 6);
+        let mut conn = test_connection_with_buf(b"zzzz".to_vec());
+        assert!(conn.extract_frames().is_empty());
+        assert_eq!(conn.buffered(), 0);
+        assert_eq!(partial_header_len(b"..8=FIX"), 5);
+        assert_eq!(partial_header_len(b"..8=O"), 3);
+        assert_eq!(partial_header_len(b"8=FIXCOMP"), 9);
     }
 
     #[test]

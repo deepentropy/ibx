@@ -2787,7 +2787,7 @@ impl CcpState {
                     {
                         continue;
                     }
-                    let fid = format!("ibxfan-{}-{}", req_id, self.next_fanout_id);
+                    let fid = format!("{}{}", contracts::SECDEF_EXCHANGE_RULE_NAME, self.next_fanout_id);
                     self.next_fanout_id = self.next_fanout_id.wrapping_add(1);
                     self.send_fanout_secdef_request(&fid, def.con_id, exch, ccp_conn, hb);
                     outstanding.push((fid, def.con_id, exch.clone()));
@@ -4890,7 +4890,7 @@ mod tests {
         assert_eq!(secdef_request_number("FixSecDefReqBySymbol42"), Some(42));
         assert_eq!(secdef_request_number("FixSecDefReqByIdTypeValue7"), Some(7));
         assert_eq!(secdef_request_number("100"), Some(100));
-        assert_eq!(secdef_request_number("ibxfan-1-2"), None);
+        assert_eq!(secdef_request_number("getECsForConidExchangePairsReqByConid2"), None);
         assert_eq!(secdef_request_number("FixSecDefReqBySymbol"), None);
     }
 
@@ -4999,6 +4999,53 @@ mod tests {
     // company of its underlying; its row goes out without the industry,
     // the later rows get it (captured 28/09/2026: the first AAPL option row
     // has no industry, the next ones have Technology).
+    // ibx#435, ibx#436: a lookup reply asks, for each record and each of
+    // its valid exchanges but BEST, the market rule it does not know yet:
+    // one request per (conId, exchange), named as the reference names it
+    // (captured 28/09/2026: 20 requests for one AAPL option, AMEX to MX2;
+    // 02/10/2026: one, QBALGO, for an ES future whose CME rule came with
+    // the reply). The rows wait for every answer; a second lookup of the
+    // same contracts asks nothing.
+    #[test]
+    fn fan_out_asks_each_unknown_exchange_rule_of_each_record() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_mem(client));
+        let mut hb = HeartbeatState::new();
+        let reply = |rid: &str| pipe_msg(&format!(
+            "35=d|320={rid}|323=4|55=AAPL|167=OPT|207=BEST|6008=1|6031=32|55=AAPL|167=OPT|207=BEST|6008=2|6031=32|\
+             146=0|6344=2|6008=1|6046=BEST,AMEX,CBOE,|6008=2|6046=BEST,AMEX,CBOE,"));
+        ccp.send_secdef_request_by_symbol(41, "AAPL", "OPT", "SMART", "USD", &Default::default(), &mut conn, &mut hb);
+        let _ = ccp_messages_sent(&mut server);
+        ccp.process_ccp_message(&reply("41"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let sent = ccp_messages_sent(&mut server);
+        let asked: Vec<(String, String, String)> = sent.iter().map(|m| {
+            let field = |tag: &str| m.split('|').find_map(|f| f.strip_prefix(tag)).unwrap_or("").to_string();
+            (field("320="), field("6008="), field("6004="))
+        }).collect();
+        assert_eq!(asked.len(), 4, "{sent:?}");
+        assert!(asked.iter().all(|(rid, _, _)| rid.starts_with("getECsForConidExchangePairsReqByConid")), "{asked:?}");
+        let pairs: Vec<(&str, &str)> = asked.iter().map(|(_, c, e)| (c.as_str(), e.as_str())).collect();
+        assert_eq!(pairs, [("1", "AMEX"), ("1", "CBOE"), ("2", "AMEX"), ("2", "CBOE")]);
+        assert!(sent.iter().all(|m| m.contains("|321=2|146=1|")), "{sent:?}");
+        assert!(shared.reference.drain_contract_details().is_empty(), "the rows wait for the answers");
+        for (i, (rid, con_id, exch)) in asked.iter().enumerate() {
+            let answer = pipe_msg(&format!(
+                "35=d|320={rid}|323=4|55=AAPL|167=OPT|207={exch}|6008={con_id}|6031={}|146=0|6344=0", 100 + i));
+            ccp.process_ccp_message(&answer, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        }
+        let rows = shared.reference.drain_contract_details();
+        let ids: Vec<(i64, String)> = rows.iter().map(|(_, d)| (d.con_id, d.market_rule_ids.clone())).collect();
+        assert_eq!(ids, [(1, "32,100,101".to_string()), (2, "32,102,103".to_string())]);
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![41]);
+        // The same contracts again: every rule is known, no request.
+        ccp.send_secdef_request_by_symbol(42, "AAPL", "OPT", "SMART", "USD", &Default::default(), &mut conn, &mut hb);
+        let _ = ccp_messages_sent(&mut server);
+        ccp.process_ccp_message(&reply("42"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(ccp_messages_sent(&mut server).is_empty());
+        assert_eq!(shared.reference.drain_contract_details().len(), 2);
+    }
+
     #[test]
     fn a_derivative_row_gets_the_industry_of_its_looked_up_company() {
         let (mut ccp, mut context, shared) = u186_test_state();
