@@ -271,6 +271,22 @@ def test_account_summary_tag_rows():
     assert out["ours"][:4] == out["theirs"][:4]
 
 
+# The whole answer (ibx#486): the tag rows, the $LEDGER:ALL rows of the
+# account "All" per currency, the end; each frame twice, as the reference.
+def test_account_summary_whole_answer():
+    out = replay("20260926/account_summary")
+    theirs = assert_same(out)
+    assert sum(l.startswith("accountSummaryEnd|") for l in theirs) == 2
+    assert any(l.startswith("accountSummary|9002|All|CashBalance|933115.05|USD") for l in theirs)
+
+
+# A combo with no definition (200), then its cancel: ApiCancelled (ibx#487).
+def test_directed_combo_without_definition_then_cancel():
+    out = replay("20260926b/i105_combo_directed")
+    theirs = assert_same(out)
+    assert any(l.startswith("orderStatus|31|ApiCancelled|") for l in theirs)
+
+
 # keepUpToDate bars then their cancel (26/09/2026, ibx#429, ibx#431).
 def test_historical_keep_up_to_date_then_cancel():
     out = replay("20260926b/hist_keep_up_to_date")
