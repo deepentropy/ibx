@@ -2342,6 +2342,93 @@ fn api_logon_values_live() {
     assert!(cbs.iter().any(|c| matches!(c, Cb::HistoricalData { req_id: 121, .. })), "bars through the historical farm");
 }
 
+// ── Managed accounts, algo times, all-or-none, years limit (ibx#420, ibx#263, ibx#421), focused ──
+
+/// One paper login: reqManagedAccts gives the logon's account list (one
+/// account on paper, the logon account); a Vwap whose startTime cannot be
+/// read is refused with 10314 and none is sent, one with no zone gets the
+/// warning 2174 and is sent; a LMT with all-or-none on SPY SMART (AON in
+/// the list) is sent, not refused with 10257; a bar request from 1820 is
+/// refused with the second years rule (199 years on paper) and no query.
+/// The orders are far from the market and cancelled.
+/// Run with: cargo test --test rust_api_gt api_accounts_algo_times_aon_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_accounts_algo_times_aon_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    #[derive(Default)]
+    struct Accounts(Vec<String>);
+    impl Wrapper for Accounts {
+        fn managed_accounts(&mut self, accounts_list: &str) { self.0.push(accounts_list.to_string()); }
+    }
+    let mut accounts = Accounts::default();
+    client.req_managed_accts(&mut accounts);
+    println!("managed accounts {:?}, logon account {}", accounts.0, client.account_id);
+    assert_eq!(accounts.0, [client.account_id.clone()]);
+
+    let mut wrapper = RecWrapper::new();
+    poll(&client, &mut wrapper, Duration::from_secs(3));
+    wrapper.drain();
+    let errors = |cbs: &[Cb], id: i64| -> Vec<(i64, String)> {
+        cbs.iter().filter_map(|c| match c {
+            Cb::Error { req_id, code, msg } if *req_id == id => Some((*code, msg.clone())),
+            _ => None,
+        }).collect()
+    };
+    let vwap = |start: &str| Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 1.0,
+        algo_strategy: "Vwap".into(),
+        algo_params: vec![ibx::api::client::TagValue { tag: "startTime".into(), value: start.into() }],
+        ..Default::default()
+    };
+    let bad = client.next_order_id();
+    client.place_order(bad, &spy(), &vwap("9am")).unwrap();
+    let no_zone = client.next_order_id();
+    client.place_order(no_zone, &spy(), &vwap("09:00:00")).unwrap();
+    let aon = client.next_order_id();
+    client.place_order(aon, &spy(), &Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 1.0, all_or_none: true,
+        ..Default::default()
+    }).unwrap();
+    let old = Contract { ..spy() };
+    client.req_historical_data(130, &old, "18200101 00:00:00", "1 D", "1 day", "TRADES", true, 1, false).unwrap();
+    poll_until(&client, &mut wrapper, |cbs| {
+        [no_zone, aon].iter().all(|id| cbs.iter().any(|c| matches!(c, Cb::OrderStatus { order_id, .. } if order_id == id)))
+    }, Duration::from_secs(20));
+    let cbs = wrapper.drain();
+    for id in [no_zone, aon] {
+        client.cancel_order(id, "").unwrap();
+    }
+    poll(&client, &mut wrapper, Duration::from_secs(3));
+    client.disconnect();
+
+    let bad_errors = errors(&cbs, bad);
+    println!("bad time: {:?}", bad_errors);
+    assert_eq!(bad_errors.len(), 1);
+    assert_eq!(bad_errors[0].0, 10314);
+    assert!(bad_errors[0].1.starts_with("startTime: The date, time, or time-zone entered is invalid."));
+    assert!(!cbs.iter().any(|c| matches!(c, Cb::OrderStatus { order_id, .. } if *order_id == bad)), "nothing sent");
+    println!("no zone: {:?}", errors(&cbs, no_zone));
+    assert!(errors(&cbs, no_zone).iter().any(|(code, _)| *code == 2174));
+    assert!(cbs.iter().any(|c| matches!(c, Cb::OrderStatus { order_id, .. } if *order_id == no_zone)), "sent");
+    println!("all-or-none: {:?}", errors(&cbs, aon));
+    assert!(!errors(&cbs, aon).iter().any(|(code, _)| *code == 10257));
+    assert!(cbs.iter().any(|c| matches!(c, Cb::OrderStatus { order_id, .. } if *order_id == aon)), "sent");
+    let hist = errors(&cbs, 130);
+    println!("1820 bars: {:?}", hist);
+    assert_eq!(hist.len(), 1);
+    assert!(hist[0].1.starts_with("Error validating request.-'bM' : cause - Historical data queries on this contract requesting any data earlier than 199 year(s) back from now which is "), "{:?}", hist);
+}
+
 // ── Depth books (ibx#451), focused ──
 
 /// (req, position, operation, side, price, size, market maker, SmartDepth, level two)
