@@ -412,19 +412,30 @@ fn what_if_of_a_combo() {
 }
 
 // A condition time in Asia/Tokyo on a US stock: the reference refuses it
-// with 10314 (not the contract's zone); ibx knows no zone for a contract
-// whose details were not asked, and the order is not sent either.
+// with 10314 after the contract lookup (not the contract's zone). It read
+// the zone from a trading schedule it had before the recording (no
+// schedule request in it: `trader.order.ay.a(dy,OrderCreator,D)`, the
+// schedule from `jextend.dX.a(dy, Consumer)`, asked only when not
+// cached); ibx asks no schedule for an order, knows no zone, and sends the
+// order.
 #[test]
-#[ignore = "ibx#486: condition time zone check without the contract's definition"]
+#[ignore = "ibx#486: the contract's zone comes from a schedule the reference had before the recording"]
 fn condition_time_in_another_zone() {
     replay_and_compare("orders_b1_416_time_condition", all, KNOWN, &[]);
 }
 
 // An order routed to the OVERNIGHT exchange: the reference warns 10329
-// "This order will be directly routed to OVERNIGHT." and discards it (201
-// "Order was discarded."); ibx sends nothing and gives no callback.
+// "This order will be directly routed to OVERNIGHT." and discards it
+// (Cancelled, then 201 "Order was discarded."). It is the API precaution
+// "Bypass Redirect Order warning for Stock API Orders" (off by default,
+// `trader.order.confirm.OrderChecker$6.check(pe)`): a stock order directed
+// to an exchange other than SMART when the contract trades on SMART gets
+// 10311 (10329 for OVERNIGHT and IBEOS) and is discarded. ibx has no such
+// setting: the rule would discard every directed stock order. The
+// Cancelled status also has a permId in this recording and none in the
+// ISLAND one of 25/09/2026.
 #[test]
-#[ignore = "ibx#486: 10329 and the discarded directed OVERNIGHT order"]
+#[ignore = "ibx#486: the redirect precaution (10311, 10329) needs a decision on its setting"]
 fn overnight_directed_order() {
     replay_and_compare("orders_i196_overnight", all, KNOWN, &[]);
     replay_and_compare("orders_rth_order_types", all, KNOWN, &[1, 2, 3, 4, 5, 6, 7, 13, 14]);
@@ -432,9 +443,12 @@ fn overnight_directed_order() {
 
 // SPY option combos (a call spread, SMART and CBOE): the reference
 // refuses both with 460 "No trading permissions" before sending; ibx
-// gives no callback.
+// gives no callback. The raise sites (`trader.order.proc.aN.a(pe,...)
+// @13670, @13743, @13933`) read positions, clearing and logon flags; no
+// tag of the logon or of the contract replies of the recording names the
+// option permission.
 #[test]
-#[ignore = "ibx#486: 460 for an option combo without permission"]
+#[ignore = "ibx#486: the data behind 460 is not in the logon or the contract replies"]
 fn option_combo_without_permission() {
     replay_and_compare("orders_rth_order_types", all, KNOWN, &[1, 2, 3, 4, 5, 6, 7, 10]);
 }
