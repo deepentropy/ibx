@@ -2373,7 +2373,7 @@ fn api_accounts_algo_times_aon_live() {
     let mut accounts = Accounts::default();
     client.req_managed_accts(&mut accounts);
     println!("managed accounts {:?}, logon account {}", accounts.0, client.account_id);
-    assert_eq!(accounts.0, [client.account_id.clone()]);
+    assert_eq!(accounts.0, std::slice::from_ref(&client.account_id));
 
     let mut wrapper = RecWrapper::new();
     poll(&client, &mut wrapper, Duration::from_secs(3));

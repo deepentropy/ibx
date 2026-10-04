@@ -538,7 +538,7 @@ pub fn build_farm_logon(
 /// ibx#276). The reference picks it by the endpoint's SSL flag
 /// (`twslaunch.jconnection.y.b(boolean, boolean)`, `E.d()`).
 pub enum LinkStream {
-    Tls(native_tls::TlsStream<TcpStream>),
+    Tls(Box<native_tls::TlsStream<TcpStream>>),
     Plain(TcpStream),
 }
 
@@ -557,10 +557,10 @@ impl LinkStream {
         let connector = TlsConnector::builder()
             .danger_accept_invalid_certs(accept_invalid_certs)
             .build()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         connector.connect(host, tcp)
-            .map(Self::Tls)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+            .map(|s| Self::Tls(Box::new(s)))
+            .map_err(|e| io::Error::other(e.to_string()))
     }
 
     /// The TCP socket under the stream.
@@ -578,7 +578,7 @@ impl LinkStream {
     /// The connection of the engine on this socket.
     pub fn into_connection(self) -> io::Result<Connection> {
         match self {
-            Self::Tls(s) => Connection::new(s),
+            Self::Tls(s) => Connection::new(*s),
             Self::Plain(s) => Connection::new_raw(s),
         }
     }
@@ -612,13 +612,13 @@ impl Write for LinkStream {
 /// The SSL port of an endpoint: the next port when the port is even
 /// (`twslaunch.jconnection.E.j()`: 4000 gives 4001).
 pub fn ssl_port(port: u16) -> u16 {
-    if port % 2 == 0 { port + 1 } else { port }
+    if port.is_multiple_of(2) { port + 1 } else { port }
 }
 
 /// The plain port of an endpoint: the port before when the port is odd
 /// (`twslaunch.jconnection.E.k()`: 4001 gives 4000).
 pub fn plain_port(port: u16) -> u16 {
-    if port % 2 != 0 { port - 1 } else { port }
+    if !port.is_multiple_of(2) { port - 1 } else { port }
 }
 
 /// The service of a farm, as the reference's SSL farm list names them

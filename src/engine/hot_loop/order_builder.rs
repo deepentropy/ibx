@@ -4562,7 +4562,7 @@ mod tests {
         for list in ["ACTIVETIM/1,AD/5,LMT/3,RTH/1", "ACTIVETIM/1,AON/4,LMT/3,RTH/1"] {
             let (frames, errors) = run("SMART", list, aon(80));
             assert!(frames.is_empty(), "nothing sent: {frames:?}");
-            assert_eq!(errors, [refused.clone()]);
+            assert_eq!(errors, std::slice::from_ref(&refused));
         }
         for (exchange, list) in [("SMART", "ACTIVETIM/1,AON/1,LMT/3,RTH/1"), ("ISLAND", "ACTIVETIM/1,AON/3,LMT/3,RTH/1")] {
             let (frames, errors) = run(exchange, list, aon(81));

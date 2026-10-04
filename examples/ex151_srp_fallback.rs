@@ -57,6 +57,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         farm_name: gw.farm_name.clone(),
         session_epoch: gw.session_epoch.clone(),
         ns_secure_refused: gw.ns_secure_refused,
+        use_ssl: gw.use_ssl,
+        ssl_farms: gw.ssl_farms.clone(),
     };
 
     drop(ccp);
