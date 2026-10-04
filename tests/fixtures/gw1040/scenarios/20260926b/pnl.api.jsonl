@@ -1,0 +1,15 @@
+{"type":"header","format":"four-leg-api/1","source":"20260926b/pnl.jsonl","scenario":"pnl","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
+{"seq":1703,"leg":"api_out","msg_name":"START_API","request":{"clientId":198}}
+{"seq":1704,"leg":"api_in","msg_name":"MANAGED_ACCTS","callbacks":[["managedAccounts","DUXXXXXXX"]]}
+{"seq":1705,"leg":"api_in","msg_name":"NEXT_VALID_ID","callbacks":[["nextValidId",11]]}
+{"seq":1706,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfarm",""]]}
+{"seq":1707,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2106,"HMDS data farm connection is OK:ushmds",""]]}
+{"seq":1708,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2158,"Sec-def data farm connection is OK:secdefil",""]]}
+{"seq":1709,"leg":"api_out","msg_name":"REQ_PNL","request":{"reqId":9003,"account":"DUXXXXXXX"}}
+{"seq":1710,"leg":"api_out","msg_name":"REQ_PNL_SINGLE","request":{"reqId":9004,"account":"DUXXXXXXX","conId":265598}}
+{"seq":1711,"leg":"api_in","msg_name":"PNL","callbacks":[["pnl",9003,118.61890000000189,40.709900599998946,57.04689885]]}
+{"seq":1850,"leg":"api_in","msg_name":"PNL","callbacks":[["pnl",9003,299.23627714843957,-1127.4949222515636,433.08510595]]}
+{"seq":1851,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",9004,null,2150,"Invalid position trade derived value",""]]}
+{"seq":1852,"leg":"api_in","msg_name":"PNL_SINGLE","callbacks":[["pnlSingle",9004,"0",376.0383,"MAX",376.0382071,"MAX"]]}
+{"seq":1939,"leg":"api_out","msg_name":"CANCEL_PNL","request":{"reqId":9003}}
+{"seq":1940,"leg":"api_out","msg_name":"CANCEL_PNL_SINGLE","request":{"reqId":9004}}

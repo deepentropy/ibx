@@ -1,0 +1,11 @@
+{"type":"header","format":"four-leg-api/1","source":"20260926b/i105_combo_directed.jsonl","scenario":"i105_combo_directed","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
+{"seq":7530,"leg":"api_out","msg_name":"START_API","request":{"clientId":198}}
+{"seq":7531,"leg":"api_in","msg_name":"MANAGED_ACCTS","callbacks":[["managedAccounts","DUXXXXXXX"]]}
+{"seq":7532,"leg":"api_in","msg_name":"NEXT_VALID_ID","callbacks":[["nextValidId",31]]}
+{"seq":7533,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfarm",""]]}
+{"seq":7534,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2106,"HMDS data farm connection is OK:ushmds",""]]}
+{"seq":7535,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2158,"Sec-def data farm connection is OK:secdefil",""]]}
+{"seq":7536,"leg":"api_out","msg_name":"PLACE_ORDER","request":{"orderId":31,"contract":{"symbol":"QQQ,SPY","secType":"BAG","exchange":"ARCA","currency":"USD","comboLegs":[{"conId":756733,"ratio":1,"action":"BUY","exchange":"ARCA"},{"conId":320227571,"ratio":1,"action":"SELL","exchange":"ARCA"}]},"order":{"softDollarTier":{},"orderId":31,"action":"BUY","totalQuantity":"1","orderType":"LMT","lmtPrice":-23.15,"tif":"DAY","orderRef":"fourleg","orderComboLegs":[{},{}]},"attachedOrders":{}}}
+{"seq":7543,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",31,null,200,"No security definition has been found for the request",""]]}
+{"seq":7544,"leg":"api_out","msg_name":"CANCEL_ORDER","request":{"orderId":31,"orderCancel":{}}}
+{"seq":7545,"leg":"api_in","msg_name":"ORDER_STATUS","callbacks":[["orderStatus",31,"ApiCancelled","0","1","MAX",0,0,"MAX",198,"","MAX"]]}

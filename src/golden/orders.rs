@@ -5,95 +5,12 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
-
-use crate::api::types::{ComboLeg, Order, TagValue};
-use crate::test_support::{to_pipe, Fields, Normaliser};
-use crate::types::OrderCondition;
-
-use super::fixture::{canonical, load, num, rebuild_text, Fixture, Rec};
-use super::replay::{contract_of, request as md_request};
-use super::session::Session;
-
-/// An API order as the client library read it back from the request.
-/// A field the recorded object does not hold keeps the client library's
-/// default (ibx's defaults are the same). An unknown field fails, so a new
-/// fixture never drops a field silently.
-pub(crate) fn order_of(v: &Value) -> Order {
-    let mut o = Order::default();
-    let s = |x: &Value| x.as_str().unwrap_or("").to_string();
-    let tags = |x: &Value| -> Vec<TagValue> {
-        x.as_array().into_iter().flatten().map(|t| TagValue { tag: s(&t["tag"]), value: s(&t["value"]) }).collect()
-    };
-    for (k, x) in v.as_object().unwrap() {
-        match k.as_str() {
-            "softDollarTier" | "orderId" => {}
-            "action" => o.action = s(x),
-            "totalQuantity" => o.total_quantity = num(x),
-            "orderType" => o.order_type = s(x),
-            "lmtPrice" => o.lmt_price = num(x),
-            "auxPrice" => o.aux_price = num(x),
-            "tif" => o.tif = s(x),
-            "orderRef" => o.order_ref = s(x),
-            "outsideRth" => o.outside_rth = x.as_bool().unwrap(),
-            "conditions" => o.conditions = x.as_array().unwrap().iter().map(condition_of).collect(),
-            "conditionsIgnoreRth" => o.conditions_ignore_rth = x.as_bool().unwrap(),
-            "conditionsCancelOrder" => o.conditions_cancel_order = x.as_bool().unwrap(),
-            "algoStrategy" => o.algo_strategy = s(x),
-            "algoParams" => o.algo_params = tags(x),
-            "whatIf" => o.what_if = x.as_bool().unwrap(),
-            "trailingPercent" => o.trailing_percent = num(x),
-            "trailStopPrice" => o.trail_stop_price = num(x),
-            "parentId" => o.parent_id = x.as_i64().unwrap(),
-            "transmit" => o.transmit = x.as_bool().unwrap(),
-            "includeOvernight" => o.include_overnight = x.as_bool().unwrap(),
-            "orderComboLegs" => o.order_combo_legs = x.as_array().unwrap().iter()
-                .map(|l| if l["price"].is_null() { f64::MAX } else { num(&l["price"]) }).collect(),
-            "smartComboRoutingParams" => o.smart_combo_routing_params = tags(x),
-            "ocaGroup" => o.oca_group = s(x),
-            "ocaType" => o.oca_type = x.as_i64().unwrap() as i32,
-            "startingPrice" => o.starting_price = num(x),
-            "stockRefPrice" => o.stock_ref_price = num(x),
-            "referenceContractId" => o.reference_contract_id = x.as_i64().unwrap() as i32,
-            "peggedChangeAmount" => o.pegged_change_amount = num(x),
-            "referenceChangeAmount" => o.reference_change_amount = num(x),
-            "customerAccount" => o.customer_account = s(x),
-            "professionalCustomer" => o.professional_customer = x.as_bool().unwrap(),
-            "goodAfterTime" => o.good_after_time = s(x),
-            "goodTillDate" => o.good_till_date = s(x),
-            "displaySize" => o.display_size = x.as_i64().unwrap() as i32,
-            "hidden" => o.hidden = x.as_bool().unwrap(),
-            "account" => o.account = s(x),
-            "cashQty" => o.cash_qty = num(x),
-            "allOrNone" => o.all_or_none = x.as_bool().unwrap(),
-            "triggerMethod" => o.trigger_method = x.as_i64().unwrap() as i32,
-            "lmtPriceOffset" => o.lmt_price_offset = num(x),
-            other => panic!("order field {other} = {x} is not read by the replay"),
-        }
-    }
-    o
-}
-
-fn condition_of(c: &Value) -> OrderCondition {
-    let is_more = c["isMore"].as_bool().unwrap_or(false);
-    match c["_type"].as_str().unwrap() {
-        "TimeCondition" => OrderCondition::Time { time: c["time"].as_str().unwrap_or("").to_string(), is_more },
-        other => panic!("condition {other} is not read by the replay"),
-    }
-}
-
-/// The contract of a placeOrder, with its combo legs.
-fn order_contract(v: &Value) -> crate::api::types::Contract {
-    let mut c = contract_of(v);
-    c.combo_legs = v["comboLegs"].as_array().into_iter().flatten().map(|l| ComboLeg {
-        con_id: l["conId"].as_i64().unwrap_or(0),
-        ratio: l["ratio"].as_i64().unwrap_or(0) as i32,
-        action: l["action"].as_str().unwrap_or("").to_string(),
-        exchange: l["exchange"].as_str().unwrap_or("").to_string(),
-        ..Default::default()
-    }).collect();
-    c
-}
+use super::load;
+use super::replay::request as md_request;
+use crate::test_support::scenario::record::{canonical, rebuild_text};
+use crate::test_support::scenario::runner::{at_their_effect, base, comparable, with_con_ids};
+use crate::test_support::scenario::{Rec, Scenario as Fixture, Session};
+use crate::test_support::{to_pipe, Fields};
 
 fn tag(f: &Fields, t: u32) -> Option<&str> {
     f.iter().find(|(k, _)| *k == t).map(|(_, v)| v.as_str())
@@ -105,11 +22,6 @@ fn msg_type(f: &Fields) -> &str {
 
 fn is_order_msg(f: &Fields) -> bool {
     matches!(msg_type(f), "D" | "G" | "F")
-}
-
-/// The base of an order id (`1288736453.1` gives `1288736453`).
-fn base(id: &str) -> &str {
-    id.split('.').next().unwrap_or(id)
 }
 
 /// The key of each order message of a list: the API order id (6121 of the
@@ -134,86 +46,12 @@ fn keys(frames: &[Fields]) -> Vec<(i64, String, usize)> {
     }).collect()
 }
 
-/// An order message as compared: the session fields normalised, and the
-/// order attributes, which the reference writes in no fixed order, sorted
-/// in their place.
-pub(crate) fn comparable(f: &Fields) -> Fields {
-    let mut out = Normaliser::session().apply(f);
-    let attr = |t: u32| (70..100).contains(&crate::engine::hot_loop::order_builder::reference_rank(t));
-    let mut k = 0;
-    while k < out.len() {
-        if attr(out[k].0) {
-            let end = (k..out.len()).find(|&j| !attr(out[j].0)).unwrap_or(out.len());
-            out[k..end].sort();
-            k = end;
-        } else {
-            k += 1;
-        }
-    }
-    out
-}
-
 /// The key of an order message: API order id, message type, rank.
 pub(crate) type Key = (i64, String, usize);
 
 /// An order message of both sides by its key: ibx's, and the reference's
 /// with its seq.
 pub(crate) type Pair = (Key, Option<Fields>, Option<(u64, Fields)>);
-
-/// The records with each order request moved to where the reference acted
-/// on it: just before its first effect, the order message it sent or the
-/// error it gave at once. The reference reads a request on its API thread
-/// and may act on it after reports that came in the meantime (lmt_cancel
-/// of 26/09/2026: the cancel request, two reports, then the 35=F); the
-/// replay makes ibx act at that same point.
-pub(crate) fn at_their_effect(recs: &[Rec]) -> Vec<Rec> {
-    let mut by_base: HashMap<String, i64> = HashMap::new();
-    let order_of = |r: &Rec, by_base: &HashMap<String, i64>| -> Option<i64> {
-        match r.msg.as_str() {
-            "D" => r.get(6121).and_then(|v| v.parse().ok()),
-            "G" | "F" => r.get(41).and_then(|c| by_base.get(base(&c)).copied()),
-            _ => None,
-        }
-    };
-    let mut effect_of: HashMap<usize, usize> = HashMap::new();
-    for (i, r) in recs.iter().enumerate() {
-        if r.leg == "fix_out" && r.msg == "D"
-            && let (Some(c), Some(id)) = (r.get(11), r.get(6121).and_then(|v| v.parse::<i64>().ok()))
-        {
-            by_base.insert(base(&c).to_string(), id);
-        }
-        if !(r.leg == "api_out" && matches!(r.msg.as_str(), "PLACE_ORDER" | "CANCEL_ORDER")) { continue; }
-        let Some(id) = r.request["orderId"].as_i64() else { continue };
-        let mut scan = by_base.clone();
-        for (j, e) in recs.iter().enumerate().skip(i + 1) {
-            if e.leg == "api_out" && e.request["orderId"].as_i64() == Some(id) { break; }
-            if e.leg == "fix_out" && e.msg == "D"
-                && let (Some(c), Some(oid)) = (e.get(11), e.get(6121).and_then(|v| v.parse::<i64>().ok()))
-            {
-                scan.insert(base(&c).to_string(), oid);
-            }
-            let sent = e.leg == "fix_out" && order_of(e, &scan) == Some(id);
-            let refused = e.leg == "api_in" && e.callbacks.as_array().into_iter().flatten().any(|c| {
-                c[0] == "error" && c[1].as_i64() == Some(id) && !matches!(c[3].as_i64(), Some(399 | 201 | 202))
-            });
-            if sent || refused {
-                effect_of.insert(i, j);
-                break;
-            }
-        }
-    }
-    let mut out: Vec<Rec> = Vec::with_capacity(recs.len());
-    let moved: Vec<usize> = effect_of.keys().copied().collect();
-    for (j, r) in recs.iter().enumerate() {
-        let mut before: Vec<usize> = effect_of.iter().filter(|(_, e)| **e == j).map(|(i, _)| *i).collect();
-        before.sort();
-        out.extend(before.into_iter().map(|i| recs[i].clone()));
-        if !moved.contains(&j) {
-            out.push(r.clone());
-        }
-    }
-    out
-}
 
 /// The result of an order replay.
 pub(crate) struct OrderReplay {
@@ -234,9 +72,10 @@ pub(crate) struct OrderReplay {
 /// a definition lookup of ibx is answered with the recorded reply for the
 /// same contract; the server's reports are sent with ibx's order ids.
 pub(crate) fn replay_orders(fx: &Fixture) -> OrderReplay {
-    let recs = at_their_effect(&fx.recs);
+    let mut recs = at_their_effect(&fx.recs);
+    let con_id_given = with_con_ids(&mut recs);
     let fx = &Fixture { header: fx.header.clone(), recs };
-    let mut s = Session::new();
+    let mut s = Session::new().in_zone(&fx.header);
     if let Some(start) = fx.recs.iter().find(|r| r.msg == "START_API") {
         // The client id of the recorded session, on the wire (6119) and in
         // the callbacks, as a client connected with it.
@@ -244,7 +83,6 @@ pub(crate) fn replay_orders(fx: &Fixture) -> OrderReplay {
         s.shared.reference.set_api_client_id(id);
         s.client.core.client_id.store(id, std::sync::atomic::Ordering::Relaxed);
     }
-    let mut con_id_given = Vec::new();
     let mut unsent = Vec::new();
     let mut cb_theirs = Vec::new();
     // The definition replies, to answer ibx's own lookups.
@@ -258,24 +96,7 @@ pub(crate) fn replay_orders(fx: &Fixture) -> OrderReplay {
     let mut clords: HashMap<String, String> = HashMap::new();
     for r in &fx.recs {
         match (r.leg.as_str(), r.msg.as_str()) {
-            ("api_out", "PLACE_ORDER") => {
-                let q = &r.request;
-                let id = q["orderId"].as_i64().unwrap();
-                let mut contract = order_contract(&q["contract"]);
-                if contract.con_id == 0 && contract.sec_type != "BAG" {
-                    // The conId of the reference's message for this order.
-                    let given = fx.recs.iter()
-                        .filter(|o| o.leg == "fix_out" && o.msg == "D")
-                        .find(|o| o.get(6121).as_deref() == Some(&id.to_string()))
-                        .and_then(|o| o.get(6008)).and_then(|c| c.parse().ok());
-                    if let Some(c) = given {
-                        contract.con_id = c;
-                        con_id_given.push(id);
-                    }
-                }
-                let order = order_of(&q["order"]);
-                let _ = s.call(move |c| c.place_order(id, &contract, &order));
-            }
+            ("api_out", "PLACE_ORDER") => md_request(&mut s, r),
             ("api_out", "CANCEL_ORDER") => {
                 let id = r.request["orderId"].as_i64().unwrap();
                 let _ = s.call(move |c| c.cancel_order(id, ""));
@@ -447,7 +268,7 @@ fn replay_and_compare(name: &str, keep_rec: impl Fn(&Rec) -> bool, known: Known,
     let keep = |l: &String| orders.iter().any(|id| l.split('|').nth(1) == Some(id.as_str()));
     let ours: Vec<String> = order_lines(&r.cb_ours, known).into_iter().filter(keep).collect();
     let theirs: Vec<String> = order_lines(&r.cb_theirs, known).into_iter().filter(keep).collect();
-    super::replay::assert_same_callbacks(&ours, &theirs);
+    crate::test_support::scenario::assert_same_callbacks(&ours, &theirs);
     r
 }
 

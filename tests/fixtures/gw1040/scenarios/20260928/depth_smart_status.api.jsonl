@@ -1,0 +1,17 @@
+{"type":"header","format":"four-leg-api/1","source":"20260928/depth_smart_status.jsonl","scenario":"i192_e4_depth_deletes","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
+{"seq":319050,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usbond",""]]}
+{"seq":319051,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfuture",""]]}
+{"seq":319052,"leg":"api_out","msg_name":"REQ_MKT_DEPTH","request":{"reqId":9460,"contract":{"conId":0,"symbol":"AAPL","secType":"STK","exchange":"SMART","currency":"USD"},"numRows":50,"isSmartDepth":true}}
+{"seq":319053,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:cashfarm",""]]}
+{"seq":319054,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usopt",""]]}
+{"seq":319055,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfarm",""]]}
+{"seq":319056,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2107,"HMDS data farm connection is inactive but should be available upon demand.cashhmds",""]]}
+{"seq":319057,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2106,"HMDS data farm connection is OK:ushmds",""]]}
+{"seq":319058,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2158,"Sec-def data farm connection is OK:secdefil",""]]}
+{"seq":320234,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2119,"Market data farm is connecting:usfarm.nj",""]]}
+{"seq":320709,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfarm.nj",""]]}
+{"seq":320827,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",9460,null,2152,"Exchanges - Depth: IEX; Top: BYX; PEARL; AMEX; T24X; MEMX; EDGEA; OVERNIGHT; TXSE; CHX; NYSENAT; IBEOS; PSX; LTSE; ISE; DRCTEDGE; Need additional market data permissions - Depth: NASDAQ; BATS; ARCA; BEX; NYSE; ",""]]}
+{"seq":415973,"leg":"api_out","msg_name":"CANCEL_MKT_DEPTH","request":{"reqId":9460,"isSmartDepth":true}}
+{"seq":416615,"leg":"api_out","msg_name":"REQ_MKT_DEPTH","request":{"reqId":9461,"contract":{"conId":0,"symbol":"AXTI","secType":"STK","exchange":"SMART","currency":"USD"},"numRows":10,"isSmartDepth":true}}
+{"seq":417222,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",9461,null,2152,"Exchanges - Depth: IEX; Top: BYX; PEARL; AMEX; T24X; MEMX; OVERNIGHT; EDGEA; TXSE; CHX; IBEOS; NYSENAT; PSX; LTSE; ISE; DRCTEDGE; Need additional market data permissions - Depth: NASDAQ; BATS; ARCA; BEX; NYSE; ",""]]}
+{"seq":448164,"leg":"api_out","msg_name":"CANCEL_MKT_DEPTH","request":{"reqId":9461,"isSmartDepth":true}}

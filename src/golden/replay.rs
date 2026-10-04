@@ -5,13 +5,9 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
-
-use crate::api::types::Contract;
+use crate::test_support::scenario::record::{binary_body, canonical, rebuild_binary, rebuild_text};
+use crate::test_support::scenario::{Rec, Recorder, Scenario as Fixture, Session};
 use crate::test_support::Fields;
-
-use super::fixture::{binary_body, canonical, rebuild_binary, rebuild_text, Fixture, Rec};
-use super::session::{Recorder, Session};
 
 /// The callbacks of a replay: ibx's and the reference's, one line each.
 pub(crate) struct Replayed {
@@ -43,27 +39,6 @@ pub(crate) fn request_message(f: &Fields) -> String {
 pub(crate) fn request_messages(s: &Session, farm_types: &[&str], ccp_types: &[&str]) -> (Vec<String>, Vec<String>) {
     let pick = |msgs: &[Fields], types: &[&str]| msgs.iter().filter(|f| types.contains(&msg_type(f))).map(request_message).collect();
     (pick(&s.farm_out, farm_types), pick(&s.ccp_out, ccp_types))
-}
-
-/// A contract of a request: the client library's object or the request's
-/// protobuf fields (the names differ for the primary exchange).
-pub(crate) fn contract_of(v: &Value) -> Contract {
-    let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
-    Contract {
-        con_id: v["conId"].as_i64().unwrap_or(0),
-        symbol: s("symbol"),
-        sec_type: s("secType"),
-        exchange: s("exchange"),
-        currency: s("currency"),
-        primary_exchange: if v["primaryExchange"].is_string() { s("primaryExchange") } else { s("primaryExch") },
-        last_trade_date_or_contract_month: s("lastTradeDateOrContractMonth"),
-        strike: v["strike"].as_f64().unwrap_or(0.0),
-        right: s("right"),
-        multiplier: s("multiplier"),
-        local_symbol: s("localSymbol"),
-        trading_class: s("tradingClass"),
-        ..Default::default()
-    }
 }
 
 /// The entries of a market data message (`35=V`): (262, 263, 6008, 207, 264).
@@ -136,35 +111,16 @@ impl Ids {
     }
 }
 
-/// Make the recorded API request again. Requests the replay does not cover
-/// are left out.
+/// Make the recorded API request again (`test_support::scenario::request`);
+/// its callbacks given at once are kept.
 pub(crate) fn request(s: &mut Session, r: &Rec) {
-    let q = &r.request;
-    let id = q["reqId"].as_i64().unwrap_or(0);
-    match r.msg.as_str() {
-        "REQ_MKT_DATA" => {
-            let contract = contract_of(&q["contract"]);
-            let ticks = q["genericTickList"].as_str().unwrap_or("").to_string();
-            let snapshot = q["snapshot"].as_bool().unwrap_or(false);
-            let regulatory = q["regulatorySnapshot"].as_bool().unwrap_or(false);
-            let _ = s.call(move |c| c.req_mkt_data(id, &contract, &ticks, snapshot, regulatory));
-        }
-        "CANCEL_MKT_DATA" => { let _ = s.call(move |c| c.cancel_mkt_data(id)); }
-        "REQ_MARKET_DATA_TYPE" => {
-            let t = q["marketDataType"].as_i64().unwrap_or(1) as i32;
-            s.call(move |c| c.req_market_data_type(t));
-        }
-        "REQ_SMART_COMPONENTS" => {
-            let bbo = q["bboExchange"].as_str().unwrap_or("").to_string();
-            let lines = s.call(move |c| {
-                let mut rec = Recorder::default();
-                c.req_smart_components(id, &bbo, &mut rec);
-                rec.lines
-            });
-            s.callbacks.extend(lines);
-        }
-        _ => {}
-    }
+    let r = r.clone();
+    let lines = s.call(move |c| {
+        let mut rec = Recorder::default();
+        crate::test_support::scenario::request::make(c, &r, &mut rec);
+        rec.lines
+    });
+    s.callbacks.extend(lines);
 }
 
 /// Replay the market data part of a fixture: the requests, the lookups'
@@ -178,7 +134,7 @@ pub(crate) fn replay_market_data(fx: &Fixture, farm_conn: &str, keep: &[&str], u
 /// [`replay_market_data`] without the records `skip` (requests that go to
 /// another farm).
 pub(crate) fn replay_market_data_without(fx: &Fixture, farm_conn: &str, keep: &[&str], until: Option<u64>, skip: &[u64]) -> Replayed {
-    let mut s = Session::new();
+    let mut s = Session::new().in_zone(&fx.header);
     let mut ids = Ids::default();
     let mut theirs = Vec::new();
     let mut unsent = Vec::new();
@@ -248,24 +204,4 @@ pub(crate) fn replay_market_data_without(fx: &Fixture, farm_conn: &str, keep: &[
     let ours = s.callbacks.iter().filter(|l| wanted(l)).cloned().collect();
     let theirs = theirs.into_iter().filter(wanted).collect();
     Replayed { ours, theirs, unsent, requests_theirs, session: s }
-}
-
-/// The two lists of callbacks are the same; on a difference, the first one
-/// and the callbacks around it.
-#[track_caller]
-pub(crate) fn assert_same_callbacks(ours: &[String], theirs: &[String]) {
-    if std::env::var_os("IBX_GOLDEN_DUMP").is_some() {
-        for k in 0..ours.len().max(theirs.len()) {
-            let (a, b) = (ours.get(k).map_or("", |s| s.as_str()), theirs.get(k).map_or("", |s| s.as_str()));
-            eprintln!("{k:4} {} {a:<60} {b}", if a == b { ' ' } else { '*' });
-        }
-    }
-    let first = ours.iter().zip(theirs).position(|(a, b)| a != b).unwrap_or(ours.len().min(theirs.len()));
-    if first < ours.len().max(theirs.len()) {
-        let around = |v: &[String]| v[first.saturating_sub(3)..(first + 6).min(v.len())].join("\n    ");
-        panic!(
-            "callback {first} differs ({} ours, {} reference)\n  ours:\n    {}\n  reference:\n    {}",
-            ours.len(), theirs.len(), around(ours), around(theirs),
-        );
-    }
 }

@@ -1,8 +1,9 @@
 //! Top of book (35=Q acknowledgements, 35=L definitions, 35=P ticks):
 //! decode against the reference's callbacks.
 
-use super::fixture::load;
-use super::replay::{assert_same_callbacks, replay_market_data};
+use super::load;
+use super::replay::replay_market_data;
+use crate::test_support::scenario::assert_same_callbacks;
 
 const MD_CALLBACKS: &[&str] = &[
     "tickPrice", "tickSize", "tickString", "tickGeneric", "marketDataType", "tickReqParams", "tickSnapshotEnd",

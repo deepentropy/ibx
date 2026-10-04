@@ -45,6 +45,20 @@ impl TickAttrib {
         format!("TickAttrib(canAutoExecute={}, pastLimit={}, preOpen={})",
             self.can_auto_execute, self.past_limit, self.pre_open)
     }
+
+    // ibapi camelCase aliases (ibx#487: the official client library's names)
+    #[getter(canAutoExecute)]
+    fn get_can_auto_execute_alias(&self) -> bool { self.can_auto_execute }
+    #[setter(canAutoExecute)]
+    fn set_can_auto_execute_alias(&mut self, v: bool) { self.can_auto_execute = v; }
+    #[getter(pastLimit)]
+    fn get_past_limit_alias(&self) -> bool { self.past_limit }
+    #[setter(pastLimit)]
+    fn set_past_limit_alias(&mut self, v: bool) { self.past_limit = v; }
+    #[getter(preOpen)]
+    fn get_pre_open_alias(&self) -> bool { self.pre_open }
+    #[setter(preOpen)]
+    fn set_pre_open_alias(&mut self, v: bool) { self.pre_open = v; }
 }
 
 /// ibapi-compatible TickAttribLast for tick-by-tick last/allLast callbacks.

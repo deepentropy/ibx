@@ -50,6 +50,8 @@ pub struct FillExec {
     pub model_code: String,
     /// Tag 6010.
     pub order_ref: String,
+    /// Tag 851 (lastLiquidity); 0 when absent.
+    pub last_liquidity: i32,
     /// A report of a combo order (ibx#470): the contract its execution
     /// shows, and for a leg report the leg's own execution values.
     pub combo: Option<Box<ComboExec>>,

@@ -154,6 +154,13 @@ impl EClient {
         o.trail_stop_price = src.trail_stop_price;
         o.algo_strategy = src.algo_strategy.clone();
         o.what_if = src.what_if;
+        // As the Rust client's openOrder (ibx#487: found by the scenario
+        // replay of the Python client, 26/09/2026 lmt_cancel and oca_group).
+        o.client_id = src.client_id;
+        o.oca_group = src.oca_group.clone();
+        o.good_after_time = src.good_after_time.clone();
+        o.good_till_date = src.good_till_date.clone();
+        o.trailing_percent = src.trailing_percent;
         // A combo's per-leg prices and routing (ibx#470).
         for price in &src.order_combo_legs {
             o.order_combo_legs.push(Py::new(py, super::super::contract::OrderComboLeg { price: *price })?.into_any());
@@ -326,7 +333,7 @@ impl EClient {
                 avg_price: api_exec.avg_price,
                 order_ref: api_exec.order_ref.clone(),
                 model_code: api_exec.model_code.clone(),
-                last_liquidity: 0,
+                last_liquidity: api_exec.last_liquidity,
                 pending_price_revision: false,
                 ..Default::default()
             };
@@ -346,7 +353,8 @@ impl EClient {
             // The execution first, then openOrder and orderStatus for every
             // report of a known order, as the reference (ibx#473; captured
             // 30/09/2026 on a stock and a combo fill).
-            let view = self.core.order_view(fill.order_id, shared, status);
+            let mut view = self.core.order_view(fill.order_id, shared, status);
+            crate::client_core::ClientCore::report_client(&mut view, &fill_exec);
             let client_id = match &view {
                 Some(view) => {
                     self.send_open_order(py, fill.order_id, view)?;

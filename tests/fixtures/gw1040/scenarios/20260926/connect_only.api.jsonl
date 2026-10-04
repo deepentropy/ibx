@@ -1,0 +1,7 @@
+{"type":"header","format":"four-leg-api/1","source":"20260926/connect_only.jsonl","scenario":"connect_only","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
+{"seq":2062,"leg":"api_out","msg_name":"START_API","request":{"clientId":198}}
+{"seq":2063,"leg":"api_in","msg_name":"MANAGED_ACCTS","callbacks":[["managedAccounts","DUXXXXXXX"]]}
+{"seq":2064,"leg":"api_in","msg_name":"NEXT_VALID_ID","callbacks":[["nextValidId",1]]}
+{"seq":2065,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfarm",""]]}
+{"seq":2066,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2106,"HMDS data farm connection is OK:ushmds",""]]}
+{"seq":2067,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2158,"Sec-def data farm connection is OK:secdefil",""]]}

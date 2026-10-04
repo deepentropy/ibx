@@ -1992,15 +1992,15 @@ attribute,9816 Volatility,custom,no test
 attribute,9822 PercentOffset,double,no test
 attribute,99994 PostToAtsDurationUnit,custom,no test
 attribute,99995 DurationUnit,custom,no test
-eclient,req_positions,,src/api/client/tests.rs::req_positions_delivers_via_wrapper ; src/api/client/tests.rs::req_positions_empty_still_calls_position_end ; src/api/client/tests.rs::req_positions_sends_a_row_on_each_change
+eclient,req_positions,,tests/scenario_replay.rs::combo_fill_executions_and_commissions ; src/api/client/tests.rs::req_positions_delivers_via_wrapper ; src/api/client/tests.rs::req_positions_empty_still_calls_position_end
 eclient,req_pnl,,src/api/client/tests.rs::a_pnl_request_subscribes_the_quotes_it_needs_and_cancels_them_after ; src/api/client/tests.rs::a_pnl_quote_becomes_the_callers_subscription ; src/api/client/tests.rs::no_internal_quote_when_the_caller_has_one
 eclient,cancel_pnl,,src/api/client/tests.rs::a_pnl_request_subscribes_the_quotes_it_needs_and_cancels_them_after ; src/api/client/tests.rs::a_pnl_quote_becomes_the_callers_subscription ; tests/scenarios.rs::cancel_pnl_stops_dispatch
 eclient,req_pnl_single,,tests/scenarios.rs::pnl_single_dispatches_position_info
 eclient,cancel_pnl_single,,tests/scenarios.rs::pnl_single_dispatches_position_info
-eclient,req_account_summary,,src/api/client/tests.rs::account_summary_is_a_server_subscription ; src/api/client/tests.rs::account_summary_refusals_and_limit ; tests/scenarios.rs::account_summary_delivers_each_server_batch
-eclient,cancel_account_summary,,src/api/client/tests.rs::account_summary_is_a_server_subscription ; tests/scenarios.rs::cancel_account_summary_prevents_delivery ; src/golden/account.rs::account_summary_request_and_tag_rows
+eclient,req_account_summary,,tests/scenario_replay.rs::account_summary_subscription_and_tag_rows ; src/api/client/tests.rs::account_summary_is_a_server_subscription ; src/api/client/tests.rs::account_summary_refusals_and_limit
+eclient,cancel_account_summary,,tests/scenario_replay.rs::account_summary_subscription_and_tag_rows ; src/api/client/tests.rs::account_summary_is_a_server_subscription ; tests/scenarios.rs::cancel_account_summary_prevents_delivery
 eclient,req_account_updates,,src/api/client/tests.rs::process_msgs_delivers_update_portfolio ; src/api/client/tests.rs::account_updates_send_the_image_then_the_end_once ; src/api/client/tests.rs::a_second_subscribe_sends_nothing
-eclient,cancel_positions,,src/api/client/tests.rs::req_positions_sends_a_row_on_each_change
+eclient,cancel_positions,,tests/scenario_replay.rs::combo_fill_executions_and_commissions ; src/api/client/tests.rs::req_positions_sends_a_row_on_each_change
 eclient,req_managed_accts,,no test
 eclient,req_account_updates_multi,,src/api/client/tests.rs::a_key_also_in_the_ledger_is_a_ledger_key ; src/api/client/tests.rs::account_updates_multi_carries_its_request_id_and_model_code
 eclient,cancel_account_updates_multi,,src/api/client/tests.rs::account_updates_multi_carries_its_request_id_and_model_code
@@ -2008,13 +2008,13 @@ eclient,req_positions_multi,,src/api/client/tests.rs::positions_multi_carries_it
 eclient,cancel_positions_multi,,src/api/client/tests.rs::positions_multi_carries_its_request_id_and_updates
 eclient,account,,src/api/client/tests.rs::account_reads_shared_state ; tests/scenarios.rs::account_state_via_eclient
 eclient,process_msgs,,src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals ; src/api/client/tests.rs::tick_by_tick_reports_by_request_type ; src/api/client/tests.rs::place_order_unknown_trigger_method_is_refused
-eclient,req_mkt_data,,src/api/client/tests.rs::req_mkt_data_sends_register_and_subscribe ; src/api/client/tests.rs::symbol_only_requests_are_looked_up_not_keyed_on_con_id_0 ; src/api/client/tests.rs::req_mkt_data_defaults_to_realtime_mode
+eclient,req_mkt_data,,tests/scenario_replay.rs::rth_order_types ; src/api/client/tests.rs::req_mkt_data_sends_register_and_subscribe ; src/api/client/tests.rs::symbol_only_requests_are_looked_up_not_keyed_on_con_id_0
 eclient,req_mkt_data_ex,,src/api/client/tests.rs::req_mkt_data_ex_propagates_mode_9887
 eclient,calculate_implied_volatility,,no test
 eclient,calculate_option_price,,no test
 eclient,cancel_calculate_implied_volatility,,no test
 eclient,cancel_calculate_option_price,,no test
-eclient,cancel_mkt_data,,src/api/client/tests.rs::cancel_mkt_data_sends_unsubscribe ; src/api/client/tests.rs::cancel_mkt_data_unknown_req_id_no_panic ; src/api/client/tests.rs::market_data_duplicate_id_and_unknown_cancel
+eclient,cancel_mkt_data,,tests/scenario_replay.rs::rth_order_types ; src/api/client/tests.rs::cancel_mkt_data_sends_unsubscribe ; src/api/client/tests.rs::cancel_mkt_data_unknown_req_id_no_panic
 eclient,req_tick_by_tick_data,,src/api/client/tests.rs::req_tick_by_tick_data_sends_subscribe_tbt ; src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals
 eclient,cancel_tick_by_tick_data,,src/api/client/tests.rs::tick_by_tick_reports_by_request_type ; src/api/client/tests.rs::cancel_tick_by_tick_data_sends_unsubscribe_tbt ; src/api/client/tests.rs::cancel_tick_by_tick_unknown_req_id_no_panic
 eclient,req_mkt_depth,,src/api/client/tests.rs::ids_outside_the_reference_range_drop_the_request
@@ -2036,8 +2036,8 @@ eclient,ccp_session_id,,src/api/client/tests.rs::ccp_session_id_matches_shared_r
 eclient,misc_url,,src/api/client/tests.rs::misc_url_lookup_delegates_to_shared
 eclient,session_token_bytes,,src/api/client/tests.rs::session_token_bytes_roundtrip_through_biguint
 eclient,token_type,,src/api/client/tests.rs::token_type_default_is_empty
-eclient,place_order,,src/api/client/tests.rs::place_order_market ; src/api/client/tests.rs::place_order_limit ; src/api/client/tests.rs::place_order_trailing_stop_carries_initial_trigger
-eclient,cancel_order,,src/api/client/tests.rs::cancel_order_sends_cancel_command ; src/api/client/tests.rs::cancel_during_modify_no_panic ; src/api/client/tests.rs::negative_ids_round_trip
+eclient,place_order,,tests/scenario_replay.rs::lmt_order_then_cancel ; src/api/client/tests.rs::place_order_market ; src/api/client/tests.rs::place_order_limit
+eclient,cancel_order,,tests/scenario_replay.rs::lmt_order_then_cancel ; src/api/client/tests.rs::cancel_order_sends_cancel_command ; src/api/client/tests.rs::cancel_during_modify_no_panic
 eclient,cancel_order_by_perm_id,,no test
 eclient,req_global_cancel,,src/api/client/tests.rs::req_global_cancel_sends_cancel_all_for_each_instrument ; src/api/client/tests.rs::req_global_cancel_no_instruments_no_commands ; tests/error_edge_concurrency.rs::req_global_cancel_no_instruments_no_commands
 eclient,req_ids,,src/api/client/tests.rs::req_ids_calls_wrapper
@@ -2048,14 +2048,14 @@ eclient,req_completed_orders,,tests/scenarios.rs::req_completed_orders_drains_an
 eclient,req_auto_open_orders,,no test
 eclient,req_executions,,src/api/client/tests.rs::commission_report_comes_from_the_commission_frame ; src/api/client/tests.rs::an_untracked_execution_is_returned_by_req_executions_only ; src/api/client/tests.rs::req_executions_without_a_commission_report_sends_the_execution_only
 eclient,parse_algo_params,,no test
-eclient,req_historical_data,,src/api/client/tests.rs::req_historical_data_sends_fetch_historical ; src/api/client/tests.rs::req_historical_data_refuses_unknown_bar_size_with_321 ; src/api/client/tests.rs::req_historical_data_accepts_reference_bar_size_in_any_case
-eclient,cancel_historical_data,,src/api/client/tests.rs::cancel_historical_data_sends_cancel ; src/api/client/tests.rs::a_negative_request_id_round_trips_through_the_engine_queues ; src/api/client/tests.rs::ids_outside_the_reference_range_drop_the_request
-eclient,req_head_time_stamp,,src/api/client/tests.rs::historical_requests_without_con_id_ask_for_the_contract_first ; src/api/client/tests.rs::req_head_time_stamp_sends_fetch ; src/api/client/tests.rs::historical_requests_carry_contract_sec_type_and_exchange
-eclient,req_contract_details,,src/api/client/tests.rs::req_contract_details_sends_fetch ; src/api/client/tests.rs::req_contract_details_forwards_filter_fields ; src/api/client/tests.rs::req_contract_details_forwards_identifier_lookup
+eclient,req_historical_data,,tests/scenario_replay.rs::historical_keep_up_to_date_then_cancel ; src/api/client/tests.rs::req_historical_data_sends_fetch_historical ; src/api/client/tests.rs::req_historical_data_refuses_unknown_bar_size_with_321
+eclient,cancel_historical_data,,tests/scenario_replay.rs::historical_keep_up_to_date_then_cancel ; src/api/client/tests.rs::cancel_historical_data_sends_cancel ; src/api/client/tests.rs::a_negative_request_id_round_trips_through_the_engine_queues
+eclient,req_head_time_stamp,,tests/scenario_replay.rs::historical_formats_and_head_timestamps ; src/api/client/tests.rs::historical_requests_without_con_id_ask_for_the_contract_first ; src/api/client/tests.rs::req_head_time_stamp_sends_fetch
+eclient,req_contract_details,,tests/scenario_replay.rs::rth_order_types ; src/api/client/tests.rs::req_contract_details_sends_fetch ; src/api/client/tests.rs::req_contract_details_forwards_filter_fields
 eclient,req_mkt_depth_exchanges,,no test
 eclient,req_matching_symbols,,src/api/client/tests.rs::req_matching_symbols_sends_fetch ; src/api/client/tests.rs::req_matching_symbols_checks_and_trims_the_pattern ; src/api/client/tests.rs::req_matching_symbols_refused_without_the_feature
 eclient,req_sec_def_opt_params,,src/api/client/tests.rs::req_sec_def_opt_params_checks_then_sends
-eclient,cancel_head_time_stamp,,src/golden/hmds.rs::bars_and_head_timestamp_as_the_reference
+eclient,cancel_head_time_stamp,,tests/scenario_replay.rs::historical_formats_and_head_timestamps ; src/golden/hmds.rs::bars_and_head_timestamp_as_the_reference
 eclient,req_market_rule,,src/api/client/tests.rs::req_market_rule_answers_known_rules_and_refuses_others
 eclient,req_news_bulletins,,src/api/client/tests.rs::process_msgs_dispatches_news_bulletin ; src/api/client/tests.rs::news_bulletin_delivery_modes ; tests/scenarios.rs::news_bulletins_gated_by_subscription
 eclient,cancel_news_bulletins,,src/api/client/tests.rs::news_bulletin_delivery_modes ; tests/scenarios.rs::news_bulletins_gated_by_subscription
@@ -2068,7 +2068,7 @@ eclient,req_fundamental_data,,src/api/client/tests.rs::historical_requests_witho
 eclient,cancel_fundamental_data,,src/api/client/tests.rs::cancel_fundamental_data_sends_cancel
 eclient,req_histogram_data,,src/api/client/tests.rs::historical_requests_without_con_id_ask_for_the_contract_first ; src/api/client/tests.rs::historical_requests_carry_contract_sec_type_and_exchange ; src/api/client/tests.rs::req_histogram_data_sends_fetch
 eclient,cancel_histogram_data,,src/api/client/tests.rs::cancel_histogram_data_sends_cancel
-eclient,req_historical_ticks,,src/api/client/tests.rs::historical_requests_without_con_id_ask_for_the_contract_first ; src/api/client/tests.rs::historical_requests_carry_contract_sec_type_and_exchange ; src/api/client/tests.rs::req_historical_ticks_sends_fetch
+eclient,req_historical_ticks,,tests/scenario_replay.rs::historical_ticks ; src/api/client/tests.rs::historical_requests_without_con_id_ask_for_the_contract_first ; src/api/client/tests.rs::historical_requests_carry_contract_sec_type_and_exchange
 eclient,req_historical_schedule,,src/api/client/tests.rs::historical_requests_without_con_id_ask_for_the_contract_first ; src/api/client/tests.rs::historical_requests_carry_contract_sec_type_and_exchange ; src/api/client/tests.rs::req_historical_schedule_sends_fetch
 eclient,req_smart_components,,live:tests/rust_api_gt.rs::api_gt_suite ; src/golden/l1.rs::aapl_and_spy_before_the_open
 eclient,req_news_providers,,live:tests/rust_api_gt.rs::api_gt_suite

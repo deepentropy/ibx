@@ -1,4 +1,4 @@
-{"type":"header","format":"codec/1","scenario":"hmds_bars_and_head_timestamp","area":"decode-hmds","source":"scenarios/b1_431_hist_format.jsonl","source_scenario":"b1_431_hist_format","capture_date":"02/10/2026","market_session":"pre-open","gateway_version":"10401","notes":"AAPL bars with formatDate 1 and 2, head timestamps and cancels, before the open"}
+{"type":"header","format":"codec/1","scenario":"hmds_bars_and_head_timestamp","area":"decode-hmds","source":"scenarios/b1_431_hist_format.jsonl","source_scenario":"b1_431_hist_format","capture_date":"02/10/2026","market_session":"pre-open","gateway_version":"10401","machine_zone":"Europe/Paris","notes":"AAPL bars with formatDate 1 and 2, head timestamps and cancels, before the open"}
 {"seq":4313,"leg":"api_out","conn":"api:36314","msg_name":"API_PREFIX","raw_b64":"QVBJAA=="}
 {"seq":4314,"leg":"api_out","conn":"api:36314","msg_name":"CLIENT_VERSION","raw_b64":"djEwMC4uMjI1"}
 {"seq":4318,"leg":"api_in","conn":"api:36314","msg_name":"SERVER_VERSION","raw_b64":"MjE0ADIwMjYxMDAyIDEwOjU3OjQwIENlbnRyYWwgRXVyb3BlYW4gU3RhbmRhcmQgVGltZQA="}

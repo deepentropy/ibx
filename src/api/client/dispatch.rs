@@ -119,7 +119,8 @@ impl EClient {
 
             // openOrder then orderStatus for every report of a known order
             // (ibx#473).
-            let view = self.core.order_view(fill.order_id, &self.shared, status);
+            let mut view = self.core.order_view(fill.order_id, &self.shared, status);
+            ClientCore::report_client(&mut view, &fill_exec);
             let client_id = match &view {
                 Some(view) => {
                     wrapper.open_order(fill.order_id, &view.contract, &view.order, &view.state);

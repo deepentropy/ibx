@@ -2,9 +2,9 @@
 //! the request against the reference's, the rows against the callbacks
 //! the reference gave.
 
-use super::fixture::{canonical, load, rebuild_binary, Fixture};
-use super::replay::assert_same_callbacks;
-use super::session::Session;
+use super::load;
+use crate::test_support::scenario::record::{binary_body, canonical, rebuild_binary};
+use crate::test_support::scenario::{assert_same_callbacks, Scenario as Fixture, Session};
 use crate::test_support::{to_pipe, Fields, Normaliser};
 
 fn tag(f: &Fields, t: u32) -> Option<&str> {
@@ -19,7 +19,7 @@ fn request_message(f: &Fields) -> String {
     to_pipe(&out)
 }
 
-pub(crate) struct AccountReplay {
+struct AccountReplay {
     ours: Vec<String>,
     theirs: Vec<String>,
     requests_ours: Vec<String>,
@@ -28,8 +28,8 @@ pub(crate) struct AccountReplay {
 
 /// Replay the account summary requests of a fixture: the server's frames
 /// with ibx's subscription id in place of the reference's.
-pub(crate) fn replay_account_summary(fx: &Fixture) -> AccountReplay {
-    let mut s = Session::new();
+fn replay_account_summary(fx: &Fixture) -> AccountReplay {
+    let mut s = Session::new().in_zone(&fx.header);
     let mut theirs = Vec::new();
     let mut requests_theirs = Vec::new();
     // The reference's subscription id and ibx's, in request order.
@@ -60,7 +60,7 @@ pub(crate) fn replay_account_summary(fx: &Fixture) -> AccountReplay {
             }
             ("fix_in", "UM" | "RL" | "EB" | "UT" | "UP") => {
                 // The subscription id is a text field of the frame.
-                let body = ids.iter().fold(super::fixture::binary_body(&r.raw), |b, (gw, ours)| {
+                let body = ids.iter().fold(binary_body(&r.raw), |b, (gw, ours)| {
                     b.replace(&format!("6529={gw}"), &format!("6529={ours}"))
                 });
                 s.send_ccp(&rebuild_binary(&r.raw, &body));

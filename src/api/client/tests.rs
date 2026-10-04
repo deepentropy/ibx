@@ -4450,6 +4450,30 @@ fn an_untracked_execution_is_returned_by_req_executions_only() {
     ]);
 }
 
+// ibx#487: a combo leg's execution shows the leg report's lastLiquidity
+// (851=2), not the combo report's (851=1); a filled order no longer tracked
+// shows the placing client of the report (captured 30/09/2026,
+// i105_combo_fill: openOrder and orderStatus with clientId 198).
+#[test]
+fn a_fill_takes_the_report_last_liquidity_and_placing_client() {
+    let (client, _rx, _shared) = test_client();
+    let mut ex = crate::api::types::Execution { last_liquidity: 1, ..Default::default() };
+    let fe = crate::bridge::FillExec { last_liquidity: 2, client_id: 198, ..captured_fill_exec() };
+    client.core.apply_fill_exec(&mut ex, &fe, 42);
+    assert_eq!((ex.last_liquidity, ex.client_id), (2, 198));
+    let kept = crate::bridge::FillExec { last_liquidity: 0, ..captured_fill_exec() };
+    client.core.apply_fill_exec(&mut ex, &kept, 42);
+    assert_eq!(ex.last_liquidity, 2, "a report without 851 keeps the value");
+
+    let mut view = Some(crate::client_core::OrderView {
+        contract: Contract::default(), order: crate::api::types::Order::default(),
+        state: Default::default(), last_fill_price: 0.0, client_id: 0,
+    });
+    crate::client_core::ClientCore::report_client(&mut view, &fe);
+    let v = view.unwrap();
+    assert_eq!((v.client_id, v.order.client_id), (198, 198));
+}
+
 // Before the commission frame, req_executions replays the execution alone.
 #[test]
 fn req_executions_without_a_commission_report_sends_the_execution_only() {
@@ -4514,6 +4538,7 @@ fn captured_fill_exec() -> crate::bridge::FillExec {
         client_id: 250,
         model_code: String::new(),
         order_ref: "pm0925-fill-BUY".into(),
+        last_liquidity: 0,
         combo: None,
     }
 }

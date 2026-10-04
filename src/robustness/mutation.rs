@@ -15,7 +15,8 @@ use rand::SeedableRng;
 
 use crate::test_support::decoders::{DecoderGroup, DECODERS};
 use super::{all_log_levels, alloc_bound, mutate, peak_alloc, server_frames, show, Sample};
-use crate::golden::session::{Link, Session, BAD_COPIES};
+use crate::test_support::scenario::runner::{Link, RustDriver};
+use crate::test_support::scenario::session::{Links, Session, BAD_COPIES};
 use crate::test_support::parse_fields;
 
 /// Mutations of each frame: `IBX_MUTATIONS` when set, else `default`.
@@ -88,7 +89,7 @@ fn link_of(s: &Sample) -> Link {
 
 /// A test request on each link: the engine answers each with its
 /// heartbeat, so the session went on.
-fn assert_links_answer(s: &mut Session, probe: &str, context: &str) {
+fn assert_links_answer(s: &mut Links, probe: &str, context: &str) {
     s.farm.send_fix(&[(35, "1"), (112, probe)]);
     s.ccp.send_fix(&[(35, "1"), (112, probe)]);
     s.hmds.send_fix(&[(35, "1"), (112, probe)]);
@@ -146,7 +147,7 @@ fn recorded_frames_mutated_through_the_engine() {
                 // The recorded text frames of the farms have no checksum
                 // trailer: it is put back for the wire.
                 let raw = if sample.raw.starts_with(b"8=FIX.") && !sample.raw.windows(4).any(|w| w == b"\x0110=") {
-                    crate::golden::fixture::rebuild_text(&parse_fields(&sample.raw))
+                    crate::test_support::scenario::record::rebuild_text(&parse_fields(&sample.raw))
                 } else {
                     sample.raw.clone()
                 };
@@ -162,17 +163,18 @@ fn recorded_frames_mutated_through_the_engine() {
             }
         }
         s.settle();
-        assert_links_answer(&mut s, &format!("probe{n}"), file);
+        assert_links_answer(&mut s.links, &format!("probe{n}"), file);
     }
     assert!(given > 10_000, "messages given: {given}");
 }
 
-/// The golden replays of ibx#486 with bad copies of each server frame
-/// given to the engine right before it: they run to their end, and the
-/// links answer a test request.
+/// The scenario replays of ibx#486 and ibx#487 (every codec fixture and
+/// every recorded scenario) with bad copies of each server frame given to
+/// the engine right before it: they run to their end, and the links answer
+/// a test request.
 #[test]
 fn replays_run_on_with_bad_frames_in_between() {
-    use crate::golden::{account, fixture::load, hmds, orders, replay};
+    use crate::test_support::scenario::{load_path, run, Options};
 
     /// Clears the hook, also when a replay panics.
     struct Hook;
@@ -184,26 +186,31 @@ fn replays_run_on_with_bad_frames_in_between() {
 
     all_log_levels();
     let mut rng = rng();
-    let per_frame = mutations(3);
+    let per_frame = mutations(2);
     BAD_COPIES.with(|h| *h.borrow_mut() = Some(Box::new(move |raw: &[u8]| {
         (0..per_frame).map(|_| mutate(&mut rng, raw)).collect()
     })));
     let _hook = Hook;
 
-    for name in ["l1_aapl_spy_preopen", "l1_spy_qqq_rth", "l1_aapl_preopen_delayed"] {
-        let mut r = replay::replay_market_data(&load(name), "usfarm", &[], None);
-        assert_links_answer(&mut r.session, "probe", name);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gw1040");
+    let mut files = Vec::new();
+    let mut dirs = vec![root.join("codec"), root.join("scenarios")];
+    while let Some(dir) = dirs.pop() {
+        for path in std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "jsonl") && !path.to_string_lossy().ends_with(".api.jsonl") {
+                files.push(path);
+            }
+        }
     }
-    let _ = hmds::replay_hmds(&load("hmds_bars_and_head_timestamp"));
-    let _ = account::replay_account_summary(&load("account_summary"));
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gw1040/codec");
-    let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().flatten()
-        .filter_map(|e| e.file_name().to_str()?.strip_suffix(".jsonl").map(str::to_string))
-        .filter(|n| n.starts_with("orders_"))
-        .collect();
-    names.sort();
-    assert!(names.len() > 10, "order fixtures: {names:?}");
-    for name in names {
-        let _ = orders::replay_orders(&load(&name));
+    files.sort();
+    assert!(files.len() > 40, "fixtures: {}", files.len());
+    for path in files {
+        let name = path.strip_prefix(&root).unwrap().display().to_string();
+        let mut links = Links::new();
+        let mut driver = RustDriver::new(&links);
+        let _ = run(&load_path(&path), &Options::default(), &mut links, &mut driver);
+        assert_links_answer(&mut links, "probe", &name);
     }
 }

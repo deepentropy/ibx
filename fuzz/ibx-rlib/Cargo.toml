@@ -15,7 +15,7 @@ path = "../../src/lib.rs"
 crate-type = ["rlib"]
 
 [features]
-test-support = []
+test-support = ["dep:serde_json"]
 
 [dependencies]
 # Hot loop
@@ -63,6 +63,9 @@ mac_address = "1"
 
 # Dates and time zones
 jiff = "0.2.28"
+
+# Scenario files of the replay tests (test-support only)
+serde_json = { version = "1", optional = true }
 
 # The crate's python feature is not built here.
 [lints.rust]
