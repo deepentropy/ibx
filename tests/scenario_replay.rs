@@ -217,11 +217,10 @@ fn combo_per_leg_prices() {
 }
 
 // A combo directed to ARCA (26/09/2026): no definition, 200. The cancel
-// that follows gives orderStatus ApiCancelled in the reference (the order
-// id stays in its API pending map, ORDER-CANCEL 1: permId 0, remaining
-// 1, the prices unset); ibx answers 10147.
+// that follows gives orderStatus ApiCancelled (the order id stays in the
+// reference's API pending map, ORDER-CANCEL 1: permId 0, remaining 1, the
+// prices unset).
 #[test]
-#[ignore = "ibx#487: the cancel of a combo refused with 200 gives ApiCancelled in the reference, 10147 in ibx"]
 fn directed_combo_without_definition_then_cancel() {
     check("20260926b/i105_combo_directed", Options::default());
 }
@@ -281,19 +280,17 @@ fn open_orders_and_positions() {
 }
 
 // Orders of earlier sessions known from the logon replay (01/10/2026,
-// paper): 8 orders the replay gives as not routed yet (150=A 20=3 39=A),
-// then reqGlobalCancel of client 193: the 8 cancels tagged ALL, in the
-// reference's book order. Only the frames are checked: the callbacks
-// differ where ibx is not the reference yet (openOrder shows API order id
-// 0 and the ClOrdID's id as permId for an order with no 6121; the orders
-// are client 0's, so the reference gives client 193 nothing after the
-// cancel, where ibx reports their statuses).
+// paper): 8 orders of client 0 the replay gives as not routed yet (150=A
+// 20=3 39=A), then client 193: reqAllOpenOrders lists them in the book's
+// order, API order id 0 (no 6121), permId the ClOrdID's id, client 0;
+// reqGlobalCancel sends the 8 cancels tagged ALL in the book's order, and
+// client 193 gets nothing of their reports (the orders are client 0's);
+// reqAllOpenOrders then lists none.
 #[test]
 fn global_cancel_of_orders_of_earlier_sessions() {
-    let o = replay(&load_scenario("20261001/global_cancel_replayed"), &orders());
-    assert_eq!(o.frame_error, None);
-    assert!(o.not_made.is_empty(), "{:?}", o.not_made);
+    let o = check("20261001/global_cancel_replayed", orders());
     assert_eq!(o.frames_compared, 8, "the 8 cancels");
+    assert_eq!(o.theirs.len(), 18);
 }
 
 // ── Historical data, scanners, news ──

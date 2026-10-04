@@ -593,6 +593,18 @@ pub fn is_open_status(status: &str) -> bool {
     )
 }
 
+/// The average, last fill and market cap prices of an orderStatus: an
+/// order that never left (ApiCancelled) has them unset, as the reference
+/// writes them (`jextend.dL.a(Collection, String)`; scenario
+/// i105_combo_directed of 26/09/2026: MAX, MAX, MAX).
+pub fn status_prices(r: &OrderReport) -> (f64, f64, f64) {
+    if r.status == "ApiCancelled" {
+        (f64::MAX, f64::MAX, f64::MAX)
+    } else {
+        (r.avg_fill_price, r.last_fill_price, 0.0)
+    }
+}
+
 /// Convert OrderStatus enum to ibapi-compatible string.
 #[inline]
 pub fn order_status_str(status: OrderStatus) -> &'static str {
@@ -998,6 +1010,9 @@ pub struct ClientCore {
     pub what_if_orders: Mutex<HashMap<OrderId, std::collections::VecDeque<(ApiContract, ApiOrder)>>>,
     // Ids of tracked orders that were filled or cancelled: never sent again (ibx#463).
     pub finished_orders: Mutex<HashSet<OrderId>>,
+    /// Executions of other clients' orders, by execution id without its
+    /// revision: their commission reports are not given.
+    pub silent_executions: Mutex<HashSet<String>>,
     /// The highest order id this client placed (orders and what-ifs), as
     /// the reference records it for the client when an order goes on
     /// (`jextend.bH.Z()@78`, `jextend.H.c(int)`): a new order at or below
@@ -1280,6 +1295,7 @@ impl ClientCore {
             held_open_orders: Mutex::new(Vec::new()),
             what_if_orders: Mutex::new(HashMap::new()),
             finished_orders: Mutex::new(HashSet::new()),
+            silent_executions: Mutex::new(HashSet::new()),
             highest_order_id: AtomicI64::new(0),
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashSet::new()),
@@ -2634,6 +2650,17 @@ impl ClientCore {
 
     /// Store an execution for `req_executions`. Returns the commission
     /// report that came before it, to send after `exec_details`.
+    /// Store an execution of another API client's order (kept for
+    /// `req_executions`); its commission report is not given to this
+    /// client (`jextend.ba.a(dq, aQ)`).
+    pub fn push_silent_execution(&self, contract: ApiContract, execution: ApiExecution, time_secs: Option<i64>) {
+        let (base, _) = crate::engine::hot_loop::ccp::split_exec_revision(&execution.exec_id);
+        if !base.is_empty() {
+            self.silent_executions.lock().unwrap().insert(base.to_string());
+        }
+        let _ = self.push_execution(-1, contract, execution, time_secs);
+    }
+
     pub fn push_execution(&self, req_id: i64, contract: ApiContract, execution: ApiExecution, time_secs: Option<i64>) -> Option<ApiCommissionAndFeesReport> {
         let (base, _) = crate::engine::hot_loop::ccp::split_exec_revision(&execution.exec_id);
         let commission_and_fees = if execution.exec_id.is_empty() {
@@ -2688,6 +2715,8 @@ impl ClientCore {
     /// only for a known execution (ibx#471).
     pub fn apply_commission(&self, report: &ApiCommissionAndFeesReport) -> bool {
         let (base, _) = crate::engine::hot_loop::ccp::split_exec_revision(&report.exec_id);
+        // The commission of another client's execution: kept, not reported.
+        let silent = self.silent_executions.lock().unwrap().contains(base);
         let mut execs = self.executions.lock().unwrap();
         let stored = execs.iter_mut().rev().find(|se| {
             !se.execution.exec_id.is_empty()
@@ -2696,7 +2725,7 @@ impl ClientCore {
         match stored {
             Some(se) => {
                 se.commission_and_fees = Some(report.clone());
-                true
+                !silent
             }
             None => {
                 self.pending_commissions.lock().unwrap().insert(base.to_string(), report.clone());
@@ -2840,7 +2869,8 @@ impl ClientCore {
                     || info.as_ref().is_some_and(|i| i.order.outside_rth);
                 (t.contract, order, t.last_fill_price, client_id)
             }
-            (None, Some(i)) => (i.contract, i.order, 0.0, 0),
+            // An order the server reported: its own client id.
+            (None, Some(i)) => { let client_id = i.order.client_id as i64; (i.contract, i.order, 0.0, client_id) }
             (None, None) => return None,
         };
         let mut contract = if contract.con_id != 0 && !contract.sec_type.eq_ignore_ascii_case("BAG") {
@@ -2851,6 +2881,9 @@ impl ClientCore {
         let mut order = order;
         reported_unset_values(&mut order);
         Self::apply_combo_view(order_id, &mut contract, &mut order, shared);
+        // The API order id the reference shows (0 for an order of another
+        // session whose report gave none).
+        order.order_id = shared.orders.api_order_id(order_id);
         Some(OrderView { contract, order, state, last_fill_price, client_id })
     }
 
@@ -3083,6 +3116,40 @@ impl ClientCore {
         }
 
         result
+    }
+
+    /// The answer to an open-order request, as the reference lists it
+    /// (`jextend.cs.o()`): the orders of the book in its order
+    /// (`jclient.jv.w()`, a hash table keyed by permId, walked bucket by
+    /// bucket in insertion order; captured 01/10/2026), every client's for
+    /// reqAllOpenOrders, this client's for reqOpenOrders
+    /// (`jextend.cu.b(List)@149`: `pe.T() == clientId`). Each with the
+    /// order id and client id the reference shows.
+    pub fn open_orders_listing(&self, shared: &SharedState, request: OpenOrdersRequest) -> Vec<(OrderId, TrackedOrder, i64)> {
+        let me = self.client_id.load(Ordering::Relaxed);
+        let tracked: HashSet<OrderId> = self.open_orders.lock().unwrap().keys().copied().collect();
+        let mut out: Vec<(OrderId, TrackedOrder, i64, (usize, u64))> = Vec::new();
+        for (oid, mut t) in self.collect_open_orders(shared) {
+            let client_id = if tracked.contains(&oid) { me } else { t.order.client_id as i64 };
+            if request == OpenOrdersRequest::Open && client_id != me {
+                continue;
+            }
+            if !tracked.contains(&oid) {
+                // An order the server reported: what is left of it.
+                t.filled = t.order.filled_quantity.max(0.0);
+                t.remaining = (t.order.total_quantity - t.filled).max(0.0);
+            }
+            let (seq, peak) = shared.orders.book_place(oid);
+            let perm = if t.order.perm_id != 0 { t.order.perm_id } else { oid };
+            let place = (crate::engine::context::book_bucket(perm, crate::engine::context::book_table_size(peak)),
+                seq.unwrap_or(u64::MAX));
+            let shown = shared.orders.api_order_id(oid);
+            t.order.order_id = shown;
+            t.order.client_id = client_id as i32;
+            out.push((shown, t, client_id, place));
+        }
+        out.sort_by_key(|(.., place)| *place);
+        out.into_iter().map(|(id, t, c, _)| (id, t, c)).collect()
     }
 
     // ── Dispatch preparation methods ──

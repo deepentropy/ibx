@@ -189,7 +189,7 @@ impl EClient {
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::Open, &shared) {
             return Ok(());
         }
-        self.answer_open_orders(py, &shared)
+        self.answer_open_orders(py, &shared, crate::client_core::OpenOrdersRequest::Open)
     }
 
     /// Request all open orders across all clients. Held like
@@ -200,7 +200,7 @@ impl EClient {
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::All, &shared) {
             return Ok(());
         }
-        self.answer_open_orders(py, &shared)
+        self.answer_open_orders(py, &shared, crate::client_core::OpenOrdersRequest::All)
     }
 
     /// Automatically bind future orders to this client.
@@ -341,9 +341,11 @@ impl EClient {
 impl EClient {
     /// The open orders, each as open_order then order_status, then the end
     /// of the list.
-    pub(crate) fn answer_open_orders(&self, py: Python<'_>, shared: &SharedState) -> PyResult<()> {
-        let orders = self.core.collect_open_orders(shared);
-        for (order_id, tracked) in &orders {
+    pub(crate) fn answer_open_orders(&self, py: Python<'_>, shared: &SharedState, request: crate::client_core::OpenOrdersRequest) -> PyResult<()> {
+        // In the book's order, with the order id and client id the
+        // reference shows; OPEN_ORDER then ORDER_STATUS for each.
+        let orders = self.core.open_orders_listing(shared, request);
+        for (order_id, tracked, client_id) in &orders {
             // A combo with its legs (ibx#470).
             let c_py = Py::new(py, Contract::from_api(py, &tracked.contract)?)?.into_any();
             // A combo's per-leg prices and routing with it (ibx#470).
@@ -359,7 +361,7 @@ impl EClient {
             self.wrapper.call_method(
                 py, "order_status",
                 (*order_id, tracked.status.as_str(), tracked.filled, tracked.remaining,
-                 0.0f64, tracked.order.perm_id, tracked.order.parent_id, 0.0f64, 0i64, "", 0.0f64),
+                 0.0f64, tracked.order.perm_id, tracked.order.parent_id, tracked.last_fill_price, *client_id, "", 0.0f64),
                 None,
             )?;
         }

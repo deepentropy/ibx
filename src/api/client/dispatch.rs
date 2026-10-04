@@ -103,6 +103,9 @@ impl EClient {
                 })
             };
             self.core.apply_fill_exec(&mut exec, &fill_exec, fill.order_id);
+            // The order id the reference shows for the order.
+            let shown = self.shared.orders.api_order_id(fill.order_id);
+            exec.order_id = shown;
             // A combo's report shows the combo or the leg (ibx#470).
             let mut c = c;
             ClientCore::apply_combo_exec(&fill_exec, &mut c, &mut exec);
@@ -123,13 +126,13 @@ impl EClient {
             ClientCore::report_client(&mut view, &fill_exec);
             let client_id = match &view {
                 Some(view) => {
-                    wrapper.open_order(fill.order_id, &view.contract, &view.order, &view.state);
+                    wrapper.open_order(shown, &view.contract, &view.order, &view.state);
                     view.client_id
                 }
                 None => 0,
             };
             wrapper.order_status(
-                fill.order_id, status, filled_f, remaining_f,
+                shown, status, filled_f, remaining_f,
                 avg_f, perm_id, parent_id, price_f, client_id, "", 0.0,
             );
             self.core.remember_report(fill.order_id, crate::client_core::OrderReport {
@@ -153,6 +156,11 @@ impl EClient {
         for (contract, mut exec, fill_exec) in self.shared.orders.drain_untracked_executions() {
             let order_id = exec.order_id;
             self.core.apply_fill_exec(&mut exec, &fill_exec, order_id);
+            // An execution of another client's order: nothing for this one.
+            if fill_exec.other_client {
+                self.core.push_silent_execution(contract, exec, fill_exec.time_secs);
+                continue;
+            }
             if let Some(report) = self.core.push_execution(-1, contract, exec, fill_exec.time_secs) {
                 wrapper.commission_and_fees_report(&report);
             }
@@ -163,7 +171,7 @@ impl EClient {
         for report in self.shared.orders.drain_commission_reports() {
             if self.core.apply_commission(&report) {
                 if let Some((order_id, last)) = self.core.report_of_commission(&report) {
-                    Self::repeat_order_report(wrapper, order_id, &last);
+                    self.repeat_order_report(wrapper, order_id, &last);
                 }
                 wrapper.commission_and_fees_report(&report);
             }
@@ -173,7 +181,7 @@ impl EClient {
         // error, ahead of the status.
         for (order_id, code, msg) in self.shared.orders.drain_order_errors() {
             self.core.note_order_error(order_id, code);
-            wrapper.error(order_id, code, &msg, "");
+            wrapper.error(self.shared.orders.api_order_id(order_id), code, &msg, "");
         }
 
         // Order updates → open_order + order_status for every report of a
@@ -189,7 +197,7 @@ impl EClient {
         // the order and its status once more (ibx#486; every four-leg
         // recording of 26/09 to 02/10/2026).
         for (order_id, code, msg) in self.shared.orders.drain_order_notices() {
-            wrapper.error(order_id, code, &msg, "");
+            wrapper.error(self.shared.orders.api_order_id(order_id), code, &msg, "");
             if let Some(update) = reported.get(&order_id).filter(|_| code == 201) {
                 self.report_order_update(wrapper, update);
             }
@@ -225,8 +233,8 @@ impl EClient {
             }
         }
 
-        for _ in released {
-            self.answer_open_orders(wrapper);
+        for request in released {
+            self.answer_open_orders(wrapper, request);
         }
     }
 
@@ -245,19 +253,21 @@ impl EClient {
             avg_fill_price: update.avg_fill_price as f64 / PRICE_SCALE_F,
             perm_id: update.perm_id, parent_id: update.parent_id, last_fill_price, client_id,
         };
-        Self::repeat_order_report(wrapper, update.order_id, &report);
+        self.repeat_order_report(wrapper, update.order_id, &report);
         self.core.remember_report(update.order_id, report);
         self.core.update_order_status(update.order_id, status, filled_f, remaining_f);
     }
 
     /// openOrder (when the report has one) and orderStatus of a report.
-    fn repeat_order_report(wrapper: &mut impl Wrapper, order_id: i64, r: &crate::client_core::OrderReport) {
+    fn repeat_order_report(&self, wrapper: &mut impl Wrapper, order_id: i64, r: &crate::client_core::OrderReport) {
+        let order_id = self.shared.orders.api_order_id(order_id);
         if let Some(v) = &r.view {
             wrapper.open_order(order_id, &v.contract, &v.order, &v.state);
         }
+        let (avg, last, mkt_cap) = crate::client_core::status_prices(r);
         wrapper.order_status(
-            order_id, &r.status, r.filled, r.remaining, r.avg_fill_price,
-            r.perm_id, r.parent_id, r.last_fill_price, r.client_id, "", 0.0,
+            order_id, &r.status, r.filled, r.remaining, avg,
+            r.perm_id, r.parent_id, last, r.client_id, "", mkt_cap,
         );
     }
 

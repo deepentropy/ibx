@@ -159,7 +159,7 @@ impl EClient {
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::Open, &self.shared) {
             return;
         }
-        self.answer_open_orders(wrapper);
+        self.answer_open_orders(wrapper, crate::client_core::OpenOrdersRequest::Open);
     }
 
     /// Request all open orders. Matches `reqAllOpenOrders` in C++.
@@ -170,17 +170,23 @@ impl EClient {
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::All, &self.shared) {
             return;
         }
-        self.answer_open_orders(wrapper);
+        self.answer_open_orders(wrapper, crate::client_core::OpenOrdersRequest::All);
     }
 
-    /// The open orders, then the end of the list.
-    pub(crate) fn answer_open_orders(&self, wrapper: &mut impl Wrapper) {
-        for (order_id, tracked) in self.core.collect_open_orders(&self.shared) {
+    /// The open orders, each with its status, then the end of the list
+    /// (`jextend.dL.b(pe, int, String, String, String)@41-46`: OPEN_ORDER
+    /// then ORDER_STATUS).
+    pub(crate) fn answer_open_orders(&self, wrapper: &mut impl Wrapper, request: crate::client_core::OpenOrdersRequest) {
+        for (order_id, tracked, client_id) in self.core.open_orders_listing(&self.shared, request) {
             let state = crate::api::types::OrderState {
-                status: tracked.status,
+                status: tracked.status.clone(),
                 ..Default::default()
             };
             wrapper.open_order(order_id, &tracked.contract, &tracked.order, &state);
+            wrapper.order_status(
+                order_id, &tracked.status, tracked.filled, tracked.remaining, 0.0,
+                tracked.order.perm_id, tracked.order.parent_id, tracked.last_fill_price, client_id, "", 0.0,
+            );
         }
         wrapper.open_order_end();
     }

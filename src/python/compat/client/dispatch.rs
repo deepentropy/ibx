@@ -155,11 +155,13 @@ impl EClient {
 
     /// open_order (when the report has one) and order_status of a report.
     fn repeat_order_report(&self, py: Python<'_>, order_id: OrderId, r: &crate::client_core::OrderReport) -> PyResult<()> {
+        let order_id = self.shared_state().map(|s| s.orders.api_order_id(order_id)).unwrap_or(order_id);
         if let Some(v) = &r.view {
             self.send_open_order(py, order_id, v)?;
         }
+        let (avg, last, mkt_cap) = crate::client_core::status_prices(r);
         call_wrapper!(self.wrapper, py, "order_status", (order_id, r.status.as_str(), r.filled, r.remaining,
-             r.avg_fill_price, r.perm_id, r.parent_id, r.last_fill_price, r.client_id, "", 0.0f64));
+             avg, r.perm_id, r.parent_id, last, r.client_id, "", mkt_cap));
         Ok(())
     }
 
@@ -253,6 +255,9 @@ impl EClient {
                 ..Default::default()
             };
             self.core.apply_fill_exec(&mut api_exec, &fill_exec, fill.order_id);
+            // The order id the reference shows for the order.
+            let shown = shared.orders.api_order_id(fill.order_id);
+            api_exec.order_id = shown;
             // A combo's report shows the combo or the leg (ibx#470).
             let mut api_contract = api_contract;
             crate::client_core::ClientCore::apply_combo_exec(&fill_exec, &mut api_contract, &mut api_exec);
@@ -271,7 +276,7 @@ impl EClient {
                 price: api_exec.price,
                 perm_id,
                 client_id: api_exec.client_id,
-                order_id: fill.order_id,
+                order_id: shown,
                 liquidation: 0,
                 cum_qty: api_exec.cum_qty,
                 avg_price: api_exec.avg_price,
@@ -301,12 +306,12 @@ impl EClient {
             crate::client_core::ClientCore::report_client(&mut view, &fill_exec);
             let client_id = match &view {
                 Some(view) => {
-                    self.send_open_order(py, fill.order_id, view)?;
+                    self.send_open_order(py, shown, view)?;
                     view.client_id
                 }
                 None => 0,
             };
-            call_wrapper!(self.wrapper, py, "order_status", (fill.order_id, status, cum_qty, remaining,
+            call_wrapper!(self.wrapper, py, "order_status", (shown, status, cum_qty, remaining,
                  avg_price, perm_id, parent_id, price, client_id, "", 0.0f64));
             self.core.remember_report(fill.order_id, crate::client_core::OrderReport {
                 view, status: status.into(), filled: cum_qty, remaining, avg_fill_price: avg_price,
@@ -329,6 +334,11 @@ impl EClient {
         for (contract, mut exec, fill_exec) in shared.orders.drain_untracked_executions() {
             let order_id = exec.order_id;
             self.core.apply_fill_exec(&mut exec, &fill_exec, order_id);
+            // An execution of another client's order: nothing for this one.
+            if fill_exec.other_client {
+                self.core.push_silent_execution(contract, exec, fill_exec.time_secs);
+                continue;
+            }
             if let Some(cr) = self.core.push_execution(-1, contract, exec, fill_exec.time_secs) {
                 self.send_commission_report(py, &cr)?;
             }
@@ -350,7 +360,7 @@ impl EClient {
         // error, ahead of the status.
         for (order_id, code, msg) in shared.orders.drain_order_errors() {
             self.core.note_order_error(order_id, code);
-            call_wrapper!(self.wrapper, py, "error", (order_id, code, msg.as_str(), ""));
+            call_wrapper!(self.wrapper, py, "error", (shared.orders.api_order_id(order_id), code, msg.as_str(), ""));
         }
 
         // Drain order updates -> orderStatus
@@ -364,7 +374,7 @@ impl EClient {
         // their report, as the reference writes them; a reject then gives
         // the order and its status once more (ibx#486).
         for (order_id, code, msg) in shared.orders.drain_order_notices() {
-            call_wrapper!(self.wrapper, py, "error", (order_id, code, msg.as_str(), ""));
+            call_wrapper!(self.wrapper, py, "error", (shared.orders.api_order_id(order_id), code, msg.as_str(), ""));
             if let Some(update) = reported.get(&order_id).filter(|_| code == 201) {
                 self.report_order_update(py, shared, update)?;
             }
@@ -375,8 +385,8 @@ impl EClient {
         // engine's status request sets the state (ibx#252).
         shared.orders.drain_cancel_rejects();
 
-        for _ in released {
-            if let Err(e) = self.answer_open_orders(py, shared) {
+        for request in released {
+            if let Err(e) = self.answer_open_orders(py, shared, request) {
                 callback_raised(py, "open_order", e)?;
             }
         }

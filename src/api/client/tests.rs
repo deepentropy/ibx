@@ -4566,6 +4566,7 @@ fn captured_fill_exec() -> crate::bridge::FillExec {
         order_ref: "pm0925-fill-BUY".into(),
         last_liquidity: 0,
         combo: None,
+        other_client: false,
     }
 }
 
@@ -5396,7 +5397,9 @@ fn open_order_requests_wait_for_the_order_replay() {
         else if e == "open_order_end" { "end" }
         else { e.as_str() }
     }).collect();
-    assert_eq!(kinds, vec!["open_order", "order_status", "open_order", "end", "open_order", "end"]);
+    // Each listed order with its status, as the reference writes it
+    // (OPEN_ORDER then ORDER_STATUS).
+    assert_eq!(kinds, vec!["open_order", "order_status", "open_order", "order_status", "end", "open_order", "order_status", "end"]);
 
     // Answered at once again when the link is up.
     let mut w = RecordingWrapper::default();
@@ -5404,6 +5407,51 @@ fn open_order_requests_wait_for_the_order_replay() {
     assert_eq!(w.events.last().map(String::as_str), Some("open_order_end"));
     client.process_msgs(&mut w);
     assert_eq!(w.events.iter().filter(|e| *e == "open_order_end").count(), 1);
+}
+
+// reqAllOpenOrders lists every order of the book in its order (a hash
+// table keyed by permId, walked bucket by bucket; captured 01/10/2026),
+// with the order id and client id the reference shows; reqOpenOrders
+// only this client's (`jextend.cu.b(List)@149`).
+#[test]
+fn open_order_listings_go_in_the_books_order_by_client() {
+    use crate::bridge::RichOrderInfo;
+    let (client, _rx, shared) = test_client();
+    client.core.client_id.store(193, std::sync::atomic::Ordering::Relaxed);
+    let replay = [(1790862363895062i64, 0i32), (1790862423941063, 0), (1790863660514062, 193), (1790865742870063, 0)];
+    for (seq, (id, owner)) in replay.iter().enumerate() {
+        let order = Order { order_id: *id, perm_id: *id, client_id: *owner, total_quantity: 1.0, ..Default::default() };
+        let order_state = crate::api::types::OrderState { status: "PreSubmitted".into(), ..Default::default() };
+        shared.orders.push_order_info(*id, RichOrderInfo { contract: spy(), order, order_state, last_exec: Default::default() });
+        shared.orders.set_api_order_id(*id, 0);
+        shared.orders.note_book(*id, seq as u64, seq + 1);
+    }
+    let all = client.core.open_orders_listing(&shared, crate::client_core::OpenOrdersRequest::All);
+    let perms: Vec<i64> = all.iter().map(|(_, t, _)| t.order.perm_id).collect();
+    assert_eq!(perms, [1790865742870063, 1790862423941063, 1790863660514062, 1790862363895062]);
+    assert!(all.iter().all(|(id, t, _)| *id == 0 && t.order.order_id == 0 && t.remaining == 1.0));
+    assert_eq!(all.iter().map(|(.., c)| *c).collect::<Vec<_>>(), [0, 0, 193, 0]);
+    let mine = client.core.open_orders_listing(&shared, crate::client_core::OpenOrdersRequest::Open);
+    assert_eq!(mine.iter().map(|(_, t, _)| t.order.perm_id).collect::<Vec<_>>(), [1790863660514062]);
+}
+
+// An execution of another client's order is kept for reqExecutions, with
+// no live callback and no commission report (`jextend.ba.a(dq, aQ)`).
+#[test]
+fn an_execution_of_another_clients_order_gives_no_callback() {
+    let (client, _rx, shared) = test_client();
+    let exec = crate::api::types::Execution { exec_id: "0000e0d5.6abe.01.01".into(), order_id: 35, shares: 1.0, ..Default::default() };
+    shared.orders.push_untracked_execution(spy(), exec,
+        crate::bridge::FillExec { exec_id: "0000e0d5.6abe.01.01".into(), other_client: true, ..Default::default() });
+    shared.orders.push_commission_report(crate::api::types::CommissionAndFeesReport {
+        exec_id: "0000e0d5.6abe.01.01".into(), commission_and_fees: 1.0, currency: "USD".into(), ..Default::default()
+    });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert!(w.events.iter().all(|e| !e.starts_with("exec") && !e.starts_with("commission")), "{:?}", w.events);
+    let mut w = RecordingWrapper::default();
+    client.req_executions(4, &Default::default(), &mut w);
+    assert!(w.events.iter().any(|e| e.starts_with("exec_details")), "{:?}", w.events);
 }
 
 // ═══════════════════════════════════════════════════════════════════

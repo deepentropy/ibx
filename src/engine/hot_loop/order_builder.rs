@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::bridge::SharedState;
 use crate::config::{chrono_free_timestamp, unix_to_ib_utc_dash};
-use crate::engine::context::Context;
+use crate::engine::context::{book_bucket, book_table_size, Context};
 use crate::protocol::connection::Connection;
 use crate::protocol::fix;
 use crate::types::{AlgoParams, OrderCondition, OrderId, OrderRequest, OrderStatus, OrderUpdate, Side};
@@ -63,6 +63,12 @@ pub(crate) fn drain_and_send_orders(
         // order behind another of its OCA group, a request of an order
         // behind that order. A child sent ahead of its parent is refused by
         // the server (201 "Can't find parent order", paper 01/10/2026).
+        // The cancel of an order that never left (it waits, or the
+        // reference kept it pending after a refusal): ApiCancelled,
+        // nothing on the wire (`jextend.bw.a(pe)@162`, `jextend.dK.H(int)`).
+        if let OrderRequest::Cancel { order_id } = order_req && api_cancel(context, shared, order_id) {
+            continue;
+        }
         if waits_behind(&order_req, &context.rth_parked) {
             context.rth_parked.push(rewrap(order_req));
             continue;
@@ -111,6 +117,13 @@ pub(crate) fn drain_and_send_orders(
                 Ready::Refused(code, message) => {
                     log::warn!("Combo order {} refused: {} {}", oid, code, message);
                     shared.orders.push_order_error(oid, code, message);
+                    // No definition: the reference keeps the order id in
+                    // its API pending map, with no order made; a later
+                    // cancel ends it as ApiCancelled (scenario
+                    // i105_combo_directed of 26/09/2026).
+                    if code == crate::engine::combo::NO_DEFINITION.0 && !what_if {
+                        context.api_pending.insert(oid, order_req);
+                    }
                     continue;
                 }
                 Ready::Built(built) => {
@@ -1603,37 +1616,23 @@ fn global_cancel(
     hb: &mut HeartbeatState,
     shared: &Arc<SharedState>,
 ) {
-    // The orders that wait (a what-if is not an order: it keeps waiting).
+    // The orders that wait (a what-if is not an order: it keeps waiting),
+    // and those the reference kept pending.
     let parked = std::mem::take(&mut context.rth_parked);
     let mut ended: Vec<OrderId> = Vec::new();
     for req in &parked {
-        let Some(qty) = req.new_order_qty().filter(|_| !matches!(req, OrderRequest::SubmitWhatIf { .. })) else {
-            continue;
-        };
-        let bracket = matches!(req, OrderRequest::SubmitBracket { .. });
-        let parent = match req {
-            OrderRequest::SubmitBracket { parent_id, .. } => *parent_id,
-            _ => req.new_order_side().and_then(|(_, a)| a).map_or(0, |a| a.parent_id),
-        };
-        for (i, id) in request_order_ids(req).into_iter().enumerate() {
-            log::info!("Global cancel: order {} not sent, ApiCancelled", id);
-            shared.orders.push_order_update(OrderUpdate {
-                order_id: id,
-                instrument: req.instrument().unwrap_or(0),
-                status: OrderStatus::ApiCancelled,
-                filled_qty_fixed: 0,
-                remaining_qty_fixed: qty,
-                avg_fill_price: 0,
-                perm_id: 0,
-                parent_id: if bracket && i == 0 { 0 } else { parent },
-                timestamp_ns: context.now_ns(),
-            });
-            ended.push(id);
+        if req.new_order_qty().is_some() && !matches!(req, OrderRequest::SubmitWhatIf { .. }) {
+            ended.extend(api_cancelled(context, shared, req));
         }
     }
     context.rth_parked = parked.into_iter()
         .filter(|r| !request_order_ids(r).iter().any(|id| ended.contains(id)))
         .collect();
+    let mut pending: Vec<(OrderId, OrderRequest)> = context.api_pending.drain().collect();
+    pending.sort_by_key(|(id, _)| *id);
+    for (_, req) in pending {
+        api_cancelled(context, shared, &req);
+    }
 
     // The book, in its order.
     let table = book_table_size(context.book_peak);
@@ -1678,25 +1677,53 @@ fn global_cancel(
     }
 }
 
-/// The table size of a `java.util.HashMap` that held `peak` entries: 16,
-/// doubled each time the entries pass three quarters of it; it never
-/// shrinks.
-fn book_table_size(peak: usize) -> usize {
-    let mut size = 16;
-    while peak > size * 3 / 4 {
-        size *= 2;
+/// The orders of a new-order request end as ApiCancelled: orderStatus
+/// with permId 0, nothing filled and the whole quantity remaining, the
+/// prices unset (`jextend.dL.a(Collection, String)`; captured 25/09/2026
+/// and in i105_combo_directed of 26/09/2026). Their ids.
+fn api_cancelled(context: &Context, shared: &Arc<SharedState>, req: &OrderRequest) -> Vec<OrderId> {
+    let Some(qty) = req.new_order_qty() else { return Vec::new() };
+    let bracket = matches!(req, OrderRequest::SubmitBracket { .. });
+    let parent = match req {
+        OrderRequest::SubmitBracket { parent_id, .. } => *parent_id,
+        _ => req.new_order_side().and_then(|(_, a)| a).map_or(0, |a| a.parent_id),
+    };
+    let ids = request_order_ids(req);
+    for (i, &id) in ids.iter().enumerate() {
+        log::info!("Order {} never left: ApiCancelled", id);
+        shared.orders.push_order_update(OrderUpdate {
+            order_id: id,
+            instrument: req.instrument().unwrap_or(0),
+            status: OrderStatus::ApiCancelled,
+            filled_qty_fixed: 0,
+            remaining_qty_fixed: qty,
+            avg_fill_price: 0,
+            perm_id: 0,
+            parent_id: if bracket && i == 0 { 0 } else { parent },
+            timestamp_ns: context.now_ns(),
+        });
     }
-    size
+    ids
 }
 
-/// The bucket of a permId in the reference's book, a `java.util.HashMap`
-/// keyed by a `Long` (`jclient.jv.l`): the key's hash, spread, masked by
-/// the table size. The book is walked bucket by bucket, each in insertion
-/// order.
-fn book_bucket(perm_id: OrderId, table: usize) -> usize {
-    let v = perm_id as u64;
-    let h = (v ^ (v >> 32)) as u32;
-    ((h ^ (h >> 16)) as usize) & (table - 1)
+/// A cancel of an order that never left: one the reference keeps pending
+/// after a refusal, or a single new order that waits (a bracket waits
+/// whole). It ends as ApiCancelled with the requests about it. False when
+/// the order is not such an order.
+fn api_cancel(context: &mut Context, shared: &Arc<SharedState>, order_id: OrderId) -> bool {
+    if let Some(req) = context.api_pending.remove(&order_id) {
+        api_cancelled(context, shared, &req);
+        return true;
+    }
+    let waiting = context.rth_parked.iter().position(|r| {
+        r.new_order_qty().is_some() && !matches!(r, OrderRequest::SubmitWhatIf { .. } | OrderRequest::SubmitBracket { .. })
+            && r.order_id() == order_id
+    });
+    let Some(at) = waiting else { return false };
+    let req = context.rth_parked.remove(at);
+    api_cancelled(context, shared, &req);
+    context.rth_parked.retain(|r| !request_order_ids(r).contains(&order_id));
+    true
 }
 
 /// The reference's answer to a cancel it does not send (ibx#464): the order
@@ -4205,6 +4232,42 @@ mod tests {
             assert_eq!((child.parent, child.oca_group.as_str()), (51, "51"));
         });
         assert_eq!(sent_ids(&frames), ["51.1"]);
+    }
+
+    // The cancel of an order that waits to be sent: ApiCancelled, nothing
+    // on the wire, its other requests dropped (`jextend.bw.a(pe)@162`). A
+    // combo refused with 200 stays pending: its cancel and a global cancel
+    // end it as ApiCancelled too (i105_combo_directed, 26/09/2026).
+    #[test]
+    fn cancel_of_an_order_that_never_left_is_api_cancelled() {
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.rth_parked.push(OrderRequest::SubmitLimit { order_id: 9, instrument: 0, side: Side::Buy, qty: 2, price: 100 });
+        context.rth_parked.push(OrderRequest::Modify {
+            new_order_id: 9, order_id: 9, qty: 3, kind: crate::types::OrderKind::Limit { price: 100 },
+            tif: b'0', attrs: Default::default(),
+        });
+        context.api_pending.insert(31, OrderRequest::SubmitLimit { order_id: 31, instrument: 0, side: Side::Buy, qty: 1, price: 100 });
+        context.api_pending.insert(32, OrderRequest::SubmitLimit { order_id: 32, instrument: 0, side: Side::Buy, qty: 1, price: 100 });
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 9 });
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 31 });
+        let shared = Arc::new(SharedState::new());
+        let (conn, mut peer) = crate::test_support::Peer::pair();
+        let mut conn = Some(conn);
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        assert!(peer.messages().is_empty());
+        assert!(shared.orders.drain_order_errors().is_empty());
+        let ended: Vec<(OrderId, OrderStatus, i64)> = shared.orders.drain_order_updates().iter()
+            .map(|u| (u.order_id, u.status, u.remaining_qty_fixed)).collect();
+        assert_eq!(ended, [(9, OrderStatus::ApiCancelled, 2 * crate::types::QTY_SCALE),
+            (31, OrderStatus::ApiCancelled, crate::types::QTY_SCALE)]);
+        assert!(context.rth_parked.is_empty(), "the replace of 9 goes with it");
+
+        context.pending_orders.push(OrderRequest::GlobalCancel);
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        let ended: Vec<OrderId> = shared.orders.drain_order_updates().iter().map(|u| u.order_id).collect();
+        assert_eq!(ended, [32]);
+        assert!(context.api_pending.is_empty());
     }
 
     // An order whose cancel is pending is not sent again: 161 at its

@@ -55,6 +55,10 @@ pub struct FillExec {
     /// A report of a combo order (ibx#470): the contract its execution
     /// shows, and for a leg report the leg's own execution values.
     pub combo: Option<Box<ComboExec>>,
+    /// An execution of an order of another API client: kept for
+    /// `req_executions`, with no live callback and no commission report
+    /// (`jextend.ba.a(dq, aQ)`: the reports go to the order's client).
+    pub other_client: bool,
 }
 
 /// The execution of a combo report (ibx#470): the reference shows the
@@ -543,6 +547,14 @@ pub struct OrderState {
     /// Orders the engine dropped with no status for the client: filled
     /// while the auth link was lost (ibx#251).
     forgotten_orders: Mutex<Vec<OrderId>>,
+    /// The API order id of an order of another session whose id differs
+    /// from the engine's key: the report's 6121, 0 when it has none.
+    api_order_ids: Mutex<HashMap<OrderId, OrderId>>,
+    /// The place of each order in the reference's book (insertion number)
+    /// and the most orders the book held, for the order of the open-order
+    /// listings (`jclient.jv.w()`).
+    book_seqs: Mutex<HashMap<OrderId, u64>>,
+    book_peak: std::sync::atomic::AtomicUsize,
 }
 
 impl OrderState {
@@ -561,7 +573,34 @@ impl OrderState {
             order_cache: Mutex::new(HashMap::new()),
             open_orders_held: AtomicBool::new(false),
             forgotten_orders: Mutex::new(Vec::new()),
+            api_order_ids: Mutex::new(HashMap::new()),
+            book_seqs: Mutex::new(HashMap::new()),
+            book_peak: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// The API order id the client sees for an order: the engine's key,
+    /// or for an order of another session the id its report gave (0 when
+    /// none), as the reference shows it.
+    pub fn api_order_id(&self, order_id: OrderId) -> OrderId {
+        self.api_order_ids.lock().unwrap().get(&order_id).copied().unwrap_or(order_id)
+    }
+
+    #[doc(hidden)] pub fn set_api_order_id(&self, order_id: OrderId, api_id: OrderId) {
+        self.api_order_ids.lock().unwrap().insert(order_id, api_id);
+    }
+
+    /// An order's place in the reference's book, and the most orders the
+    /// book held (engine side).
+    #[doc(hidden)] pub fn note_book(&self, order_id: OrderId, seq: u64, peak: usize) {
+        self.book_seqs.lock().unwrap().insert(order_id, seq);
+        self.book_peak.store(peak, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The book place of an order, and the most orders the book held.
+    pub fn book_place(&self, order_id: OrderId) -> (Option<u64>, usize) {
+        (self.book_seqs.lock().unwrap().get(&order_id).copied(),
+            self.book_peak.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Hold the open-order requests (`true`, at the logon or when the auth

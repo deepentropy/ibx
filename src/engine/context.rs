@@ -66,6 +66,27 @@ pub(crate) struct BookEntry {
     pub owner: Option<i64>,
 }
 
+/// The table size of a `java.util.HashMap` that held `peak` entries: 16,
+/// doubled each time the entries pass three quarters of it; it never
+/// shrinks.
+pub(crate) fn book_table_size(peak: usize) -> usize {
+    let mut size = 16;
+    while peak > size * 3 / 4 {
+        size *= 2;
+    }
+    size
+}
+
+/// The bucket of a permId in the reference's book, a `java.util.HashMap`
+/// keyed by a `Long` (`jclient.jv.l`): the key's hash, spread, masked by
+/// the table size. The book is walked bucket by bucket, each in insertion
+/// order (`jclient.jv.w()`).
+pub(crate) fn book_bucket(perm_id: OrderId, table: usize) -> usize {
+    let v = perm_id as u64;
+    let h = (v ^ (v >> 32)) as u32;
+    ((h ^ (h >> 16)) as usize) & (table - 1)
+}
+
 /// What the server last reported for a TRAIL LIMIT order. The offset is
 /// restated on its replace; all three fill the reports that omit them and
 /// show in openOrder (ib-agent#194, ib-agent#195, ibx#491). 0 = not reported.
@@ -197,6 +218,10 @@ pub struct Context {
     finished_order_ids: std::collections::VecDeque<OrderId>,
     /// The book entry of each order held (see [`BookEntry`]).
     pub(crate) book: HashMap<OrderId, BookEntry>,
+    /// Orders of this client the reference keeps in its API pending map
+    /// with no order made: a combo refused with 200 at its contract
+    /// lookup. A cancel or a global cancel ends them as ApiCancelled.
+    pub(crate) api_pending: HashMap<OrderId, OrderRequest>,
     next_book_seq: u64,
     /// Most orders held at once: the reference's book is a hash table
     /// that grows with it and never shrinks.
@@ -259,6 +284,7 @@ impl Context {
             finished_orders: HashMap::new(),
             finished_order_ids: std::collections::VecDeque::new(),
             book: HashMap::new(),
+            api_pending: HashMap::new(),
             next_book_seq: 0,
             book_peak: 0,
             account: AccountState::default(),
@@ -1193,6 +1219,16 @@ impl Context {
             if let Some(parent) = parent { entry.parent = parent; }
             if let Some(group) = oca_group { entry.oca_group = group.to_string(); }
         }
+    }
+
+    /// Whether this client gets the reports of an order (openOrder,
+    /// orderStatus, executions, commissions): those of its own orders, and
+    /// as client 0 those of a client that is not connected
+    /// (`jextend.ba.d(dK)`: the order's client, else client 0; no master
+    /// client, `ApiSettings.m_masterClientID` -1 by default). ibx is the
+    /// only client of its engine.
+    pub(crate) fn delivered(&self, order_id: OrderId) -> bool {
+        self.api_client_id == 0 || self.owned(order_id)
     }
 
     /// Whether this client may act on an order by its id: an order of

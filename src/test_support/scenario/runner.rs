@@ -591,6 +591,13 @@ pub fn run(sc: &Scenario, opts: &Options, links: &mut Links, driver: &mut dyn Dr
         seq_in: [0; 3], no_end: VecDeque::new(), gw_orders: HashMap::new(), pending_orders: Vec::new(),
         out: Outcome { con_id_given, ..Default::default() },
     };
+    // ibx's client id is known when its engine starts, before the server
+    // frames of the logon (which a scenario may hold before the client's
+    // START_API): the reports of those frames go by it.
+    if let Some(id) = run.recs.iter().find(|r| r.msg == "START_API").and_then(|r| r.request["clientId"].as_i64()) {
+        run.links.shared.reference.set_api_client_id(id);
+        run.driver.start(id);
+    }
     run.go();
     // The order id of a callback: its first field, the tenth of an
     // execution (after the request id and the contract).
