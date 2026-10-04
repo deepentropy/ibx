@@ -827,6 +827,12 @@ pub struct ReferenceState {
     soft_dollar_tiers: Mutex<Vec<crate::types::SoftDollarTier>>,
     family_codes: Mutex<Vec<crate::types::FamilyCode>>,
     white_branding_id: Mutex<String>,
+    /// The account ids of the logon's account list (6095), in logon order
+    /// (ibx#420).
+    managed_accounts: Mutex<Vec<String>>,
+    /// The accounts whose application is not approved (8092 of the last
+    /// logon reply or logon update, ibx#421).
+    pending_accounts: Mutex<Vec<String>>,
     /// FA session, from CCP logon tag 6108 (ibx#481).
     fa_session: std::sync::atomic::AtomicBool,
     /// The logon's super user and omnibus flags (ibx#417): either one lets
@@ -910,6 +916,8 @@ impl ReferenceState {
             soft_dollar_tiers: Mutex::new(Vec::new()),
             family_codes: Mutex::new(Vec::new()),
             white_branding_id: Mutex::new(String::new()),
+            managed_accounts: Mutex::new(Vec::new()),
+            pending_accounts: Mutex::new(Vec::new()),
             fa_session: std::sync::atomic::AtomicBool::new(false),
             super_user: AtomicBool::new(false),
             omnibus: AtomicBool::new(false),
@@ -1231,6 +1239,37 @@ impl ReferenceState {
         self.white_branding_id.lock().unwrap().clone()
     }
 
+    /// The account ids of the logon's account list, in logon order
+    /// (ibx#420).
+    pub fn managed_accounts(&self) -> Vec<String> {
+        self.managed_accounts.lock().unwrap().clone()
+    }
+
+    /// The text of the managed accounts callback (ibx#420): every account
+    /// of the logon's list, comma separated; `logon_account` when the
+    /// logon had no list.
+    pub fn managed_accounts_text(&self, logon_account: &str) -> String {
+        let accounts = self.managed_accounts.lock().unwrap();
+        if accounts.is_empty() {
+            logon_account.to_string()
+        } else {
+            crate::control::logon::managed_accounts_text(&accounts)
+        }
+    }
+
+    /// Whether `account`'s application is not approved yet (8092,
+    /// ibx#421; `jextend.bi.g(String)`).
+    pub fn account_pending(&self, account: &str) -> bool {
+        self.pending_accounts.lock().unwrap().iter().any(|a| a == account)
+    }
+
+    /// The accounts of the logon's list whose application is not
+    /// approved, in list order (ibx#421).
+    pub fn pending_managed_accounts(&self) -> Vec<String> {
+        let pending = self.pending_accounts.lock().unwrap();
+        self.managed_accounts.lock().unwrap().iter().filter(|a| pending.contains(a)).cloned().collect()
+    }
+
     /// True when the logon says this is an FA session (tag 6108, ibx#481).
     pub fn fa_session(&self) -> bool {
         self.fa_session.load(std::sync::atomic::Ordering::Relaxed)
@@ -1329,6 +1368,14 @@ impl ReferenceState {
         *self.white_branding_id.lock().unwrap() = id;
     }
 
+    #[doc(hidden)] pub fn set_managed_accounts(&self, accounts: Vec<String>) {
+        *self.managed_accounts.lock().unwrap() = accounts;
+    }
+
+    #[doc(hidden)] pub fn set_pending_accounts(&self, accounts: Vec<String>) {
+        *self.pending_accounts.lock().unwrap() = accounts;
+    }
+
     /// The account's feature list from the account config (6542), None
     /// until the config is known (ibx#425).
     pub fn account_features(&self) -> Option<Vec<String>> {
@@ -1425,8 +1472,12 @@ impl ReferenceState {
 
     /// The refusal of an algo order by the algo definitions the server
     /// sent (ibx#263); None when it passes or no definition came yet.
-    pub fn algo_refusal(&self, algorithm: &str, values: &[(&str, &str)], overnight: bool) -> Option<(i64, String)> {
-        crate::control::algo::refusal(&self.algo_definitions.lock().unwrap(), algorithm, values, overnight)
+    /// The warnings 2174 of the time parameters with no zone go to
+    /// `warnings`.
+    pub fn algo_refusal(&self, algorithm: &str, values: &[(&str, &str)], overnight: bool,
+        warnings: &mut Vec<(i64, String)>) -> Option<(i64, String)>
+    {
+        crate::control::algo::check(&self.algo_definitions.lock().unwrap(), algorithm, values, overnight, warnings)
     }
 
     /// Keep one algo definition answer (ibx#263).

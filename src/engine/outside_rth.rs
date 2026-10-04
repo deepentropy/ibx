@@ -45,6 +45,8 @@ pub(crate) struct RthTypes {
     pub stp_prot: bool,
     /// The price check key (PRICECHK) is in the list (ibx#492).
     pub price_chk: bool,
+    /// The all-or-none key (AON) is in the list (ibx#263).
+    pub aon: bool,
 }
 
 impl RthTypes {
@@ -74,6 +76,7 @@ impl RthTypes {
                 "MKTPROT" => t.mkt_prot = true,
                 "STPPROT" => t.stp_prot = true,
                 "PRICECHK" => t.price_chk = true,
+                "AON" => t.aon = true,
                 _ => {}
             }
         }
@@ -171,6 +174,28 @@ pub(crate) fn rth_parts(req: &mut OrderRequest) -> Option<(Option<u32>, RthKind,
             Some((Some(*instrument), RthKind::of(kind), *tif, Some(*kind), &mut attrs.outside_rth)),
         R::Modify { kind, tif, attrs, .. } => Some((None, RthKind::of(kind), *tif, Some(*kind), &mut attrs.outside_rth)),
         _ => None,
+    }
+}
+
+/// Text of error 10257: all-or-none on an order whose contract's
+/// order-type list for its exchange has no AON key (ibx#263).
+pub(crate) const ALL_OR_NONE_NOT_ALLOWED: &str = "The 'All or None' order attribute may not be specified for this order.";
+
+/// An order with all-or-none, checked against the order-type list: the
+/// reference refuses it with 10257 when the contract's list for the
+/// order's exchange is known and has no AON key
+/// (`trader.order.proc.aN.a(pe,OcoScope,Q,pe,boolean)@12594-12650`,
+/// `jattrib.attribs.AllOrNone.h(pe)` → `jattrib.Attribute.a(jibtypes.i)`:
+/// no list, or the empty one, allows it). Some(the instrument, None for a
+/// replace, whose instrument is the order's) for a request with
+/// all-or-none set; None otherwise.
+pub(crate) fn all_or_none_check(req: &OrderRequest) -> Option<Option<u32>> {
+    match req {
+        OrderRequest::Modify { attrs, .. } => attrs.all_or_none.then_some(None),
+        other => {
+            let (_, attrs) = other.new_order_side()?;
+            attrs?.all_or_none.then(|| other.instrument())
+        }
     }
 }
 

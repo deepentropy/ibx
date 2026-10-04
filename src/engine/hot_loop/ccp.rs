@@ -325,6 +325,12 @@ pub(crate) struct CcpState {
     pub(crate) data_permissions: Option<String>,
     /// The feature list of the last logon update has DENYAPI (ibx#421).
     pub(crate) deny_api: bool,
+    /// A logon update or a relogin changed the data permission stamp: the
+    /// hot loop runs the reference's permission change (ibx#421).
+    pub(crate) permissions_changed: bool,
+    /// The SSL farm list (8449) of the last logon update, for the hot
+    /// loop (ibx#276); None when no update came since it was taken.
+    pub(crate) ssl_farms_update: Option<String>,
     /// HMAC signing key for XML-carrying CCP messages (selective signing).
     pub(crate) ccp_sign_key: Vec<u8>,
     /// HMAC signing IV — advances only for signed messages, independent of unsigned ones.
@@ -703,6 +709,8 @@ impl CcpState {
             matching_acked: Vec::new(),
             data_permissions: None,
             deny_api: false,
+            permissions_changed: false,
+            ssl_farms_update: None,
             ccp_sign_key: Vec::new(),
             ccp_sign_iv: std::sync::Mutex::new(Vec::new()),
             pending_schedule_pair: Vec::new(),
@@ -1050,12 +1058,15 @@ impl CcpState {
     /// A logon message on the logged-on auth connection (ibx#421). With a
     /// session epoch (6059) it is a solicited logon, which the reference
     /// ignores with a warning. Without one it is a logon update
-    /// (`jclient.gi.j(jfix.dk)`): a feature list (6542) that turns DENYAPI
-    /// on stops the API, as the reference stops its API connections
-    /// (`jfix.s.c(jfix.dk)@587-620`, `jclient.gi.dT()`); a changed data
-    /// permission stamp (6764) is kept and logged. The reference then
-    /// resubscribes its market data; what that sends was not read and no
-    /// update is captured, so ibx does not resubscribe.
+    /// (`jclient.gi.j(jfix.dk)`), whose steps run in the reference's order:
+    /// the pending accounts (8092, when present, `@61-76`); the feature
+    /// list (6542), where DENYAPI turning on stops the API, as the
+    /// reference stops its API connections (`jfix.s.c(jfix.dk)@587-620`,
+    /// `jclient.gi.dT()`); the private label misc URLs (6321, when not
+    /// empty, `jfix.d0.a(jfix.dk)`, `@171-231`); a changed data permission
+    /// stamp (6764, `@235-308`), which makes the hot loop run the
+    /// permission change; the SSL farm list (8449, `@427-506`), replaced
+    /// by the update's (empty when absent).
     pub(crate) fn handle_logon_update(
         &mut self,
         parsed: &std::collections::HashMap<u32, String>,
@@ -1067,6 +1078,10 @@ impl CcpState {
             return;
         }
         log::info!("Handling logon update");
+        if let Some(v) = parsed.get(&crate::gateway::TAG_PENDING_ACCOUNTS) {
+            log::debug!("In AccountManager.updatePendingAccounts(): tag={} val=[{}]", crate::gateway::TAG_PENDING_ACCOUNTS, v);
+            shared.reference.set_pending_accounts(crate::control::logon::pending_accounts(v));
+        }
         if let Some(features) = parsed.get(&6542) {
             let deny_api = crate::control::logon::ApiFeatures::parse(features).deny_api;
             log::info!("Updated Enabled features: {}", features);
@@ -1079,14 +1094,24 @@ impl CcpState {
                 }
             }
         }
-        if let Some(stamp) = parsed.get(&crate::gateway::TAG_DATA_PERMISSIONS).filter(|v| !v.is_empty()) {
-            self.data_permissions_seen(stamp);
+        if let Some(urls) = parsed.get(&crate::gateway::TAG_MISC_URLS).filter(|v| !v.is_empty()) {
+            log::info!("Private label misc URLs updated ({} bytes)", urls.len());
+            shared.reference.set_misc_urls(crate::gateway::parse_misc_urls(urls));
         }
+        match parsed.get(&crate::gateway::TAG_DATA_PERMISSIONS).filter(|v| !v.is_empty()) {
+            Some(stamp) => {
+                if self.data_permissions_seen(stamp) {
+                    self.permissions_changed = true;
+                }
+            }
+            None => log::info!("Data permissions are not changed"),
+        }
+        let ssl_farms = parsed.get(&crate::gateway::TAG_SSL_FARMS).cloned().unwrap_or_default();
+        self.ssl_farms_update = Some(ssl_farms);
     }
 
-    /// A data permission stamp of a logon reply or update: kept and
-    /// logged when it changed, as the reference (ibx#421). True when it
-    /// changed.
+    /// A data permission stamp of a logon update: kept and logged when it
+    /// changed, as the reference (ibx#421). True when it changed.
     pub(crate) fn data_permissions_seen(&mut self, stamp: &str) -> bool {
         if self.data_permissions.as_deref() == Some(stamp) {
             log::info!("Data permissions are not changed");
@@ -1095,6 +1120,22 @@ impl CcpState {
         self.data_permissions = Some(stamp.to_string());
         log::info!("Data permissions are changed. Market data is to be resubscribed");
         true
+    }
+
+    /// The data permission stamp of a relogin's logon reply (ibx#421): a
+    /// change only when the old and the new stamp are both set and differ;
+    /// the new one is kept in any case, even unset
+    /// (`jclient.gi.a(jfix.dk, jfix.bb, LogonType)@297-388`). True when it
+    /// changed.
+    pub(crate) fn relogin_data_permissions(&mut self, stamp: Option<&str>) -> bool {
+        let changed = matches!((self.data_permissions.as_deref(), stamp), (Some(old), Some(new)) if old != new);
+        if changed {
+            log::info!("Data permissions are changed. Market data is to be resubscribed");
+        } else {
+            log::info!("Data permissions are not changed");
+        }
+        self.data_permissions = stamp.map(String::from);
+        changed
     }
 
     /// A reply to a what-if preview (ibx#462). The gateway may first send a
@@ -7083,6 +7124,31 @@ mod logon_update_tests {
         assert_eq!(ccp.data_permissions.as_deref(), Some("1788356313"));
         assert!(ccp.data_permissions_seen("1788999999"));
         assert!(!ccp.data_permissions_seen("1788999999"));
+    }
+
+    // ibx#421: a logon update refreshes the pending accounts (8092, only
+    // when present), the private label misc URLs (6321, only when not
+    // empty) and gives its SSL farm list (8449, empty when absent) to the
+    // hot loop; a solicited logon does none of it.
+    #[test]
+    fn logon_update_refreshes_accounts_urls_and_ssl_farms() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let mut hb = HeartbeatState::new();
+        ccp.process_ccp_message(&pipe_frame("35=A|6059=1790914646|8092=DUXXXXXX1|8449=allmd|"),
+            &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(!shared.reference.account_pending("DUXXXXXX1"));
+        assert_eq!(ccp.ssl_farms_update, None);
+        ccp.process_ccp_message(&pipe_frame("35=A|8092=DUXXXXXX1,DUXXXXXX2|6321=account_partitions=https://example/p|8449=allmd|"),
+            &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(shared.reference.account_pending("DUXXXXXX1") && shared.reference.account_pending("DUXXXXXX2"));
+        assert_eq!(shared.reference.misc_url("account_partitions").as_deref(), Some("https://example/p"));
+        assert_eq!(ccp.ssl_farms_update.take().as_deref(), Some("allmd"));
+        ccp.process_ccp_message(&pipe_frame("35=A|6321=|"), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(shared.reference.account_pending("DUXXXXXX1"), "no 8092: kept");
+        assert_eq!(shared.reference.misc_url("account_partitions").as_deref(), Some("https://example/p"), "empty 6321: kept");
+        assert_eq!(ccp.ssl_farms_update.take().as_deref(), Some(""), "no 8449: empty list");
+        ccp.process_ccp_message(&pipe_frame("35=A|8092=|"), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(!shared.reference.account_pending("DUXXXXXX1"));
     }
 
     // ibx#421: a test request refreshes the clock offset from its server

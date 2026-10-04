@@ -30,16 +30,22 @@ impl EClient {
         }
         // Refused before sending, like the reference: error() only.
         let contract_zone = self.shared.reference.time_zone_id(contract.con_id);
-        if let Some((code, message)) = ClientCore::refusal_before_sending(order, &contract.exchange)
-            .or_else(|| ClientCore::algo_definition_refusal(order, &contract.exchange, &self.shared.reference))
+        let account_pending = ClientCore::order_account_pending(order, &self.shared.reference, &self.account_id);
+        // The algo check's warnings come before its refusal (ibx#263).
+        let mut algo_warnings = Vec::new();
+        let refusal = ClientCore::refusal_before_sending_for(order, &contract.exchange, account_pending)
+            .or_else(|| ClientCore::algo_definition_refusal(order, &contract.exchange, &self.shared.reference, &mut algo_warnings))
             .or_else(|| ClientCore::account_config_refusal(
                 order, self.shared.reference.account_features().as_deref(), &self.account_id))
             .or_else(|| ClientCore::good_till_date_refusal(order, contract_zone.as_deref()))
             .or_else(|| ClientCore::condition_time_zone_refusal(order, contract_zone.as_deref()))
             .or_else(|| ClientCore::price_refusal(order))
             .or_else(|| ClientCore::order_id_refusal(oid))
-            .or_else(|| self.core.refusal_for_order_id(oid, order, &self.shared))
-        {
+            .or_else(|| self.core.refusal_for_order_id(oid, order, &self.shared));
+        for (code, message) in algo_warnings {
+            self.shared.orders.push_order_error(oid, code, message);
+        }
+        if let Some((code, message)) = refusal {
             self.shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }

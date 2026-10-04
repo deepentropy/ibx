@@ -170,6 +170,8 @@ fn ccp_reconnect_with_cached_credentials() {
         farm_name: gw.farm_name.clone(),
         session_epoch: gw.session_epoch.clone(),
         ns_secure_refused: gw.ns_secure_refused,
+        use_ssl: gw.use_ssl,
+        ssl_farms: gw.ssl_farms.clone(),
     };
 
     println!("Full auth: {}ms | session_id={}", full_auth_ms, auth.server_session_id);
@@ -228,6 +230,8 @@ fn auth_login_and_reconnect_without_key_exchange_live() {
         farm_name: gw.farm_name.clone(),
         session_epoch: gw.session_epoch.clone(),
         ns_secure_refused: gw.ns_secure_refused,
+        use_ssl: gw.use_ssl,
+        ssl_farms: gw.ssl_farms.clone(),
     };
     drop(ccp_conn);
     let reconnect = reconnect_ccp_session(&auth).expect("auth reconnect without key exchange");
@@ -239,4 +243,47 @@ fn auth_login_and_reconnect_without_key_exchange_live() {
         &gw.server_session_id, &gw.session_token, &gw.hw_info, &gw.encoded, 18,
     ).expect("farm logon with its key exchange");
     assert!(farm.seq > 0);
+}
+
+/// ibx#423: the reference's mode without TLS (jts.ini UseSSL false,
+/// IBX_USE_SSL=false here): the auth login on a plain socket to port 4000
+/// with the key exchange first, then a reconnect the same way. Never
+/// captured from the reference: this run tells whether the server takes
+/// the login of that mode from ibx.
+/// Run with: cargo test --test farm_reconnect_poc auth_login_without_tls_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn auth_login_without_tls_live() {
+    let _ = env_logger::try_init();
+    // SAFETY: an ignored test, run alone; nothing else reads the
+    // environment at the same time.
+    unsafe { std::env::set_var("IBX_USE_SSL", "false") };
+    let cfg = config();
+    let (gw, _farm_conn, ccp_conn, _hmds) = Gateway::connect(&cfg).expect("login without TLS");
+    assert!(gw.account_id.starts_with("DU"), "refusing to run: the logged-in account is not a paper account (its id does not start with DU)");
+    assert!(!gw.use_ssl);
+    println!("login without TLS: encryption refused {}, clock offset {:?} ms", gw.ns_secure_refused, gw.logon.clock_offset_ms);
+    let auth = ReconnectAuth {
+        host: cfg.host.clone(),
+        username: cfg.username.clone(),
+        password: cfg.password.clone(),
+        paper: cfg.paper,
+        session_key: gw.session_token.clone(),
+        session_token: gw.session_token.clone(),
+        server_session_id: gw.server_session_id.clone(),
+        hw_info: gw.hw_info.clone(),
+        encoded: gw.encoded.clone(),
+        hmds_host: gw.hmds_host.clone(),
+        hmds_farm: gw.hmds_farm.clone(),
+        farm_host: gw.farm_host.clone(),
+        farm_name: gw.farm_name.clone(),
+        session_epoch: gw.session_epoch.clone(),
+        ns_secure_refused: gw.ns_secure_refused,
+        use_ssl: gw.use_ssl,
+        ssl_farms: gw.ssl_farms.clone(),
+    };
+    drop(ccp_conn);
+    let reconnect = reconnect_ccp_session(&auth).expect("auth reconnect without TLS");
+    println!("reconnect without TLS: encryption refused {}, epoch {:?}", reconnect.ns_secure_refused, reconnect.session_epoch);
+    unsafe { std::env::remove_var("IBX_USE_SSL") };
 }

@@ -1083,7 +1083,7 @@ const ORDER_TYPE_ALIASES: [(&str, &str); 15] = [
 
 /// The reference's text for an invalid date or time (errors 337 and 343);
 /// %s is the field's label.
-const INVALID_DATE_TIME: &str = "%s: The date, time, or time-zone entered is invalid.\n\
+pub(crate) const INVALID_DATE_TIME: &str = "%s: The date, time, or time-zone entered is invalid.\n\
 The correct format is yyyymmdd hh:mm:ss xx/xxxx\n\
 where yyyymmdd and xx/xxxx are optional.\n\
 E.g.: 20031126 15:59:00 US/Eastern\n\
@@ -3892,6 +3892,7 @@ impl ClientCore {
         sec_type: &str,
         exchange: &str,
         max_backfill_years: Option<i32>,
+        include_expired: bool,
     ) -> Option<(i32, String)> {
         use crate::control::historical::{bar_request_refusal, is_valid_end_date};
         if is_valid_end_date(end_date_time) && exchange.is_empty() && !sec_type.eq_ignore_ascii_case("CONTFUT") {
@@ -3899,7 +3900,7 @@ impl ClientCore {
         }
         crate::control::historical::check_bar_request(
             end_date_time, duration, bar_size, what_to_show, Some(format_date), keep_up_to_date, sec_type,
-            max_backfill_years,
+            max_backfill_years, include_expired,
         ).err()
     }
 
@@ -4178,10 +4179,69 @@ impl ClientCore {
     /// error code and text. Nothing is sent for such an order. `exchange`
     /// is the contract's.
     pub fn refusal_before_sending(order: &ApiOrder, exchange: &str) -> Option<(i64, String)> {
+        Self::refusal_before_sending_for(order, exchange, false)
+    }
+
+    /// [`Self::refusal_before_sending`] for an order whose account's
+    /// application is not approved yet when `account_pending` (see
+    /// [`Self::order_account_pending`], ibx#421).
+    pub fn refusal_before_sending_for(order: &ApiOrder, exchange: &str, account_pending: bool) -> Option<(i64, String)> {
         Self::read_refusal(order)
             .or_else(|| Self::exchange_refusal(exchange))
-            .or_else(|| Self::order_rule_refusal(order))
+            .or_else(|| Self::order_rule_refusal(order, account_pending))
             .or_else(|| Self::fractional_quantity_refusal(order))
+    }
+
+    /// Whether the account of an order is one whose application is not
+    /// approved yet (8092 of the logon, ibx#421): the reference refuses
+    /// such an order with 10136 on a session that is not an FA one
+    /// (`jextend.bH.S()@5072-5127`, `jextend.bi.g(String)`). The account
+    /// is the order's on a session with several accounts, else the logon
+    /// account, which the reference puts on the orders of a one-account
+    /// session.
+    pub fn order_account_pending(order: &ApiOrder, reference: &crate::bridge::ReferenceState, logon_account: &str) -> bool {
+        if reference.fa_session() {
+            return false;
+        }
+        reference.account_pending(Self::request_account(&order.account, reference, logon_account))
+    }
+
+    /// The account of a request (ibx#421): the one given on a session
+    /// with several accounts (the logon account when none is given), else
+    /// the logon account.
+    fn request_account<'a>(given: &'a str, reference: &crate::bridge::ReferenceState, logon_account: &'a str) -> &'a str {
+        if reference.managed_accounts().len() > 1 && !given.is_empty() { given } else { logon_account }
+    }
+
+    /// The pending accounts check of a reqPositions (ibx#421,
+    /// `jextend.cl.n()@162-251`): the accounts of the logon's list whose
+    /// application is not approved. All of them: Err, error 10275 and the
+    /// request stops; some: Ok with the warning 10275, the request goes
+    /// on; none: Ok(None).
+    pub fn positions_pending_check(reference: &crate::bridge::ReferenceState) -> Result<Option<(i64, String)>, (i64, String)> {
+        let pending = reference.pending_managed_accounts();
+        if pending.is_empty() {
+            return Ok(None);
+        }
+        let names: Vec<&str> = pending.iter().map(String::as_str).collect();
+        let error = (10275, crate::control::logon::positions_not_available(&names));
+        if reference.managed_accounts().len() <= pending.len() { Err(error) } else { Ok(Some(error)) }
+    }
+
+    /// A reqPositionsMulti for an account whose application is not
+    /// approved: error 10275 and the request stops (ibx#421,
+    /// `jextend.bk.n()@9-39`).
+    pub fn positions_multi_pending_refusal(account: &str, reference: &crate::bridge::ReferenceState, logon_account: &str) -> Option<(i64, String)> {
+        let account = Self::request_account(account, reference, logon_account);
+        reference.account_pending(account)
+            .then(|| (10275, crate::control::logon::positions_not_available(&[account])))
+    }
+
+    /// A reqAccountUpdates for an account whose application is not
+    /// approved: the warning 10275, and the request goes on (ibx#421,
+    /// `jextend.bl.n()@127-196`).
+    pub fn account_updates_pending_warning(acct_code: &str, reference: &crate::bridge::ReferenceState, logon_account: &str) -> Option<(i64, String)> {
+        Self::positions_multi_pending_refusal(acct_code, reference, logon_account)
     }
 
     /// An order whose contract has no exchange (empty, the official API's
@@ -4334,7 +4394,7 @@ impl ClientCore {
     /// 321 with the rule text (ibx#468), in the reference's order
     /// (`jextend.bH.S()` stops at the first). The text after "cause - " is
     /// the rule's; for the TRAIL LIMIT rule only its end is known.
-    fn order_rule_refusal(order: &ApiOrder) -> Option<(i64, String)> {
+    fn order_rule_refusal(order: &ApiOrder, account_pending: bool) -> Option<(i64, String)> {
         let refuse = |cause: &str| Some((321, format!("Error validating request.-'bH' : cause - {}", cause)));
         let order_type = order.order_type.to_uppercase();
         // An action the reference does not know reads as side 0, refused
@@ -4367,6 +4427,11 @@ impl ClientCore {
         // captured 02/10/2026, with this check's own 'v' in the text).
         if order.what_if && !order.transmit {
             return Some((321, "Error validating request.-'v' : cause - What-If order should have transmit flag set to TRUE.".into()));
+        }
+        // An account whose application is not approved (ibx#421,
+        // `jextend.bH.S()@5127`, thrown with its own code 10136).
+        if account_pending {
+            return Some((10136, crate::control::logon::PENDING_ACCOUNT.to_string()));
         }
         // A trailing percent below 0 or above 100 (ibx#263).
         let pct = order.trailing_percent;
@@ -4409,11 +4474,16 @@ impl ClientCore {
     /// against the algo definitions the server sent (ibx#263): 439 for an
     /// algorithm they do not have, 442 for one not allowed overnight on an
     /// overnight order, 443 for a parameter the algorithm does not have,
-    /// 441 for a number it cannot read, 145 for a value not in the
-    /// parameter's legal values, 441 for a number out of its bounds or a
-    /// required parameter with no value (`crate::control::algo::refusal`).
-    /// Nothing is checked before the first definitions came.
-    pub fn algo_definition_refusal(order: &ApiOrder, exchange: &str, reference: &crate::bridge::ReferenceState) -> Option<(i64, String)> {
+    /// 441 for a number it cannot read, 10314 for a time it cannot read,
+    /// 145 for a value not in the parameter's legal values, 441 for a
+    /// number out of its bounds or a required parameter with no value
+    /// (`crate::control::algo::refusal`). Nothing is checked before the
+    /// first definitions came.
+    /// The warnings 2174 of the time parameters the check reached, given
+    /// with no zone, go to `warnings`, in order (ibx#263).
+    pub fn algo_definition_refusal(order: &ApiOrder, exchange: &str, reference: &crate::bridge::ReferenceState,
+        warnings: &mut Vec<(i64, String)>) -> Option<(i64, String)>
+    {
         if order.algo_strategy.is_empty() {
             return None;
         }
@@ -4422,7 +4492,7 @@ impl ClientCore {
         // An overnight order: the overnight exchanges, or includeOvernight
         // (`jfix.R.C`, `jattrib.Attributes.bl`).
         let overnight = matches!(exchange, "OVERNIGHT" | "IBEOS") || order.include_overnight;
-        reference.algo_refusal(&order.algo_strategy, &values, overnight)
+        reference.algo_refusal(&order.algo_strategy, &values, overnight, warnings)
     }
 
     /// A limit price that is not a number is off the contract's price

@@ -33,6 +33,8 @@ fn connect_caches_reconnect_credentials() {
         farm_name: String::new(),
         session_epoch: String::new(),
         ns_secure_refused: false,
+        use_ssl: true,
+        ssl_farms: String::new(),
     });
     assert!(!hot_loop.has_reconnect_host(), "gateway leaves the host empty");
 
@@ -6794,4 +6796,99 @@ fn an_order_with_unset_fields_goes_out_and_shows_as_the_reference() {
     assert_eq!((o.lmt_price, o.aux_price, o.tif.as_str()), (0.0, 0.0, "DAY"));
     assert_eq!((o.volatility_type, o.reference_price_type, o.dont_use_auto_price_for_hedge), (0, 0, true));
     assert_eq!((o.min_qty, o.trailing_percent, o.cash_qty, o.filled_quantity), (i32::MAX, f64::MAX, f64::MAX, 0.0));
+}
+
+// ibx#420: reqManagedAccts answers every account of the logon's account
+// list, in logon order, comma separated (the protobuf form of the
+// reference's MANAGED_ACCTS at server version 214); the logon account
+// when the logon had no list.
+#[test]
+fn managed_accounts_are_the_logon_account_list() {
+    #[derive(Default)]
+    struct Accounts(Vec<String>);
+    impl Wrapper for Accounts {
+        fn managed_accounts(&mut self, accounts_list: &str) { self.0.push(accounts_list.to_string()); }
+    }
+    let (client, _rx, shared) = test_client();
+    let mut w = Accounts::default();
+    client.req_managed_accts(&mut w);
+    shared.reference.set_managed_accounts(crate::control::logon::managed_accounts("DUXXXXXX2/{alias},DUXXXXXX1/{alias}"));
+    client.req_managed_accts(&mut w);
+    shared.reference.set_managed_accounts(crate::control::logon::managed_accounts("DUXXXXXXX"));
+    client.req_managed_accts(&mut w);
+    assert_eq!(w.0, ["DU123", "DUXXXXXX2,DUXXXXXX1", "DUXXXXXXX"]);
+}
+
+// ibx#421: accounts whose application is not approved (8092): an order
+// for one is refused with 10136 and nothing is sent (not on an FA
+// session); reqPositions gives 10275 and stops when every account is
+// pending, gives it as a warning and goes on when some are;
+// reqPositionsMulti for one gives 10275 with its request id;
+// reqAccountUpdates gives the warning and goes on.
+#[test]
+fn pending_accounts_refuse_orders_and_positions() {
+    #[derive(Default)]
+    struct Errors(Vec<(i64, i64, String)>);
+    impl Wrapper for Errors {
+        fn error(&mut self, req_id: i64, code: i64, msg: &str, _json: &str) { self.0.push((req_id, code, msg.to_string())); }
+    }
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    shared.reference.set_pending_accounts(vec!["DU123".into()]);
+    let order = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 100.0, ..Default::default() };
+    client.place_order(5, &spy(), &order).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    assert_eq!(shared.orders.drain_order_errors(),
+        [(5, 10136, "Cannot submit trades until the application is finished and approved".to_string())]);
+    shared.reference.set_fa_session(true);
+    client.place_order(6, &spy(), &order).unwrap();
+    assert!(rx.try_recv().is_ok(), "an FA session is not checked");
+    shared.reference.set_fa_session(false);
+
+    let text = |a: &str| format!("Positions info is not available for account(s): {} until the application is finished and approved.", a);
+    shared.reference.set_managed_accounts(vec!["DU123".into()]);
+    client.req_positions(&mut Errors::default());
+    assert_eq!(shared.orders.drain_order_errors(), [(-1, 10275, text("DU123"))]);
+    assert!(!client.core.positions_sub.lock().unwrap().is_some(), "every account pending: the request stops");
+
+    shared.reference.set_managed_accounts(vec!["DU123".into(), "DU456".into()]);
+    client.req_positions(&mut Errors::default());
+    assert_eq!(shared.orders.drain_order_errors(), [(-1, 10275, text("DU123"))]);
+    assert!(client.core.positions_sub.lock().unwrap().is_some(), "some pending: a warning, the request goes on");
+    client.cancel_positions();
+
+    client.req_positions_multi(9, "DU123", "", &mut Errors::default());
+    assert_eq!(shared.orders.drain_order_errors(), [(9, 10275, text("DU123"))]);
+    client.req_positions_multi(10, "DU456", "", &mut Errors::default());
+    assert!(shared.orders.drain_order_errors().is_empty());
+
+    client.req_account_updates(true, "DU123");
+    assert_eq!(shared.orders.drain_order_errors()[0], (-1, 10275, text("DU123")));
+}
+
+// ibx#263: an algo time parameter the reference cannot read is refused
+// with 10314 and nothing is sent; one with no zone gets the warning 2174
+// and the order goes out.
+#[test]
+fn algo_time_parameters_10314_and_2174() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    shared.reference.add_algo_definitions(include_str!("../../../tests/fixtures/algo/IBALGO-AE-20261002.xml"));
+    shared.reference.add_algo_definitions(include_str!("../../../tests/fixtures/algo/IBALGO-AL-STK-20261002.xml"));
+    let vwap = |start: &str| Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 100.0,
+        algo_strategy: "Vwap".into(),
+        algo_params: vec![TagValue { tag: "startTime".into(), value: start.into() }],
+        ..Default::default()
+    };
+    client.place_order(40, &spy(), &vwap("9am")).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    let errors = shared.orders.drain_order_errors();
+    assert_eq!((errors.len(), errors[0].0, errors[0].1), (1, 40, 10314));
+    assert!(errors[0].2.starts_with("startTime: The date, time, or time-zone entered is invalid."), "{}", errors[0].2);
+
+    client.place_order(41, &spy(), &vwap("09:00:00")).unwrap();
+    assert!(rx.try_recv().is_ok(), "sent");
+    let errors = shared.orders.drain_order_errors();
+    assert_eq!(errors.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(41, 2174)]);
 }

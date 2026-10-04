@@ -481,6 +481,9 @@ pub(crate) struct FarmState {
     /// (ibx#458), one per request, with the provider key and the 10094
     /// text of a refused one: sent, or refused, when it goes.
     pub(crate) news_waiting: Vec<(InstrumentId, String, Option<String>)>,
+    /// The API subscriptions a refusal named since the last data
+    /// permission change (ibx#421, the reference's `jextend.F.d`).
+    pub(crate) refused_api_subscriptions: Vec<String>,
 }
 
 impl FarmState {
@@ -508,6 +511,7 @@ impl FarmState {
             exchange_map_subs: Vec::new(),
             news: Vec::new(),
             news_waiting: Vec::new(),
+            refused_api_subscriptions: Vec::new(),
         }
     }
 
@@ -1296,6 +1300,9 @@ impl FarmState {
         // (instrument, delayed available, API subscription needed), in order.
         let mut hit: Vec<(InstrumentId, bool, bool)> = Vec::new();
         for (i, id) in ids.iter().enumerate() {
+            if let Some(a) = access.get(i).filter(|a| api_subscription_needed(a)) {
+                self.note_refused_api_subscription(a);
+            }
             let Ok(id) = id.parse::<u32>() else { continue };
             let Some(&(_, instrument)) = self.md_req_to_instrument.iter().find(|(r, _)| *r == id) else {
                 // A depth entry (#452).
@@ -1368,6 +1375,12 @@ impl FarmState {
         // already cleared, and the subscription must still not come back on
         // reconnect (ibx#288).
         self.md_resub_info.retain(|(id, ..)| *id != instrument);
+        self.cancel_top_entries(instrument)
+    }
+
+    /// The cancels of an instrument's top-of-book entries on the wire,
+    /// which are forgotten; the subscription itself is left as it is.
+    fn cancel_top_entries(&mut self, instrument: InstrumentId) -> Vec<(FarmId, Vec<(u32, String)>)> {
         let reqs = match self.instrument_md_reqs.iter()
             .position(|(id, _)| *id == instrument)
         {
@@ -1410,6 +1423,74 @@ impl FarmState {
             out.push((farm, msg));
         }
         out
+    }
+
+    /// The API subscription names of a refusal's API access value (6763)
+    /// that needs one, kept until the next data permission change
+    /// (ibx#421): the items of a `,` or `#` list, or the value itself,
+    /// without "", "0" and "none" (`jextend.F.a(String, Collection,
+    /// String)`, `jextend.F.b(Collection)`).
+    fn note_refused_api_subscription(&mut self, access: &str) {
+        let names: Vec<&str> = if access.contains(',') {
+            access.split(',').collect()
+        } else if access.contains('#') {
+            access.split('#').collect()
+        } else {
+            vec![access]
+        };
+        for name in names {
+            if matches!(name, "" | "0" | "none") || self.refused_api_subscriptions.iter().any(|n| n == name) {
+                continue;
+            }
+            self.refused_api_subscriptions.push(name.to_string());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_refused_api_subscription_for_test(&mut self, access: &str) {
+        self.note_refused_api_subscription(access);
+    }
+
+    /// A data permission change (ibx#421): true when a refusal named an
+    /// API subscription since the last change (the reference then sends
+    /// 2134 to its API clients, `jextend.F.onPermissionsChanged()`,
+    /// `jextend.dL.K()`); the names are cleared.
+    pub(crate) fn take_refused_api_subscriptions(&mut self) -> bool {
+        let any = !self.refused_api_subscriptions.is_empty();
+        self.refused_api_subscriptions.clear();
+        any
+    }
+
+    /// The desubscription of the reference's market data resubscription
+    /// after a data permission change (ibx#421, `jclient.ij.b(boolean)`,
+    /// `jclient.is.v()`): every streaming top-of-book subscription has its
+    /// entries cancelled on their farms, and every news entry on the wire
+    /// is cancelled; the subscriptions stay, and go out again, on new
+    /// ids, with [`Self::unsent_subscriptions`] and
+    /// [`Self::resend_news`]. Snapshots are left out. Returns the cancels.
+    pub(crate) fn desubscribe_all(&mut self) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        let streaming: Vec<InstrumentId> = self.md_resub_info.iter()
+            .filter(|(.., snapshot)| !snapshot)
+            .map(|(id, ..)| *id)
+            .collect();
+        let mut out = Vec::new();
+        for instrument in streaming {
+            out.extend(self.cancel_top_entries(instrument));
+        }
+        for e in self.news.iter_mut().filter(|e| e.live) {
+            out.push((e.farm, news_message(e, false)));
+            e.live = false;
+            e.tag = None;
+        }
+        out
+    }
+
+    /// The farms with news entries off the wire (ibx#421).
+    pub(crate) fn news_farms_to_resend(&self) -> Vec<FarmId> {
+        let mut farms: Vec<FarmId> = self.news.iter().filter(|e| !e.live).map(|e| e.farm).collect();
+        farms.sort_unstable();
+        farms.dedup();
+        farms
     }
 
     /// Start a depth request (#452) with what it subscribes, each entry on
