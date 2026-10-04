@@ -5,7 +5,7 @@ use crate::api::types::{
     Order as ApiOrder, TickAttribLast, TickAttribBidAsk, PRICE_SCALE_F, QTY_SCALE_F,
 };
 use crate::api::wrapper::Wrapper;
-use crate::client_core::{order_status_str, ClientCore, MdTick};
+use crate::client_core::{order_status_str, ClientCore, MdOut, MdTick};
 use crate::types::*;
 
 use super::{Contract, EClient};
@@ -306,33 +306,39 @@ impl EClient {
             wrapper.tick_req_params(req_id, min_tick, &bbo_exchange, permissions);
         }
 
-        // Quote polling → tick callbacks in their order (via ClientCore)
-        let instruments = self.core.snapshot_instruments();
+        // The market data steps queued by the engine → tick callbacks, in
+        // their order (ibx#446).
+        let mut out = std::mem::take(&mut *self.core.md_out.lock().unwrap());
+        self.core.poll_market_data(&self.shared, None, &mut out);
         let mut snapshot_done: Vec<i64> = Vec::new();
-        for (iid, req_id) in instruments {
-            let (result, snapshot_end) = self.core.poll_market_ticks(&self.shared, iid, req_id);
-            // Fire market_data_type once per subscription on first tick delivery
-            if let Some(mdt) = self.core.check_mdt_needed(req_id, result.delivered) {
-                wrapper.market_data_type(req_id, mdt);
-            }
-            for tick in &result.ticks {
-                match tick {
+        let mut text = [0u8; 24];
+        for item in out.drain(..) {
+            match item {
+                MdOut::Tick(req_id, tick) => match tick {
                     MdTick::Price { tick_type, value, can_auto_execute } => {
-                        let attrib = crate::api::types::TickAttrib { can_auto_execute: *can_auto_execute, ..Default::default() };
-                        wrapper.tick_price(req_id, *tick_type, *value, &attrib);
+                        let attrib = crate::api::types::TickAttrib { can_auto_execute, ..Default::default() };
+                        wrapper.tick_price(req_id, tick_type, value, &attrib);
                     }
-                    MdTick::Size { tick_type, value } => wrapper.tick_size(req_id, *tick_type, *value),
-                    MdTick::Text { tick_type, value } => wrapper.tick_string(req_id, *tick_type, value),
-                    MdTick::Generic { tick_type, value } => wrapper.tick_generic(req_id, *tick_type, *value),
+                    MdTick::Size { tick_type, value } => wrapper.tick_size(req_id, tick_type, value),
+                    MdTick::Text { tick_type, value } => wrapper.tick_string(req_id, tick_type, &value),
+                    MdTick::Time { tick_type, secs } =>
+                        wrapper.tick_string(req_id, tick_type, crate::client_core::epoch_text(secs, &mut text)),
+                    MdTick::Generic { tick_type, value } => wrapper.tick_generic(req_id, tick_type, value),
+                },
+                MdOut::MarketDataType(req_id, mdt) => wrapper.market_data_type(req_id, mdt),
+                MdOut::SnapshotEnd(req_id) => {
+                    wrapper.tick_snapshot_end(req_id);
+                    snapshot_done.push(req_id);
                 }
             }
-            if snapshot_end {
-                wrapper.tick_snapshot_end(req_id);
-                snapshot_done.push(req_id);
-            }
         }
+        *self.core.md_out.lock().unwrap() = out;
+        // A snapshot cancelled by the client before its end was read is
+        // gone already.
         for req_id in snapshot_done {
-            let _ = self.cancel_mkt_data(req_id);
+            if self.core.req_to_instrument.lock().unwrap().contains_key(&req_id) {
+                let _ = self.cancel_mkt_data(req_id);
+            }
         }
 
         // Tick-by-tick requests that ended with an error (10189, 10190):

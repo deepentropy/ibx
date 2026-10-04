@@ -134,7 +134,17 @@ pub(crate) fn replay_market_data(fx: &Fixture, farm_conn: &str, keep: &[&str], u
 /// [`replay_market_data`] without the records `skip` (requests that go to
 /// another farm).
 pub(crate) fn replay_market_data_without(fx: &Fixture, farm_conn: &str, keep: &[&str], until: Option<u64>, skip: &[u64]) -> Replayed {
+    replay_market_data_read(fx, farm_conn, keep, until, skip, true)
+}
+
+/// [`replay_market_data_without`]; with `read_each` false the client
+/// reads its callbacks once, after the last frame, instead of after each
+/// input (ibx#446).
+pub(crate) fn replay_market_data_read(
+    fx: &Fixture, farm_conn: &str, keep: &[&str], until: Option<u64>, skip: &[u64], read_each: bool,
+) -> Replayed {
     let mut s = Session::new().in_zone(&fx.header);
+    s.read_each = read_each;
     let mut ids = Ids::default();
     let mut theirs = Vec::new();
     let mut unsent = Vec::new();
@@ -200,6 +210,7 @@ pub(crate) fn replay_market_data_without(fx: &Fixture, farm_conn: &str, keep: &[
         }
     }
     s.settle();
+    s.read();
     let wanted = |line: &String| keep.iter().any(|k| line.split('|').next() == Some(*k));
     let ours = s.callbacks.iter().filter(|l| wanted(l)).cloned().collect();
     let theirs = theirs.into_iter().filter(wanted).collect();

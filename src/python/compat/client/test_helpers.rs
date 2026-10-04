@@ -60,18 +60,26 @@ impl EClient {
         Ok(())
     }
 
-    /// Push a quote into SharedState for a given instrument.
-    /// `timestamp` is the last trade time in epoch seconds; without it the
-    /// time is 1 ns.
+    /// A farm message for an instrument (test-only, ibx#446): the quote is
+    /// published and its steps are queued for the client. `timestamp` is
+    /// the last trade time in epoch seconds; without it the time is 1 ns.
+    /// `steps` gives the steps of the message, in its order ("time",
+    /// "exchange", "last", "daily", "quote", "catch_up"), each with the
+    /// fields of its group; without it: time, last, daily figures and book,
+    /// each with the fields that are not 0. `halted`: the trade's status;
+    /// `auto_bits`: the book's auto-execution bits (4 bid, 8 ask);
+    /// `sizes_seen`: a size of 0 is given too.
     #[doc(hidden)]
-    #[pyo3(signature = (instrument, bid=0.0, ask=0.0, last=0.0, bid_size=0, ask_size=0, last_size=0, volume=0, open=0.0, high=0.0, low=0.0, close=0.0, timestamp=None))]
+    #[pyo3(signature = (instrument, bid=0.0, ask=0.0, last=0.0, bid_size=0, ask_size=0, last_size=0, volume=0, open=0.0, high=0.0, low=0.0, close=0.0, timestamp=None, steps=None, halted=None, auto_bits=None, sizes_seen=false))]
     #[allow(clippy::too_many_arguments)]
     fn _test_push_quote(
         &self, instrument: u32,
         bid: f64, ask: f64, last: f64,
         bid_size: i64, ask_size: i64, last_size: i64,
         volume: i64, open: f64, high: f64, low: f64, close: f64, timestamp: Option<u64>,
+        steps: Option<String>, halted: Option<i64>, auto_bits: Option<i64>, sizes_seen: bool,
     ) -> PyResult<()> {
+        use crate::md_events::{MdStep, TestMessage};
         let shared = self.shared_state()?;
         let ps = PRICE_SCALE as f64;
         let q = Quote {
@@ -84,44 +92,20 @@ impl EClient {
             bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0,
             timestamp_ns: timestamp.map_or(1, |s| s * 1_000_000_000),
         };
-        shared.market.push_quote(instrument, &q);
-        Ok(())
-    }
-
-    /// Push the marks of a quote (test-only, ibx#446): the trade status,
-    /// the bid and ask auto-execution bits, and whether the daily figures
-    /// came before the trade. `steps` gives the updates of one message, in
-    /// its order: "quote", "daily", "trade", "time", "exchange";
-    /// `sizes_seen` marks every size and the volume as given by the farm.
-    #[doc(hidden)]
-    #[pyo3(signature = (instrument, halted=None, auto_bits=None, daily_first=false, steps=None, sizes_seen=false))]
-    fn _test_push_marks(
-        &self, instrument: u32, halted: Option<i64>, auto_bits: Option<i64>, daily_first: bool,
-        steps: Option<String>, sizes_seen: bool,
-    ) -> PyResult<()> {
-        let mut marks = QuoteMarks::default();
-        if let Some(status) = halted { marks.set_halted(status); }
-        if let Some(bits) = auto_bits { marks.set_auto_bits(bits); }
-        marks.set_daily_first(daily_first);
-        if let Some(steps) = steps {
-            marks.begin_message();
-            for step in steps.split(',').map(str::trim) {
-                match step {
-                    "quote" => marks.note_quote_update(),
-                    "daily" => marks.begin_daily(),
-                    "trade" => marks.begin_trade(),
-                    "time" => marks.trade_gives(false),
-                    "exchange" => marks.trade_gives(true),
-                    _ => return Err(PyRuntimeError::new_err(format!("unknown step {step}"))),
-                }
-            }
-        }
-        if sizes_seen {
-            for kind in [SizeKind::Bid, SizeKind::Ask, SizeKind::Last, SizeKind::Volume] {
-                marks.set_seen(kind);
-            }
-        }
-        self.shared_state()?.market.push_marks(instrument, marks);
+        let steps = match steps {
+            Some(text) => Some(text.split(',').map(str::trim).map(|step| Ok(match step {
+                "time" => MdStep::Time,
+                "exchange" => MdStep::Exchange,
+                "last" => MdStep::Last,
+                "daily" => MdStep::Daily,
+                "quote" => MdStep::Quote,
+                "catch_up" => MdStep::CatchUp,
+                _ => return Err(PyRuntimeError::new_err(format!("unknown step {step}"))),
+            })).collect::<PyResult<Vec<MdStep>>>()?),
+            None => None,
+        };
+        let message = TestMessage { steps: steps.as_deref(), halted, auto_bits, sizes_seen };
+        shared.market.push_test_message(instrument, &q, &message);
         Ok(())
     }
 

@@ -190,6 +190,10 @@ pub struct Session {
     pub client: EClient,
     /// The callbacks ibx gave, one line each (see [`Recorder`]).
     pub callbacks: Vec<String>,
+    /// The client reads its callbacks after each input (the default); when
+    /// false only at [`Session::read`], as a client that reads slower than
+    /// the messages come (ibx#446).
+    pub read_each: bool,
 }
 
 impl Deref for Session {
@@ -209,7 +213,7 @@ impl Session {
     pub fn new() -> Self {
         let links = Links::new();
         let client = EClient::from_parts(links.shared.clone(), links.control_tx.clone(), std::thread::spawn(|| {}), ACCOUNT.into());
-        Self { links, client, callbacks: Vec::new() }
+        Self { links, client, callbacks: Vec::new(), read_each: true }
     }
 
     /// Run in the machine zone a fixture names (see [`Links::in_zone`]).
@@ -241,9 +245,17 @@ impl Session {
         out
     }
 
-    /// Run the engine a few steps, read what it sent, and take the callbacks.
+    /// Run the engine a few steps, read what it sent, and take the callbacks
+    /// (with `read_each` off, only the engine's steps).
     pub fn settle(&mut self) {
         self.links.step();
+        if self.read_each {
+            self.read();
+        }
+    }
+
+    /// Take the callbacks: one dispatch of the client.
+    pub fn read(&mut self) {
         let mut rec = Recorder::default();
         self.client.process_msgs(&mut rec);
         self.callbacks.extend(rec.lines);

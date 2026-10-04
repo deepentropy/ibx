@@ -6,6 +6,7 @@ pub mod config;
 pub mod control;
 pub mod gateway;
 pub mod logging;
+pub mod md_events;
 pub mod protocol;
 pub mod types;
 

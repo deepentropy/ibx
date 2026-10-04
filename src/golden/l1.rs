@@ -80,6 +80,36 @@ fn a_new_request_gets_the_quote_kept_from_a_cancelled_one() {
     assert!(replay_and_compare("l1_aapl_preopen_delayed", None, &[9100]) > 10);
 }
 
+/// The tick callbacks of a market data fixture when the client reads
+/// after each input and when it reads once after the last frame: both
+/// are the reference's (ibx#446). The other callbacks come from other
+/// queues, read in their own order: left out.
+fn ticks_read_once_as_the_reference(name: &str, until: Option<u64>, reqs: &[i64]) -> usize {
+    const TICKS: &[&str] = &["tickPrice", "tickSize", "tickString", "tickGeneric", "tickSnapshotEnd"];
+    let fx = load(name);
+    let of_reqs = |l: &String| reqs.is_empty() || reqs.iter().any(|id| l.split('|').nth(1) == Some(&id.to_string()));
+    let mut out = Vec::new();
+    for read_each in [true, false] {
+        let r = super::replay::replay_market_data_read(&fx, "usfarm", TICKS, until, &[], read_each);
+        let theirs: Vec<String> = r.theirs.into_iter().filter(of_reqs).collect();
+        let ours: Vec<String> = r.ours.into_iter().filter(of_reqs).collect();
+        assert_same_callbacks(&ours, &theirs);
+        out.push(ours);
+    }
+    assert_eq!(out[0], out[1], "{name}: reading once changed the callbacks");
+    out[0].len()
+}
+
+// ibx#446: the reference sends each farm message's ticks with that
+// message's values: a client that reads once after every frame of the
+// session gets the same ticks as one that reads after each frame.
+#[test]
+fn tick_callbacks_do_not_depend_on_when_the_client_reads() {
+    assert!(ticks_read_once_as_the_reference("l1_aapl_spy_preopen", Some(2633), &[]) > 30);
+    assert!(ticks_read_once_as_the_reference("l1_spy_qqq_rth", Some(6581), &[]) > 40);
+    assert!(ticks_read_once_as_the_reference("l1_aapl_preopen_delayed", Some(22599), &[9001]) > 30);
+}
+
 /// The market data messages and contract lookups ibx wrote, against the
 /// reference's: (ours, theirs) for 35=V, then for 35=c.
 fn requests_of(name: &str, until: Option<u64>, skip: &[u64]) -> [(Vec<String>, Vec<String>); 2] {

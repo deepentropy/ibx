@@ -1728,6 +1728,60 @@ fn api_stream_order_live() {
     }
 }
 
+/// ibx#446 paper check: a client that reads only once, 15 s after its
+/// EUR.USD request, gets every message's callbacks, as the reference sends
+/// them while it reads each message: more than the one book update a
+/// merged read gives (its bid and ask sizes come twice: with their price,
+/// then alone), every price followed by its size, the market data type
+/// before the request parameters. Run in market hours:
+/// cargo test --test rust_api_gt api_stream_read_once_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_stream_read_once_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = SnapWrapper::default();
+    let settle = Instant::now();
+    while settle.elapsed() < Duration::from_secs(3) {
+        client.process_msgs(&mut w);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    w.events.clear();
+    w.start = Some(Instant::now());
+    let eurusd = Contract { con_id: 12087792, symbol: "EUR".into(), sec_type: "CASH".into(),
+        exchange: "IDEALPRO".into(), currency: "USD".into(), ..Default::default() };
+    client.req_mkt_data(813, &eurusd, "", false, false).unwrap();
+    std::thread::sleep(Duration::from_secs(15));
+    client.process_msgs(&mut w);
+    client.cancel_mkt_data(813).unwrap();
+    client.disconnect();
+    for (ms, e) in &w.events {
+        println!("  {ms:>6} ms  {e}");
+    }
+    let mine: Vec<&String> = w.events.iter().map(|(_, e)| e).filter(|e| e.split(' ').nth(1) == Some("813")).collect();
+    let pos = |want: &str| mine.iter().position(|e| e.starts_with(want));
+    let (mdt, params) = (pos("mdt 813 "), pos("params 813 "));
+    assert!(mdt.is_some() && params.is_some() && mdt < params, "type {mdt:?}, parameters {params:?}");
+    for (k, e) in mine.iter().enumerate() {
+        let parts: Vec<&str> = e.split(' ').collect();
+        if parts[0] == "price" {
+            let size = match parts[2] { "1" => "0", "2" => "3", "4" => "5", _ => continue };
+            let next = mine.get(k + 1).map(|n| n.split(' ').take(3).collect::<Vec<_>>());
+            assert_eq!(next, Some(vec!["size", parts[1], size]), "{e} without its size");
+        }
+    }
+    let book_sizes = mine.iter().filter(|e| e.starts_with("size 813 0 ") || e.starts_with("size 813 3 ")).count();
+    assert!(book_sizes > 4, "one book update only ({book_sizes} bid/ask sizes): the messages were merged");
+}
+
 // ── Smart components (ibx#441), focused ──
 
 /// Smart components of a request: (bit, exchange, letter).

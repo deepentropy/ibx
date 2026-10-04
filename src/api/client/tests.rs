@@ -2904,7 +2904,7 @@ fn process_msgs_dispatches_quotes_on_change() {
     let mut q = Quote::default();
     q.bid = 150 * PRICE_SCALE;
     q.ask = 151 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     client.core.req_to_instrument.lock().unwrap().insert(1, 0);
     client.core.instrument_to_req.lock().unwrap().insert(0, vec![1]);
@@ -2921,7 +2921,7 @@ fn process_msgs_dispatches_quotes_on_change() {
 
     // Now change bid
     q.bid = 149 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:149")));
 }
@@ -2939,7 +2939,7 @@ fn process_msgs_dispatches_all_quote_fields() {
         timestamp_ns: 1234567890,
         bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0,
     };
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     client.core.req_to_instrument.lock().unwrap().insert(1, 0);
     client.core.instrument_to_req.lock().unwrap().insert(0, vec![1]);
@@ -2976,7 +2976,7 @@ fn api_sizes_are_wire_sizes_times_the_round_lot() {
     for (tick_type, magnitude) in [(td::O_BID_SIZE, 57), (td::O_ASK_SIZE, 1), (td::O_LAST_SIZE, 2), (td::O_VOLUME, 1466)] {
         ms.apply_tick(id, 0, false, &RawTick { server_tag: 1, tick_type, magnitude, stats_block: false, first: true });
     }
-    shared.market.push_quote(id, ms.quote(id));
+    shared.market.push_test_message(id, ms.quote(id), &Default::default());
     client.core.req_to_instrument.lock().unwrap().insert(1, id);
     client.core.instrument_to_req.lock().unwrap().insert(id, vec![1]);
 
@@ -2992,10 +2992,10 @@ fn process_msgs_multiple_instruments_independent() {
     let (client, _rx, shared) = test_client();
     let mut q0 = Quote::default();
     q0.bid = 150 * PRICE_SCALE;
-    shared.market.push_quote(0, &q0);
+    shared.market.push_test_message(0, &q0, &Default::default());
     let mut q1 = Quote::default();
     q1.bid = 400 * PRICE_SCALE;
-    shared.market.push_quote(1, &q1);
+    shared.market.push_test_message(1, &q1, &Default::default());
 
     client.core.req_to_instrument.lock().unwrap().insert(1, 0);
     client.core.instrument_to_req.lock().unwrap().insert(0, vec![1]);
@@ -4155,7 +4155,7 @@ fn quote_dispatch_agnostic_to_data_type() {
     let mut q = Quote::default();
     q.bid = 450 * PRICE_SCALE;
     q.ask = 451 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:450")));
@@ -4168,13 +4168,13 @@ fn frozen_stale_quote_no_redispatch() {
     let mut q = Quote::default();
     q.bid = 300 * PRICE_SCALE;
     q.ask = 301 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:")));
 
-    shared.market.push_quote(0, &q); // same quote
+    shared.market.push_test_message(0, &q, &Default::default()); // same quote
     w.events.clear();
     client.process_msgs(&mut w);
     let second_count = w.events.iter().filter(|e| e.starts_with("tick_price:1:")).count();
@@ -4192,7 +4192,7 @@ fn transition_no_data_to_live_fires_callbacks() {
     let mut q = Quote::default();
     q.bid = 500 * PRICE_SCALE;
     q.ask = 501 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
     w.events.clear();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e.starts_with("tick_price:1:1:500")));
@@ -4206,13 +4206,13 @@ fn partial_quote_update_only_changed_fields_dispatch() {
     let mut q = Quote::default();
     q.bid = 100 * PRICE_SCALE;
     q.ask = 101 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
 
     q.bid = 99 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
     w.events.clear();
     client.process_msgs(&mut w);
 
@@ -5539,11 +5539,18 @@ fn spy_stk() -> Contract {
     Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }
 }
 
+/// A farm message for instrument 5 with the given steps (ibx#446).
+fn message(shared: &SharedState, q: &crate::types::Quote, steps: &[crate::md_events::MdStep], halted: Option<i64>) {
+    let message = crate::md_events::TestMessage { steps: Some(steps), halted, ..Default::default() };
+    shared.market.push_test_message(5, q, &message);
+}
+
 // Each tick type once, the size with its price; no end on a partial
 // batch; the end once bid, ask, last, close and open came; then the
 // request is gone and its farm request cancelled.
 #[test]
 fn plain_snapshot_sends_each_tick_type_once_then_the_end() {
+    use crate::md_events::MdStep;
     let (client, rx, shared) = test_client();
     let engine = top_engine(rx);
     set_exchange_map(&shared, 5, vec![crate::types::SmartComponent {
@@ -5552,20 +5559,21 @@ fn plain_snapshot_sends_each_tick_type_once_then_the_end() {
     client.req_mkt_data(1, &spy_stk(), "", true, false).unwrap();
     let s = crate::types::PRICE_SCALE;
     let q = crate::types::QTY_SCALE;
-    shared.market.push_quote(5, &crate::types::Quote {
+    message(&shared, &crate::types::Quote {
         bid: 100 * s, ask: 101 * s, bid_size: 2 * q, ask_size: 3 * q, bid_exch_mask: 1, ..Default::default()
-    });
+    }, &[MdStep::Quote], None);
     let mut w = SnapRec::default();
     client.process_msgs(&mut w);
     assert_eq!(w.events, vec![
         "mdt:1:1", "price:1:1:100", "size:1:0:2", "price:1:2:101", "size:1:3:3", "string:1:32:N",
     ]);
-    // The bid moves and the rest comes: the bid is not sent again.
-    shared.market.push_quote(5, &crate::types::Quote {
+    // The bid moves and the rest comes: the bid is not sent again; the end
+    // comes with the daily figures, before the book update.
+    message(&shared, &crate::types::Quote {
         bid: 99 * s, ask: 101 * s, last: 100 * s, bid_size: 4 * q, ask_size: 3 * q, last_size: q,
         volume: 50 * q, high: 102 * s, low: 97 * s, close: 98 * s, open: 99 * s,
         bid_exch_mask: 1, ..Default::default()
-    });
+    }, &[MdStep::Last, MdStep::Daily, MdStep::Quote], None);
     let mut w = SnapRec::default();
     client.process_msgs(&mut w);
     assert_eq!(w.events, vec![
@@ -5606,22 +5614,25 @@ fn eur_usd() -> Contract {
 }
 
 /// The EUR.USD quote of the captured first message (02/10/2026 08:16
-/// Paris): bid/ask book, last trade with status 0, daily figures after
-/// the trade; the farm gave no auto-execution flag.
-fn captured_eur_usd(shared: &SharedState) {
+/// Paris).
+fn captured_eur_usd_quote() -> crate::types::Quote {
     let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100_000;
     let q = crate::types::QTY_SCALE;
-    shared.market.push_quote(5, &crate::types::Quote {
+    crate::types::Quote {
         bid: p(112_547), ask: p(112_549), bid_size: 4_000_000 * q, ask_size: 12_000_000 * q,
         last: p(112_550), last_size: 0, volume: 0, close: p(112_430), high: p(112_585), low: p(112_320),
         timestamp_ns: 1_790_921_778 * 1_000_000_000, ..Default::default()
-    });
-    let mut marks = crate::types::QuoteMarks::default();
-    marks.set_halted(0);
-    shared.market.push_marks(5, marks);
+    }
+}
+
+/// The captured first EUR.USD message: bid/ask book, last trade with
+/// status 0 (its time, then its price), daily figures after the trade;
+/// the farm gave no auto-execution flag. `steps`: the message's steps.
+fn captured_eur_usd(shared: &SharedState, steps: &[crate::md_events::MdStep], halted: Option<i64>) {
     shared.market.push_tick_req_params(crate::bridge::TickReqParams {
         instrument: 5, min_tick: 0.00001, bbo_exchange: String::new(), snapshot_permissions: 0,
     });
+    message(shared, &captured_eur_usd_quote(), steps, halted);
 }
 
 // ibx#446, captured 02/10/2026 (EUR.USD snapshots 9460-9462): the market
@@ -5631,10 +5642,11 @@ fn captured_eur_usd(shared: &SharedState) {
 // currency pair; the end.
 #[test]
 fn eur_usd_snapshot_in_the_reference_order() {
+    use crate::md_events::MdStep;
     let (client, rx, shared) = test_client();
     let engine = top_engine(rx);
     client.req_mkt_data(1, &eur_usd(), "", true, false).unwrap();
-    captured_eur_usd(&shared);
+    captured_eur_usd(&shared, &[MdStep::Time, MdStep::Last, MdStep::Daily, MdStep::Quote], Some(0));
     let mut w = SeqRec::default();
     client.process_msgs(&mut w);
     assert_eq!(w.events, vec![
@@ -5654,22 +5666,32 @@ fn eur_usd_snapshot_in_the_reference_order() {
 // none for it, for a reason not read yet.
 #[test]
 fn spy_snapshot_in_the_reference_order() {
+    use crate::md_events::{field, MdEvent, MdStep};
     let (client, rx, shared) = test_client();
     let engine = top_engine(rx);
     client.req_mkt_data(1, &spy_stk(), "", true, false).unwrap();
     let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100;
     let q = crate::types::QTY_SCALE;
-    shared.market.push_quote(5, &crate::types::Quote {
-        bid: p(76_624), ask: p(76_634), bid_size: 800 * q, ask_size: 1000 * q, last: p(76_659), last_size: 80 * q,
-        close: p(76_399), open: p(76_442), timestamp_ns: 1_790_921_446 * 1_000_000_000, ..Default::default()
-    });
-    let mut marks = crate::types::QuoteMarks::default();
-    marks.set_halted(0);
-    marks.set_auto_bits(12);
-    shared.market.push_marks(5, marks);
     shared.market.push_tick_req_params(crate::bridge::TickReqParams {
         instrument: 5, min_tick: 0.01, bbo_exchange: "a60001".into(), snapshot_permissions: 3,
     });
+    // The message: book, trade, daily close, daily open.
+    let mut last = MdEvent::new(5, MdStep::Last).with(field::LAST, p(76_659)).with(field::LAST_SIZE, 80 * q);
+    last.halted = Some(0);
+    let mut book = MdEvent::new(5, MdStep::Quote).with(field::BID, p(76_624)).with(field::BID_SIZE, 800 * q)
+        .with(field::ASK, p(76_634)).with(field::ASK_SIZE, 1000 * q);
+    let mut marks = crate::types::QuoteMarks::default();
+    marks.set_auto_bits(12);
+    book.auto = marks.auto_word();
+    for ev in [
+        MdEvent::new(5, MdStep::Time).with(field::TIME, 1_790_921_446 * 1_000_000_000),
+        last,
+        MdEvent::new(5, MdStep::Daily).with(field::CLOSE, p(76_399)),
+        MdEvent::new(5, MdStep::Daily).with(field::OPEN, p(76_442)),
+        book,
+    ] {
+        shared.market.md_events.push_now(&ev);
+    }
     let mut w = SeqRec::default();
     client.process_msgs(&mut w);
     assert_eq!(w.events, vec![
@@ -5682,6 +5704,17 @@ fn spy_snapshot_in_the_reference_order() {
     drop(engine);
 }
 
+/// A SPY quote of 02/10/2026.
+fn spy_quote() -> crate::types::Quote {
+    let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100;
+    let q = crate::types::QTY_SCALE;
+    crate::types::Quote {
+        bid: p(76_624), ask: p(76_634), bid_size: 800 * q, ask_size: 1000 * q, last: p(76_659), last_size: 80 * q,
+        close: p(76_399), open: p(76_442), timestamp_ns: 1_790_921_446 * 1_000_000_000,
+        bid_exch_mask: 1, ask_exch_mask: 1, ..Default::default()
+    }
+}
+
 // ibx#446, from the reference's delayed sender (`jextend.dL.b(List, s,
 // int, pa, dy, o, SnapshotPreference, Set)`): a delayed snapshot sends the
 // trade's time as 88, never the exchanges nor a halted tick, and ends once
@@ -5691,17 +5724,9 @@ fn delayed_snapshot_sends_its_own_time_and_no_exchanges() {
     let (client, rx, shared) = test_client();
     let engine = top_engine(rx);
     client.req_mkt_data(1, &spy_stk(), "", true, false).unwrap();
-    client.core.delayed_reqs.lock().unwrap().insert(1);
-    let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100;
-    let q = crate::types::QTY_SCALE;
-    shared.market.push_quote(5, &crate::types::Quote {
-        bid: p(76_624), ask: p(76_634), bid_size: 800 * q, ask_size: 1000 * q, last: p(76_659), last_size: 80 * q,
-        close: p(76_399), open: p(76_442), timestamp_ns: 1_790_921_446 * 1_000_000_000,
-        bid_exch_mask: 1, ask_exch_mask: 1, ..Default::default()
-    });
-    let mut marks = crate::types::QuoteMarks::default();
-    marks.set_halted(0);
-    shared.market.push_marks(5, marks);
+    client.core.set_delayed(1);
+    let message = crate::md_events::TestMessage { halted: Some(0), ..Default::default() };
+    shared.market.push_test_message(5, &spy_quote(), &message);
     let mut w = SeqRec::default();
     client.process_msgs(&mut w);
     let ticks: Vec<&str> = w.events.iter().map(String::as_str)
@@ -5720,20 +5745,14 @@ fn delayed_snapshot_sends_its_own_time_and_no_exchanges() {
 // and in a snapshot.
 #[test]
 fn empty_quote_side_goes_out_as_minus_one() {
-    use crate::types::{QuoteMarks, SizeKind};
+    use crate::md_events::{MdStep, TestMessage};
     for snapshot in [false, true] {
         let (client, rx, shared) = test_client();
         let engine = top_engine(rx);
         client.req_mkt_data(1, &spy_stk(), "", snapshot, false).unwrap();
         let s = crate::types::PRICE_SCALE;
-        let mut marks = QuoteMarks::default();
-        marks.begin_message();
-        marks.note_quote_update();
-        for kind in [SizeKind::Bid, SizeKind::Ask] {
-            marks.set_seen(kind);
-        }
-        shared.market.push_quote(5, &crate::types::Quote { bid: -s, ask: -s, ..Default::default() });
-        shared.market.push_marks(5, marks);
+        let message = TestMessage { steps: Some(&[MdStep::Quote]), sizes_seen: true, ..Default::default() };
+        shared.market.push_test_message(5, &crate::types::Quote { bid: -s, ask: -s, ..Default::default() }, &message);
         let mut w = SeqRec::default();
         client.process_msgs(&mut w);
         let quote: Vec<&str> = w.events.iter().map(String::as_str)
@@ -5748,33 +5767,24 @@ fn empty_quote_side_goes_out_as_minus_one() {
 
 // ibx#446, from the reference's delayed sender: a delayed stream sends the
 // trade's time as 88 and a halted state as 90 (when its bits change, then
-// in each step until the next book update, as 49), and no exchanges.
+// in each step until the next book update, as 49), and no exchanges. The
+// status comes with the trade's price step, after its time step: the time
+// step has no halted state yet.
 #[test]
 fn delayed_stream_sends_88_and_90_and_no_exchanges() {
+    use crate::md_events::MdStep;
     let (client, rx, shared) = test_client();
     let engine = top_engine(rx);
     client.req_mkt_data(1, &spy_stk(), "", false, false).unwrap();
-    client.core.delayed_reqs.lock().unwrap().insert(1);
-    let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100;
-    let q = crate::types::QTY_SCALE;
-    let quote = crate::types::Quote {
-        bid: p(76_624), ask: p(76_634), bid_size: 800 * q, ask_size: 1000 * q, last: p(76_659), last_size: 80 * q,
-        timestamp_ns: 1_790_921_446 * 1_000_000_000, bid_exch_mask: 1, ask_exch_mask: 1, ..Default::default()
-    };
-    let mut marks = crate::types::QuoteMarks::default();
-    marks.begin_message();
-    marks.begin_trade();
-    marks.trade_gives(false);
-    marks.note_quote_update();
-    marks.set_halted(1);
-    shared.market.push_quote(5, &quote);
-    shared.market.push_marks(5, marks);
+    client.core.set_delayed(1);
+    let quote = crate::types::Quote { close: 0, open: 0, ..spy_quote() };
+    message(&shared, &quote, &[MdStep::Time, MdStep::Last, MdStep::Quote], Some(1));
     let mut w = SeqRec::default();
     client.process_msgs(&mut w);
     let ticks: Vec<&str> = w.events.iter().map(String::as_str)
         .filter(|e| !e.starts_with("mdt:") && !e.starts_with("params:")).collect();
     assert_eq!(ticks, vec![
-        "string:1:88:1790921446", "generic:1:90:1",
+        "string:1:88:1790921446",
         "price:1:68:766.59:-", "size:1:71:80", "size:1:71:80", "generic:1:90:1",
         "price:1:66:766.24:-", "size:1:69:800", "price:1:67:766.34:-", "size:1:70:1000",
         "size:1:69:800", "size:1:70:1000", "generic:1:90:1",
@@ -5788,13 +5798,11 @@ fn delayed_stream_sends_88_and_90_and_no_exchanges() {
 // they are sent first; a trade with no status gives no halted tick.
 #[test]
 fn snapshot_daily_figures_first_when_they_came_first() {
+    use crate::md_events::MdStep;
     let (client, rx, shared) = test_client();
     let engine = top_engine(rx);
     client.req_mkt_data(1, &eur_usd(), "", true, false).unwrap();
-    captured_eur_usd(&shared);
-    let mut marks = crate::types::QuoteMarks::default();
-    marks.set_daily_first(true);
-    shared.market.push_marks(5, marks);
+    captured_eur_usd(&shared, &[MdStep::Daily, MdStep::Time, MdStep::Last, MdStep::Quote], None);
     let mut w = SeqRec::default();
     client.process_msgs(&mut w);
     assert_eq!(w.events, vec![
@@ -5806,19 +5814,12 @@ fn snapshot_daily_figures_first_when_they_came_first() {
     drop(engine);
 }
 
-// ibx#446, captured 02/10/2026 (EUR.USD stream 9470): the market data
-// type before the request parameters; then, for the first message, the
-// trade's time, its price with its size, its size again (a first size of
-// 0 is sent), the daily volume (0), high, low and close, then the book:
-// bid and ask with their sizes, then both sizes again; the bid and the ask
-// execute automatically; no halted tick for status 0. Then each book
-// update sends only what changed.
-#[test]
-fn eur_usd_stream_in_the_reference_order() {
-    use crate::types::{QuoteMarks, SizeKind};
-    let (client, rx, shared) = test_client();
-    let engine = top_engine(rx);
-    client.req_mkt_data(1, &eur_usd(), "", false, false).unwrap();
+/// The captured EUR.USD stream 9470 (02/10/2026): the first message
+/// (trade time, trade price, daily figures, book; status 0; every size
+/// given), then five book updates (bid, bid size, ask, ask size); the
+/// callbacks each message gives.
+fn eur_usd_stream_messages() -> Vec<(crate::types::Quote, Vec<crate::md_events::MdStep>, Vec<&'static str>)> {
+    use crate::md_events::MdStep;
     let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100_000;
     let m = |n: i64| n * 1_000_000 * crate::types::QTY_SCALE;
     let mut q = crate::types::Quote {
@@ -5826,32 +5827,13 @@ fn eur_usd_stream_in_the_reference_order() {
         close: p(112_430), high: p(112_585), low: p(112_320), timestamp_ns: 1_790_921_787 * 1_000_000_000,
         ..Default::default()
     };
-    let mut marks = QuoteMarks::default();
-    marks.begin_message();
-    marks.note_quote_update();
-    marks.begin_trade();
-    marks.trade_gives(false);
-    marks.begin_daily();
-    marks.set_halted(0);
-    for kind in [SizeKind::Bid, SizeKind::Ask, SizeKind::Last, SizeKind::Volume] {
-        marks.set_seen(kind);
-    }
-    shared.market.push_quote(5, &q);
-    shared.market.push_marks(5, marks);
-    shared.market.push_tick_req_params(crate::bridge::TickReqParams {
-        instrument: 5, min_tick: 0.00001, bbo_exchange: String::new(), snapshot_permissions: 0,
-    });
-    let mut w = SeqRec::default();
-    client.process_msgs(&mut w);
-    assert_eq!(w.events, vec![
-        "mdt:1:1", "params:1:0.00001::0",
+    let mut out = vec![(q, vec![MdStep::Time, MdStep::Last, MdStep::Daily, MdStep::Quote], vec![
         "string:1:45:1790921787", "price:1:4:1.1255:-", "size:1:5:0", "size:1:5:0",
         "size:1:8:0", "price:1:6:1.12585:-", "price:1:7:1.1232:-", "price:1:9:1.1243:-",
         "price:1:1:1.12546:auto", "size:1:0:2000000", "price:1:2:1.12547:auto", "size:1:3:7000000",
         "size:1:0:2000000", "size:1:3:7000000",
-    ]);
-    // The next book updates, as captured.
-    let updates: [(i64, i64, i64, i64, &[&str]); 5] = [
+    ])];
+    let updates: [(i64, i64, i64, i64, &[&'static str]); 5] = [
         (112_546, 2, 112_547, 6, &["size:1:3:6000000"]),
         (112_546, 3, 112_547, 3, &["size:1:0:3000000", "size:1:3:3000000"]),
         (112_546, 2, 112_547, 4, &["size:1:0:2000000", "size:1:3:4000000"]),
@@ -5866,34 +5848,55 @@ fn eur_usd_stream_in_the_reference_order() {
         q.bid_size = m(bid_size);
         q.ask = p(ask);
         q.ask_size = m(ask_size);
-        marks.begin_message();
-        marks.note_quote_update();
-        shared.market.push_quote(5, &q);
-        shared.market.push_marks(5, marks);
-        let mut w = SeqRec::default();
-        client.process_msgs(&mut w);
-        assert_eq!(w.events, want);
+        out.push((q, vec![MdStep::Quote], want.to_vec()));
     }
-    drop(engine);
+    out
 }
 
-// ibx#446, captured 28/09/2026 (AAPL stream 9440, a request on a quote
-// that already had data): the first poll sends all the quote in one step,
-// with the halted state; the halted state then goes out again in each
-// step (daily figures, trade time, trade exchange, trade price) until the
-// next book update; each message's steps follow its order.
+// ibx#446, captured 02/10/2026 (EUR.USD stream 9470): the market data
+// type before the request parameters; then, for the first message, the
+// trade's time, its price with its size, its size again (a first size of
+// 0 is sent), the daily volume (0), high, low and close, then the book:
+// bid and ask with their sizes, then both sizes again; the bid and the ask
+// execute automatically; no halted tick for status 0. Then each book
+// update sends only what changed. The same callbacks whether the client
+// reads after each message or once after all of them: the reference
+// never merges two messages.
 #[test]
-fn stock_stream_joining_a_quote_in_the_reference_order() {
-    use crate::types::{QuoteMarks, SizeKind};
-    let (client, rx, shared) = test_client();
-    let engine = top_engine(rx);
-    set_exchange_map(&shared, 5, ["K", "P", "Q", "V"].iter().enumerate().map(|(bit, letter)| {
-        crate::types::SmartComponent { bit_number: bit as i32, exchange: letter.to_string(), exchange_letter: letter.to_string() }
-    }).collect());
-    let aapl = Contract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
-        ..Default::default() };
-    client.req_mkt_data(1, &aapl, "", false, false).unwrap();
-    client.core.join_stream(1);
+fn eur_usd_stream_in_the_reference_order() {
+    for read_each in [true, false] {
+        let (client, rx, shared) = test_client();
+        let engine = top_engine(rx);
+        client.req_mkt_data(1, &eur_usd(), "", false, false).unwrap();
+        shared.market.push_tick_req_params(crate::bridge::TickReqParams {
+            instrument: 5, min_tick: 0.00001, bbo_exchange: String::new(), snapshot_permissions: 0,
+        });
+        let mut want = vec!["mdt:1:1", "params:1:0.00001::0"];
+        let mut w = SeqRec::default();
+        for (q, steps, callbacks) in eur_usd_stream_messages() {
+            let message = crate::md_events::TestMessage {
+                steps: Some(&steps), halted: steps.contains(&crate::md_events::MdStep::Last).then_some(0),
+                sizes_seen: true, ..Default::default()
+            };
+            shared.market.push_test_message(5, &q, &message);
+            want.extend(callbacks);
+            if read_each {
+                client.process_msgs(&mut w);
+                assert_eq!(w.events, want);
+            }
+        }
+        client.process_msgs(&mut w);
+        assert_eq!(w.events, want, "read after each message: {read_each}");
+        drop(engine);
+    }
+}
+
+/// The captured AAPL stream 9440 (28/09/2026, a request on a quote that
+/// already had data): the quote it joined, then four messages (steps,
+/// quote) and the callbacks each gives.
+#[allow(clippy::type_complexity)]
+fn aapl_join_messages() -> (crate::types::Quote, Vec<(crate::types::Quote, Vec<crate::md_events::MdStep>, Vec<&'static str>)>) {
+    use crate::md_events::MdStep::*;
     let p = |raw: i64| raw * crate::types::PRICE_SCALE / 100;
     let n = |shares: i64| shares * crate::types::QTY_SCALE;
     let (k, pq, q_, v) = (1, 2 | 4, 4, 8);
@@ -5902,63 +5905,28 @@ fn stock_stream_joining_a_quote_in_the_reference_order() {
         volume: n(140_671), high: p(34_299), low: p(34_017), close: p(34_107), open: p(34_022),
         timestamp_ns: 1_790_604_766 * 1_000_000_000, bid_exch_mask: k | q_, ask_exch_mask: pq, last_exch_mask: 0,
     };
-    let mut marks = QuoteMarks::default();
-    marks.begin_message();
-    marks.set_halted(0);
-    for kind in [SizeKind::Bid, SizeKind::Ask, SizeKind::Last, SizeKind::Volume] {
-        marks.set_seen(kind);
-    }
-    shared.market.push_quote(5, &q);
-    shared.market.push_marks(5, marks);
-    let mut w = SeqRec::default();
-    client.process_msgs(&mut w);
-    assert_eq!(w.events, vec![
-        "mdt:1:1",
-        "price:1:1:342.33:auto", "size:1:0:200", "price:1:2:342.37:auto", "size:1:3:200",
-        "price:1:4:342.35:-", "size:1:5:40", "size:1:0:200", "size:1:3:200", "size:1:5:40", "size:1:8:140671",
-        "price:1:6:342.99:-", "price:1:7:340.17:-", "price:1:9:341.07:-", "price:1:14:340.22:-",
-        "string:1:32:KQ", "string:1:33:PQ", "string:1:45:1790604766", "generic:1:49:0",
-    ]);
-    // One message: its updates in order, with the quote changes.
-    let mut message = |q: &crate::types::Quote, quote: bool, steps: &[&str]| {
-        marks.begin_message();
-        if quote { marks.note_quote_update(); }
-        for step in steps {
-            match *step {
-                "daily" => marks.begin_daily(),
-                "trade" => marks.begin_trade(),
-                "time" => marks.trade_gives(false),
-                _ => marks.trade_gives(true),
-            }
-        }
-        shared.market.push_quote(5, q);
-        shared.market.push_marks(5, marks);
-        let mut w = SeqRec::default();
-        client.process_msgs(&mut w);
-        w.events
-    };
+    let joined = q;
+    let mut out = Vec::new();
     // 16:12:47.239: volume, then a trade with only its time.
     q.volume = n(140_672);
     q.timestamp_ns = 1_790_604_767 * 1_000_000_000;
-    assert_eq!(message(&q, false, &["daily", "trade", "time"]), vec![
+    out.push((q, vec![Daily, Time, Last], vec![
         "size:1:8:140672", "generic:1:49:0", "string:1:45:1790604767", "generic:1:49:0", "generic:1:49:0",
-    ]);
+    ]));
     // 16:12:47.488: volume, then a trade with only its exchange.
     q.volume = n(140_676);
-    assert_eq!(message(&q, false, &["daily", "trade", "exchange"]), vec![
-        "size:1:8:140676", "generic:1:49:0", "generic:1:49:0", "generic:1:49:0",
-    ]);
-    // 16:12:47.738: the book, volume, a trade with time, exchange and size.
+    out.push((q, vec![Daily, Exchange, Last], vec!["size:1:8:140676", "generic:1:49:0", "generic:1:49:0", "generic:1:49:0"]));
+    // 16:12:47.738: volume, a trade with time, exchange and size, the book.
     q.bid_size = n(240);
     q.ask_size = n(240);
     q.bid_exch_mask = k | q_ | v;
     q.volume = n(140_678);
     q.last_size = n(80);
     q.timestamp_ns = 1_790_604_768 * 1_000_000_000;
-    assert_eq!(message(&q, true, &["daily", "trade", "time", "exchange"]), vec![
+    out.push((q, vec![Daily, Time, Exchange, Last, Quote], vec![
         "size:1:8:140678", "generic:1:49:0", "string:1:45:1790604768", "generic:1:49:0", "generic:1:49:0",
         "size:1:5:80", "generic:1:49:0", "size:1:0:240", "size:1:3:240", "string:1:32:KQV", "generic:1:49:0",
-    ]);
+    ]));
     // 16:12:47.991: after the book update, no halted state any more.
     q.bid = p(34_234);
     q.bid_size = n(160);
@@ -5966,9 +5934,93 @@ fn stock_stream_joining_a_quote_in_the_reference_order() {
     q.volume = n(140_687);
     q.last = p(34_236);
     q.last_size = n(320);
-    assert_eq!(message(&q, true, &["daily", "trade", "exchange"]), vec![
+    out.push((q, vec![Daily, Exchange, Last, Quote], vec![
         "size:1:8:140687", "price:1:4:342.36:-", "size:1:5:320", "size:1:5:320",
         "price:1:1:342.34:auto", "size:1:0:160", "size:1:0:160", "string:1:32:K",
+    ]));
+    (joined, out)
+}
+
+// ibx#446, captured 28/09/2026 (AAPL stream 9440, a request on a quote
+// that already had data): the first step sends all the quote, with the
+// halted state; the halted state then goes out again in each step (daily
+// figures, trade time, trade exchange, trade price) until the next book
+// update; each message's steps follow its order. The same callbacks
+// whether the client reads after each message or once after all of them.
+#[test]
+fn stock_stream_joining_a_quote_in_the_reference_order() {
+    use crate::md_events::{MdStep, TestMessage};
+    for read_each in [true, false] {
+        let (client, rx, shared) = test_client();
+        let engine = top_engine(rx);
+        set_exchange_map(&shared, 5, ["K", "P", "Q", "V"].iter().enumerate().map(|(bit, letter)| {
+            crate::types::SmartComponent { bit_number: bit as i32, exchange: letter.to_string(), exchange_letter: letter.to_string() }
+        }).collect());
+        let aapl = Contract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+            ..Default::default() };
+        client.req_mkt_data(1, &aapl, "", false, false).unwrap();
+        let (joined, messages) = aapl_join_messages();
+        // The quote as the record has it, then the request joins.
+        let whole = TestMessage { steps: Some(&[MdStep::CatchUp]), halted: Some(0), sizes_seen: true, ..Default::default() };
+        shared.market.push_test_message(5, &joined, &whole);
+        client.core.join_stream(1, shared.market.md_events.head());
+        let mut want = vec![
+            "mdt:1:1",
+            "price:1:1:342.33:auto", "size:1:0:200", "price:1:2:342.37:auto", "size:1:3:200",
+            "price:1:4:342.35:-", "size:1:5:40", "size:1:0:200", "size:1:3:200", "size:1:5:40", "size:1:8:140671",
+            "price:1:6:342.99:-", "price:1:7:340.17:-", "price:1:9:341.07:-", "price:1:14:340.22:-",
+            "string:1:32:KQ", "string:1:33:PQ", "string:1:45:1790604766", "generic:1:49:0",
+        ];
+        let mut w = SeqRec::default();
+        if read_each {
+            client.process_msgs(&mut w);
+            assert_eq!(w.events, want);
+        }
+        for (q, steps, callbacks) in messages {
+            let message = TestMessage { steps: Some(&steps), sizes_seen: true, ..Default::default() };
+            shared.market.push_test_message(5, &q, &message);
+            want.extend(callbacks);
+            if read_each {
+                client.process_msgs(&mut w);
+                assert_eq!(w.events, want);
+            }
+        }
+        client.process_msgs(&mut w);
+        assert_eq!(w.events, want, "read after each message: {read_each}");
+        drop(engine);
+    }
+}
+
+// ibx#446: two messages read at once are not merged: each one's values go
+// out, in order (the old dispatch sent the last values only, and lost a
+// halted state repeated in a step with nothing else).
+#[test]
+fn messages_read_at_once_are_not_merged() {
+    use crate::md_events::MdStep;
+    let (client, rx, shared) = test_client();
+    let engine = top_engine(rx);
+    client.req_mkt_data(1, &spy_stk(), "", false, false).unwrap();
+    let s = crate::types::PRICE_SCALE;
+    let q = crate::types::QTY_SCALE;
+    let mut quote = crate::types::Quote { bid: 100 * s, ask: 101 * s, bid_size: q, ask_size: q, ..Default::default() };
+    message(&shared, &quote, &[MdStep::Quote], None);
+    quote.bid = 99 * s;
+    message(&shared, &quote, &[MdStep::Quote], None);
+    quote.bid = 100 * s;
+    message(&shared, &quote, &[MdStep::Quote], None);
+    // A halted trade with only its time, then one with its exchange.
+    quote.timestamp_ns = 1_790_000_000 * 1_000_000_000;
+    message(&shared, &quote, &[MdStep::Time, MdStep::Last], Some(1));
+    message(&shared, &quote, &[MdStep::Exchange, MdStep::Last], None);
+    let mut w = SeqRec::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, vec![
+        "mdt:1:1",
+        "price:1:1:100:auto", "size:1:0:1", "price:1:2:101:auto", "size:1:3:1", "size:1:0:1", "size:1:3:1",
+        "price:1:1:99:auto", "size:1:0:1",
+        "price:1:1:100:auto", "size:1:0:1",
+        "string:1:45:1790000000", "generic:1:49:1",
+        "generic:1:49:1", "generic:1:49:1",
     ]);
     drop(engine);
 }
@@ -5983,14 +6035,12 @@ fn option_stream_auto_execution_comes_from_the_farm() {
         exchange: "SMART".into(), ..Default::default() };
     client.req_mkt_data(1, &option, "", false, false).unwrap();
     let s = crate::types::PRICE_SCALE;
-    shared.market.push_quote(5, &crate::types::Quote { bid: s, ask: 2 * s, ..Default::default() });
+    shared.market.push_test_message(5, &crate::types::Quote { bid: s, ask: 2 * s, ..Default::default() }, &Default::default());
     let mut w = SeqRec::default();
     client.process_msgs(&mut w);
     assert_eq!(w.events, vec!["mdt:1:1", "price:1:1:1:-", "size:1:0:0", "price:1:2:2:-", "size:1:3:0"]);
-    let mut marks = crate::types::QuoteMarks::default();
-    marks.set_auto_bits(4);
-    shared.market.push_marks(5, marks);
-    shared.market.push_quote(5, &crate::types::Quote { bid: 3 * s, ask: 4 * s, ..Default::default() });
+    let message = crate::md_events::TestMessage { auto_bits: Some(4), ..Default::default() };
+    shared.market.push_test_message(5, &crate::types::Quote { bid: 3 * s, ask: 4 * s, ..Default::default() }, &message);
     let mut w = SeqRec::default();
     client.process_msgs(&mut w);
     assert_eq!(w.events, vec!["price:1:1:3:auto", "size:1:0:0", "price:1:2:4:-", "size:1:3:0"]);
@@ -6001,20 +6051,23 @@ fn option_stream_auto_execution_comes_from_the_farm() {
 // never ends.
 #[test]
 fn plain_snapshot_ends_at_the_time_limit() {
+    let start = std::time::Instant::now();
     let (client, rx, shared) = test_client();
     let engine = top_engine(rx);
     client.req_mkt_data(1, &spy_stk(), "", true, false).unwrap();
     let s = crate::types::PRICE_SCALE;
-    shared.market.push_quote(5, &crate::types::Quote { bid: 100 * s, ..Default::default() });
+    shared.market.push_test_message(5, &crate::types::Quote { bid: 100 * s, ..Default::default() }, &Default::default());
     let mut w = SnapRec::default();
     client.process_msgs(&mut w);
     assert!(!w.events.iter().any(|e| e.starts_with("end:")), "{:?}", w.events);
-    let start = std::time::Instant::now();
-    let (_, ended) = client.core.poll_snapshot_ticks(&shared, 5, 1, start + std::time::Duration::from_millis(5_000)).unwrap();
-    assert!(!ended);
-    let (polled, ended) = client.core.poll_snapshot_ticks(&shared, 5, 1, start + crate::control::snapshot::TIMEOUT).unwrap();
-    assert!(ended && polled.ticks.is_empty());
-    assert!(client.core.poll_snapshot_ticks(&shared, 5, 1, start).is_none(), "gone after its end");
+    let mut out = Vec::new();
+    client.core.poll_market_data(&shared, Some(start + std::time::Duration::from_millis(5_000)), &mut out);
+    assert!(out.is_empty(), "{out:?}");
+    client.core.poll_market_data(&shared, Some(start + crate::control::snapshot::TIMEOUT + std::time::Duration::from_millis(500)), &mut out);
+    assert_eq!(out, [crate::client_core::MdOut::SnapshotEnd(1)]);
+    out.clear();
+    client.core.poll_market_data(&shared, Some(start + 2 * crate::control::snapshot::TIMEOUT), &mut out);
+    assert!(out.is_empty(), "gone after its end: {out:?}");
     drop(engine);
 }
 
@@ -6352,7 +6405,7 @@ fn a_joining_stream_gets_the_quote_at_once() {
     let s = crate::types::PRICE_SCALE;
     let q = crate::types::QTY_SCALE;
     let mut quote = crate::types::Quote { bid: 100 * s, ask: 101 * s, bid_size: 2 * q, ask_size: 3 * q, ..Default::default() };
-    shared.market.push_quote(5, &quote);
+    shared.market.push_test_message(5, &quote, &Default::default());
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e == "tick_price:1:1:100"), "{:?}", w.events);
@@ -6364,7 +6417,7 @@ fn a_joining_stream_gets_the_quote_at_once() {
     assert!(!w.events.iter().any(|e| e.contains(":1:1:100")), "nothing new for the first: {:?}", w.events);
 
     quote.bid = 99 * s;
-    shared.market.push_quote(5, &quote);
+    shared.market.push_test_message(5, &quote, &Default::default());
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.iter().any(|e| e == "tick_price:1:1:99") && w.events.iter().any(|e| e == "tick_price:2:1:99"), "{:?}", w.events);
@@ -6502,7 +6555,7 @@ fn mdoff_request_gets_no_top_of_book() {
     q.bid = 150 * PRICE_SCALE;
     q.ask = 151 * PRICE_SCALE;
     q.last = 150 * PRICE_SCALE;
-    shared.market.push_quote(5, &q);
+    shared.market.push_test_message(5, &q, &Default::default());
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(!w.events.iter().any(|e| e.starts_with("tick_price:1:") || e.starts_with("tick_size:1:")), "{:?}", w.events);

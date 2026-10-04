@@ -110,7 +110,8 @@ impl EClient {
                 return Ok(());
             }
         }
-        if let Some(cancel) = self.core.unregister_mkt_data(req_id) {
+        let shared = self.shared_state()?;
+        if let Some(cancel) = self.core.unregister_mkt_data(&shared, req_id) {
             // The subscription ends with the last request of the contract;
             // its news entries go with it (ibx#458, ibx#444).
             if let Some(command) = cancel.command() {
@@ -119,7 +120,7 @@ impl EClient {
             }
         } else {
             // An unknown request id: error 300, as the reference (ibx#444).
-            self.shared_state()?.orders.push_order_error(req_id, 300, format!("Can't find EId with tickerId:{}", req_id));
+            shared.orders.push_order_error(req_id, 300, format!("Can't find EId with tickerId:{}", req_id));
         }
         Ok(())
     }

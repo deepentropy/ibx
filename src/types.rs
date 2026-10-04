@@ -147,12 +147,9 @@ impl Default for Quote {
 
 /// What the farm told about a quote beside its prices and sizes (ibx#446),
 /// packed in one word: whether the bid and the ask can execute
-/// automatically, the trading status the last trade came with, and
-/// whether, in the last message with trade fields, the daily figures came
-/// before the trade; which sizes came at least once; and the updates of
-/// the last message in their order. The reference sends the trade and
-/// daily ticks of a message in that message's order, one step per update,
-/// then the quote ticks.
+/// automatically, the trading status the last trade came with, and which
+/// sizes came at least once. The engine keeps it per instrument for the
+/// catch-up steps of the market data queue (`md_events`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QuoteMarks(pub u64);
 
@@ -161,15 +158,7 @@ impl QuoteMarks {
     const ASK_AUTO: u32 = 2;
     const HALTED_KNOWN: u64 = 1 << 4;
     const HALTED_SHIFT: u32 = 5;
-    const DAILY_FIRST: u64 = 1 << 7;
     const SEEN_SHIFT: u32 = 8;
-    const QUOTE_UPDATE: u64 = 1 << 12;
-    const SEQ_SHIFT: u32 = 13;
-    const PASS_SHIFT: u32 = 16;
-    const PASS_SLOTS: u32 = 16;
-    const PASS_MASK: u64 = !0 << 16;
-    const DAILY: u64 = 1;
-    const TRADE: u64 = 4;
 
     fn flag(self, shift: u32) -> Option<bool> {
         match (self.0 >> shift) & 3 {
@@ -196,6 +185,11 @@ impl QuoteMarks {
         self.set_ask_auto(bits & 8 != 0);
     }
 
+    /// Both auto-execution flags as one byte (0: the farm said nothing).
+    pub fn auto_word(self) -> u8 { (self.0 & 0xF) as u8 }
+    /// The flags of an `auto_word`.
+    pub fn from_auto_word(word: u8) -> Self { Self(word as u64 & 0xF) }
+
     /// The trading status of the last trade, as its two low bits (1 halted,
     /// 2 volatility halted); `None` before a trade gave one.
     pub fn halted(self) -> Option<i64> {
@@ -216,76 +210,17 @@ impl QuoteMarks {
         if status & 1 != 0 { 1.0 } else if status & 2 != 0 { 2.0 } else { 0.0 }
     }
 
-    pub fn daily_first(self) -> bool { self.0 & Self::DAILY_FIRST != 0 }
-    pub fn set_daily_first(&mut self, first: bool) {
-        if first { self.0 |= Self::DAILY_FIRST } else { self.0 &= !Self::DAILY_FIRST }
-    }
-
     /// Whether a size or the volume came from the farm at least once: the
     /// reference sends a first size even when it is 0.
     pub fn seen(self, size: SizeKind) -> bool { self.0 & (1 << (Self::SEEN_SHIFT + size as u32)) != 0 }
     pub fn set_seen(&mut self, size: SizeKind) { self.0 |= 1 << (Self::SEEN_SHIFT + size as u32) }
-
-    /// Count of the farm messages that touched the quote, modulo 8: the
-    /// client knows from it whether it reads the passes of one message.
-    pub fn message_seq(self) -> u8 { ((self.0 >> Self::SEQ_SHIFT) & 7) as u8 }
-
-    /// A new message touches the quote: the next sequence number, and no
-    /// update of it yet.
-    pub fn begin_message(&mut self) {
-        let seq = (self.message_seq() as u64 + 1) & 7;
-        self.0 = (self.0 & !(Self::PASS_MASK | Self::QUOTE_UPDATE | (7 << Self::SEQ_SHIFT))) | (seq << Self::SEQ_SHIFT);
-    }
-
-    /// Whether the last message updated the bid/ask book.
-    pub fn quote_update(self) -> bool { self.0 & Self::QUOTE_UPDATE != 0 }
-    pub fn note_quote_update(&mut self) { self.0 |= Self::QUOTE_UPDATE }
-
-    /// The trade and daily updates of the last message, in its order (at
-    /// most 16 kept).
-    pub fn passes(self) -> impl Iterator<Item = Pass> {
-        let script = self.0 >> Self::PASS_SHIFT;
-        (0..Self::PASS_SLOTS).map(move |k| ((script >> (3 * k)) & 7) as u8)
-            .take_while(|&code| code != 0)
-            .map(|code| if code as u64 == Self::DAILY { Pass::Daily } else { Pass::Trade { time: code & 1 != 0, exchange: code & 2 != 0 } })
-    }
-
-    fn push_pass(&mut self, code: u64) {
-        let script = self.0 >> Self::PASS_SHIFT;
-        for k in 0..Self::PASS_SLOTS {
-            if (script >> (3 * k)) & 7 == 0 {
-                self.0 |= code << (Self::PASS_SHIFT + 3 * k);
-                return;
-            }
-        }
-    }
-
-    /// A daily figures update starts.
-    pub fn begin_daily(&mut self) { self.push_pass(Self::DAILY) }
-    /// A trade update starts.
-    pub fn begin_trade(&mut self) { self.push_pass(Self::TRADE) }
-
-    /// The trade update being read gives its time (`exchange` false) or its
-    /// exchange.
-    pub fn trade_gives(&mut self, exchange: bool) {
-        let script = self.0 >> Self::PASS_SHIFT;
-        let Some(k) = (0..Self::PASS_SLOTS).rev().find(|k| (script >> (3 * k)) & 7 != 0) else { return };
-        if (script >> (3 * k)) & 7 >= Self::TRADE {
-            self.0 |= (if exchange { 2 } else { 1 }) << (Self::PASS_SHIFT + 3 * k);
-        }
-    }
+    /// The sizes seen as one byte (`SizeKind` bits).
+    pub fn seen_word(self) -> u8 { ((self.0 >> Self::SEEN_SHIFT) & 0xF) as u8 }
 }
 
 /// A size kind for `QuoteMarks::seen`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SizeKind { Bid = 0, Ask = 1, Last = 2, Volume = 3 }
-
-/// One update of a message that the reference sends on its own, before the
-/// quote update: the daily figures, or a trade, which the reference sends
-/// in up to three steps (its time when it gives one, its exchange when it
-/// gives one, then its price and size).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pass { Daily, Trade { time: bool, exchange: bool } }
 
 /// Execution fill report.
 #[derive(Debug, Clone, Copy)]

@@ -113,8 +113,7 @@ def push_captured_eur_usd(c):
     """The first EUR.USD message captured 02/10/2026: book, trade with
     status 0, then daily figures; no auto-execution flag."""
     c._test_push_quote(0, bid=1.12547, ask=1.12549, last=1.1255, bid_size=4_000_000, ask_size=12_000_000,
-                       high=1.12585, low=1.1232, close=1.1243, timestamp=1790921778)
-    c._test_push_marks(0, halted=0)
+                       high=1.12585, low=1.1232, close=1.1243, timestamp=1790921778, halted=0)
     c._test_push_tick_req_params(0, 0.00001, "", 0)
 
 
@@ -149,8 +148,8 @@ def test_currency_pair_stream_in_the_reference_order():
     c._test_serve_commands_after(0)
     c.req_mkt_data(1, currency_pair(), "", False, False)
     c._test_push_quote(0, bid=1.12546, ask=1.12547, last=1.1255, bid_size=2_000_000, ask_size=7_000_000,
-                       high=1.12585, low=1.1232, close=1.1243, timestamp=1790921787)
-    c._test_push_marks(0, halted=0, steps="quote,trade,time,daily", sizes_seen=True)
+                       high=1.12585, low=1.1232, close=1.1243, timestamp=1790921787,
+                       steps="time,last,daily,quote", halted=0, sizes_seen=True)
     c._test_push_tick_req_params(0, 0.00001, "", 0)
     c._test_dispatch_once()
     assert w.events == [
@@ -159,4 +158,31 @@ def test_currency_pair_stream_in_the_reference_order():
         ("size", 8, 0.0), ("price", 6, 1.12585, False), ("price", 7, 1.1232, False), ("price", 9, 1.1243, False),
         ("price", 1, 1.12546, True), ("size", 0, 2_000_000.0), ("price", 2, 1.12547, True), ("size", 3, 7_000_000.0),
         ("size", 0, 2_000_000.0), ("size", 3, 7_000_000.0),
+    ]
+
+
+def test_messages_read_at_once_are_not_merged():
+    """ibx#446: three book updates read in one dispatch give each one's
+    callbacks with its own values, as the reference sends them while it
+    reads each message (EUR.USD stream 9470, 02/10/2026)."""
+    w = OrderRecorder()
+    c = EClient(w)
+    c._test_connect("TEST123")
+    c._test_set_instrument_count(1)
+    c._test_serve_commands_after(0)
+    c.req_mkt_data(1, currency_pair(), "", False, False)
+    for bid, bid_size, ask, ask_size in [
+        (1.12546, 2_000_000, 1.12547, 7_000_000),
+        (1.12546, 2_000_000, 1.12547, 6_000_000),
+        (1.12547, 1_000_000, 1.12549, 19_000_000),
+    ]:
+        c._test_push_quote(0, bid=bid, ask=ask, bid_size=bid_size, ask_size=ask_size, steps="quote", sizes_seen=True)
+    c._test_dispatch_once()
+    assert w.events == [
+        ("mdt", 1),
+        ("price", 1, 1.12546, True), ("size", 0, 2_000_000.0), ("price", 2, 1.12547, True), ("size", 3, 7_000_000.0),
+        ("size", 0, 2_000_000.0), ("size", 3, 7_000_000.0),
+        ("size", 3, 6_000_000.0),
+        ("price", 1, 1.12547, True), ("size", 0, 1_000_000.0), ("price", 2, 1.12549, True), ("size", 3, 19_000_000.0),
+        ("size", 0, 1_000_000.0), ("size", 3, 19_000_000.0),
     ]

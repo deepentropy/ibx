@@ -51,10 +51,16 @@ pub const TICK_HALTED: i32 = 49;
 /// map of the contract's BBO exchange (ibx#441); no map yet gives an empty
 /// text.
 pub fn render_exchange_mask(mask: i64, instrument: InstrumentId, shared: &SharedState) -> String {
+    render_exchange_mask_at(mask, instrument, shared, u64::MAX)
+}
+
+/// [`render_exchange_mask`] for a step of the market data queue: with the
+/// map as known when the engine wrote it (ibx#446).
+pub fn render_exchange_mask_at(mask: i64, instrument: InstrumentId, shared: &SharedState, seq: u64) -> String {
     if mask == 0 {
         return String::new();
     }
-    let Some(components) = shared.reference.instrument_exchange_map(instrument) else { return String::new() };
+    let Some(components) = shared.reference.instrument_exchange_map_at(instrument, seq) else { return String::new() };
     let mut out = String::with_capacity(8);
     let mut bits = mask as u64;
     while bits != 0 {
@@ -105,28 +111,41 @@ fn smart_components_timeout(code: &str, sec_type_id: Option<u8>) -> (i64, String
 
 // ── Intermediate dispatch structs ──
 
-/// One market data callback of a quote poll.
+/// One market data callback of a request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MdTick {
     /// `tick_price`; only a bid or an ask can execute automatically.
     Price { tick_type: i32, value: f64, can_auto_execute: bool },
     /// `tick_size`.
     Size { tick_type: i32, value: f64 },
-    /// `tick_string`: exchange letters (32, 33, 84) or the last trade time
-    /// in epoch seconds (45).
+    /// `tick_string`: exchange letters (32, 33).
     Text { tick_type: i32, value: String },
-    /// `tick_generic`: the halted state (49).
+    /// `tick_string` of the last trade time (45, 88): epoch seconds, as
+    /// text (`epoch_text`).
+    Time { tick_type: i32, secs: i64 },
+    /// `tick_generic`: the halted state (49, 90).
     Generic { tick_type: i32, value: f64 },
 }
 
-/// Result of polling quotes for one request: its callbacks in the order
-/// they are sent.
-#[derive(Default)]
-pub struct QuotePollResult {
-    pub ticks: Vec<MdTick>,
-    /// true if any tick was delivered (for snapshot detection).
-    pub delivered: bool,
+/// The text of a whole number, written in `buf` (no allocation).
+pub fn epoch_text(secs: i64, buf: &mut [u8; 24]) -> &str {
+    let mut n = secs.unsigned_abs();
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 { break; }
+    }
+    if secs < 0 {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    std::str::from_utf8(&buf[i..]).unwrap_or("")
 }
+
+mod md_stream;
+pub use md_stream::{MdOut, StreamState};
 
 /// Security types and exchanges whose bid and ask auto-execution comes
 /// from the farm on a stream; for every other contract the reference sets
@@ -856,117 +875,6 @@ pub enum MdNotice {
     News { req_id: i64, news: crate::types::TickNews },
 }
 
-/// What a stream sent last, by request (ibx#446).
-#[derive(Debug, Default, Clone)]
-pub struct StreamState {
-    fields: [i64; 15],
-    /// The sizes and volume sent once (`SizeKind` bits).
-    sizes_sent: u8,
-    /// The farm message count of the quote at the last poll.
-    seq: u8,
-    /// The halted and volatility-halted bits of the last trade status.
-    halted_bits: u8,
-    /// The halted state goes out in each step until the next book update.
-    halted_pending: bool,
-    /// The stream joined a quote that already had data.
-    joined: bool,
-}
-
-/// The fields of a stream step, in the order the reference sends them
-/// (indexes of the polled quote fields).
-const STEP_ALL: [usize; 14] = [0, 1, 2, 3, 4, 5, 8, 6, 7, 9, 10, 12, 13, 11];
-/// The delayed data sender's order: the volume after the low; it sends no
-/// exchanges (12, 13 are skipped for delayed data).
-const STEP_ALL_DELAYED: [usize; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 11];
-const STEP_DAILY: [usize; 5] = [8, 6, 7, 9, 10];
-const STEP_DAILY_DELAYED: [usize; 5] = [6, 7, 8, 9, 10];
-const STEP_TIME: [usize; 1] = [11];
-const STEP_NONE: [usize; 0] = [];
-const STEP_LAST: [usize; 2] = [2, 5];
-const STEP_QUOTE: [usize; 6] = [0, 1, 3, 4, 12, 13];
-
-/// The size kind of a polled size field.
-fn stream_size_kind(idx: usize) -> crate::types::SizeKind {
-    use crate::types::SizeKind;
-    match idx { 3 => SizeKind::Bid, 4 => SizeKind::Ask, 5 => SizeKind::Last, _ => SizeKind::Volume }
-}
-
-/// The callbacks of a stream poll being built: each field still to send
-/// goes out once, in the step that takes it.
-struct StreamPass<'a> {
-    ticks: Vec<MdTick>,
-    todo: [bool; 15],
-    fields: &'a [i64; 15],
-    delayed: bool,
-    shared: &'a SharedState,
-    instrument: InstrumentId,
-    bid_auto: bool,
-    ask_auto: bool,
-}
-
-impl StreamPass<'_> {
-    fn api(&self, tick_type: i32) -> i32 {
-        if self.delayed { delayed_tick_type(tick_type) } else { tick_type }
-    }
-
-    fn price(&mut self, tick_type: i32, idx: usize, can_auto_execute: bool) {
-        let tick_type = self.api(tick_type);
-        self.ticks.push(MdTick::Price { tick_type, value: self.fields[idx] as f64 / PRICE_SCALE_F, can_auto_execute });
-    }
-
-    fn size(&mut self, tick_type: i32, idx: usize) {
-        let tick_type = self.api(tick_type);
-        self.ticks.push(MdTick::Size { tick_type, value: self.fields[idx] as f64 / QTY_SCALE as f64 });
-    }
-
-    /// Send the fields of a step still to send; whether one was.
-    fn take(&mut self, step: &[usize]) -> bool {
-        let before = self.ticks.len();
-        for &idx in step {
-            if !std::mem::take(&mut self.todo[idx]) {
-                continue;
-            }
-            match idx {
-                // A price comes with its size.
-                0 => { self.price(TICK_BID, 0, self.bid_auto); self.size(TICK_BID_SIZE, 3); }
-                1 => { self.price(TICK_ASK, 1, self.ask_auto); self.size(TICK_ASK_SIZE, 4); }
-                2 => { self.price(TICK_LAST, 2, false); self.size(TICK_LAST_SIZE, 5); }
-                3 => self.size(TICK_BID_SIZE, 3),
-                4 => self.size(TICK_ASK_SIZE, 4),
-                5 => self.size(TICK_LAST_SIZE, 5),
-                8 => self.size(TICK_VOLUME, 8),
-                6 => self.price(TICK_HIGH, 6, false),
-                7 => self.price(TICK_LOW, 7, false),
-                9 => self.price(TICK_CLOSE, 9, false),
-                10 => self.price(TICK_OPEN, 10, false),
-                11 => self.ticks.push(MdTick::Text {
-                    tick_type: self.api(TICK_LAST_TIMESTAMP), value: (self.fields[11] / 1_000_000_000).to_string(),
-                }),
-                // The delayed sender sends no exchanges.
-                12 | 13 if self.delayed => {}
-                // An empty text is not sent (`jextend.dK.c(List,int,int,
-                // String)@0-14`): no letters before the exchange map came.
-                12 | 13 => {
-                    let tick_type = if idx == 12 { TICK_BID_EXCHANGE } else { TICK_ASK_EXCHANGE };
-                    let value = render_exchange_mask(self.fields[idx], self.instrument, self.shared);
-                    if !value.is_empty() {
-                        self.ticks.push(MdTick::Text { tick_type, value });
-                    }
-                }
-                _ => {}
-            }
-        }
-        self.ticks.len() > before
-    }
-
-    fn halted(&mut self, value: Option<f64>) {
-        if let Some(value) = value {
-            let tick_type = self.api(TICK_HALTED);
-            self.ticks.push(MdTick::Generic { tick_type, value });
-        }
-    }
-}
-
 // ── ClientCore ──
 
 /// Shared subscription tracking and dispatch preparation logic.
@@ -981,8 +889,15 @@ pub struct ClientCore {
     pub instrument_to_req: Mutex<HashMap<InstrumentId, Vec<i64>>>,
     // con_id → InstrumentId for find_or_register_instrument lookup
     pub con_id_to_instrument: Mutex<HashMap<i64, InstrumentId>>,
-    // Change detection for quote polling, by request id
+    /// What each market data request sent last and where it reads the
+    /// market data queue, by request id (ibx#446).
     pub last_quotes: Mutex<HashMap<i64, StreamState>>,
+    /// The instruments as the queued steps have them (ibx#446).
+    md_reader: Mutex<md_stream::MdReader>,
+    /// Requests that joined a quote and wait for their first step.
+    md_joins_waiting: std::sync::atomic::AtomicUsize,
+    /// The dispatch's list of market data callbacks, kept between calls.
+    pub md_out: Mutex<Vec<MdOut>>,
     /// The news provider key of each market data request with the news
     /// tick (ibx#444, ibx#458).
     pub md_news: Mutex<HashMap<i64, String>>,
@@ -1095,9 +1010,6 @@ pub struct ClientCore {
     pub delayed_reqs: Mutex<HashSet<i64>>,
     /// Market data requests whose tickReqParams was sent (ibx#449).
     pub tick_req_params_sent: Mutex<HashSet<i64>>,
-    /// Streams whose bid and ask auto-execution comes from the farm
-    /// (ibx#446).
-    pub farm_auto_reqs: Mutex<HashSet<i64>>,
     /// Tick-by-tick requests: reqId -> (instrument, conId, type). Kept apart
     /// from the market data maps, so both can run on one contract (ibx#455).
     pub tbt_reqs: Mutex<HashMap<i64, (InstrumentId, i64, TbtType)>>,
@@ -1325,6 +1237,9 @@ impl ClientCore {
             instrument_to_req: Mutex::new(HashMap::new()),
             con_id_to_instrument: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
+            md_reader: Mutex::new(md_stream::MdReader::new()),
+            md_joins_waiting: std::sync::atomic::AtomicUsize::new(0),
+            md_out: Mutex::new(Vec::with_capacity(64)),
             md_news: Mutex::new(HashMap::new()),
             md_top_off: Mutex::new(HashSet::new()),
             md_waiting: Mutex::new(Vec::new()),
@@ -1369,7 +1284,6 @@ impl ClientCore {
             mdt_sent: Mutex::new(HashSet::new()),
             delayed_reqs: Mutex::new(HashSet::new()),
             tick_req_params_sent: Mutex::new(HashSet::new()),
-            farm_auto_reqs: Mutex::new(HashSet::new()),
             tbt_reqs: Mutex::new(HashMap::new()),
             contract_cache: Mutex::new(HashMap::new()),
         }
@@ -1381,6 +1295,8 @@ impl ClientCore {
         self.instrument_to_req.lock().unwrap().clear();
         self.con_id_to_instrument.lock().unwrap().clear();
         self.last_quotes.lock().unwrap().clear();
+        *self.md_reader.lock().unwrap() = md_stream::MdReader::new();
+        self.md_joins_waiting.store(0, Ordering::Release);
         self.md_news.lock().unwrap().clear();
         self.instrument_params.lock().unwrap().clear();
         self.instrument_news.lock().unwrap().clear();
@@ -1417,7 +1333,6 @@ impl ClientCore {
         self.mdt_sent.lock().unwrap().clear();
         self.delayed_reqs.lock().unwrap().clear();
         self.tick_req_params_sent.lock().unwrap().clear();
-        self.farm_auto_reqs.lock().unwrap().clear();
         self.tbt_reqs.lock().unwrap().clear();
         self.contract_cache.lock().unwrap().clear();
     }
@@ -1692,17 +1607,17 @@ impl ClientCore {
         if let Some(key) = news.clone() {
             self.md_news.lock().unwrap().insert(req_id, key);
         }
-        if !self.join_md_observers(shared, req_id, instrument, had_data) {
-            self.md_news.lock().unwrap().remove(&req_id);
-            return false;
-        }
         if top_off {
             self.md_top_off.lock().unwrap().insert(req_id);
         }
-        if snapshot {
-            self.start_snapshot(req_id, sec_type);
+        let kind = md_stream::NewRequest {
+            snapshot: snapshot.then_some(sec_type), top_off, farm_auto: auto_execution_from_farm(sec_type, exchange),
+        };
+        if !self.join_md_observers(shared, req_id, instrument, had_data, Some(kind), None) {
+            self.md_news.lock().unwrap().remove(&req_id);
+            self.md_top_off.lock().unwrap().remove(&req_id);
+            return false;
         }
-        self.note_auto_execution(req_id, sec_type, exchange);
         true
     }
 
@@ -1716,24 +1631,30 @@ impl ClientCore {
     /// parameters, the latest headlines of its news key, and every field
     /// the quote has (`take_md_joins`). `had_data`: the quote already has
     /// data although no request uses it (the internal P&L quote).
-    fn join_md_observers(&self, shared: &SharedState, req_id: i64, instrument: InstrumentId, had_data: bool) -> bool {
+    /// `kind`: what a new request is (None: a request that moves from
+    /// another slot keeps its kind); `at`: its place in the market data
+    /// queue when not the current end. Its stream state is in place before
+    /// the dispatch can see the request (ibx#446).
+    fn join_md_observers(
+        &self, shared: &SharedState, req_id: i64, instrument: InstrumentId, had_data: bool,
+        kind: Option<md_stream::NewRequest>, at: Option<u64>,
+    ) -> bool {
         let mut observers = self.instrument_to_req.lock().unwrap();
-        let reqs = observers.entry(instrument).or_default();
-        let joining = !reqs.is_empty();
+        let joining = observers.get(&instrument).is_some_and(|reqs| !reqs.is_empty());
         let delayed = joining && {
             let delayed_reqs = self.delayed_reqs.lock().unwrap();
-            reqs.iter().any(|r| delayed_reqs.contains(r))
+            observers.get(&instrument).is_some_and(|reqs| reqs.iter().any(|r| delayed_reqs.contains(r)))
         };
         if delayed && !self.md_modes.lock().unwrap().delayed {
             drop(observers);
             shared.orders.push_order_error(req_id, MD_DELAYED_NOT_ENABLED.0, MD_DELAYED_NOT_ENABLED.1.to_string());
             return false;
         }
-        reqs.push(req_id);
+        self.start_md_stream(shared, req_id, instrument, joining, had_data, kind, at);
+        observers.entry(instrument).or_default().push(req_id);
         drop(observers);
         self.req_to_instrument.lock().unwrap().insert(req_id, instrument);
         if joining || had_data {
-            self.join_stream(req_id);
             if delayed {
                 self.set_delayed(req_id);
             }
@@ -1932,7 +1853,14 @@ impl ClientCore {
     /// request id. The instrument's subscription ends with its last
     /// request; before that, only the request's share of the news entry
     /// goes.
-    pub fn unregister_mkt_data(&self, req_id: i64) -> Option<MdCancel> {
+    pub fn unregister_mkt_data(&self, shared: &SharedState, req_id: i64) -> Option<MdCancel> {
+        self.drop_mkt_data(shared, req_id, true)
+    }
+
+    /// [`Self::unregister_mkt_data`]; `cancelled`: the client cancelled it,
+    /// so the steps queued before still go to it (ibx#446); not for a
+    /// request the server or a join refused.
+    fn drop_mkt_data(&self, shared: &SharedState, req_id: i64, cancelled: bool) -> Option<MdCancel> {
         {
             let mut waiting = self.md_waiting.lock().unwrap();
             if let Some(i) = waiting.iter().position(|w| w.req_id == req_id) {
@@ -1943,6 +1871,8 @@ impl ClientCore {
         let instrument = self.req_to_instrument.lock().unwrap().remove(&req_id)?;
         let last = {
             let mut observers = self.instrument_to_req.lock().unwrap();
+            // Its steps queued so far are still its own (ibx#446).
+            self.end_md_stream(shared, req_id, instrument, cancelled);
             match observers.get_mut(&instrument) {
                 Some(reqs) => {
                     reqs.retain(|r| *r != req_id);
@@ -1955,11 +1885,9 @@ impl ClientCore {
                 None => true,
             }
         };
-        self.last_quotes.lock().unwrap().remove(&req_id);
         self.mdt_sent.lock().unwrap().remove(&req_id);
         let delayed = self.delayed_reqs.lock().unwrap().remove(&req_id);
         self.tick_req_params_sent.lock().unwrap().remove(&req_id);
-        self.farm_auto_reqs.lock().unwrap().remove(&req_id);
         self.md_joins.lock().unwrap().retain(|(r, _)| *r != req_id);
         let news = self.md_news.lock().unwrap().remove(&req_id);
         self.md_top_off.lock().unwrap().remove(&req_id);
@@ -1967,6 +1895,8 @@ impl ClientCore {
         if !last {
             return Some(MdCancel::Shared { instrument, news });
         }
+        // No step of the contract is queued any more (ibx#446).
+        shared.market.md_events.listen(instrument, false);
         self.instrument_params.lock().unwrap().remove(&instrument);
         self.instrument_news.lock().unwrap().remove(&instrument);
         // A delayed record that is let go loses its "delayed available"
@@ -2001,14 +1931,14 @@ impl ClientCore {
     pub fn take_md_rejects(&self, shared: &SharedState) -> (Vec<MdNotice>, Vec<ControlCommand>) {
         let mut notices = Vec::new();
         let mut commands = Vec::new();
-        for (from, into) in shared.market.drain_md_merges() {
+        for (from, into, at) in shared.market.drain_md_merges() {
             // None left: they were cancelled, which freed the slot.
             let Some(reqs) = self.instrument_to_req.lock().unwrap().remove(&from) else { continue };
             for req_id in reqs {
-                if !self.join_md_observers(shared, req_id, into, false) {
+                if !self.join_md_observers(shared, req_id, into, false, None, Some(at)) {
                     // Refused (10168): the request is gone.
                     self.req_to_instrument.lock().unwrap().insert(req_id, into);
-                    if let Some(command) = self.unregister_mkt_data(req_id).and_then(MdCancel::command) {
+                    if let Some(command) = self.drop_mkt_data(shared, req_id, false).and_then(MdCancel::command) {
                         commands.push(command);
                     }
                 }
@@ -2036,7 +1966,7 @@ impl ClientCore {
                     notices.push(MdNotice::Error { req_id, code: MD_TOP_REJECTED.0, text: MD_TOP_REJECTED.1.to_string() });
                 } else {
                     notices.push(MdNotice::Error { req_id, code, text: text.to_string() });
-                    if let Some(command) = self.unregister_mkt_data(req_id).and_then(MdCancel::command) {
+                    if let Some(command) = self.drop_mkt_data(shared, req_id, false).and_then(MdCancel::command) {
                         commands.push(command);
                     }
                 }
@@ -2521,6 +2451,9 @@ impl ClientCore {
     pub fn set_delayed(&self, req_id: i64) {
         self.mdt_sent.lock().unwrap().insert(req_id);
         self.delayed_reqs.lock().unwrap().insert(req_id);
+        if let Some(st) = self.last_quotes.lock().unwrap().get_mut(&req_id) {
+            st.delayed = true;
+        }
     }
 
     /// reqSmartComponents (ibx#441), answered from the exchange maps the
@@ -3147,164 +3080,6 @@ impl ClientCore {
 
     // ── Dispatch preparation methods ──
 
-    /// Poll quotes for a single instrument and return its stream callbacks,
-    /// as the reference sends them (ibx#446). The reference sends, for each
-    /// update of a farm message, what changed since it last sent it: the
-    /// trade and daily updates in the message's order as it reads them (a
-    /// trade in up to three steps: its time, its exchange, its price and
-    /// size), then the bid/ask book. Inside one step the order is fixed:
-    /// bid, ask, last (each with its size), bid size, ask size, last size,
-    /// volume, high, low, close, open, bid and ask exchanges, last time,
-    /// halted. A first size or volume is sent even when it is 0. The halted
-    /// state is sent when its halted or volatility-halted bit changes, then
-    /// again in each step until the next book update. A stream never sends
-    /// the last exchange. When several messages came since the last poll,
-    /// their steps are merged in the order of the last one.
-    /// A real-time bid or ask can execute automatically, as the reference
-    /// sets it for every contract but an option on the exchanges that say
-    /// it per quote.
-    pub fn poll_instrument_ticks(
-        &self,
-        shared: &SharedState,
-        iid: InstrumentId,
-        req_id: i64,
-    ) -> QuotePollResult {
-        let q = shared.market.quote(iid);
-        let marks = shared.market.marks(iid);
-        let fields = [
-            q.bid, q.ask, q.last, q.bid_size, q.ask_size, q.last_size,
-            q.high, q.low, q.volume, q.close, q.open, q.timestamp_ns as i64,
-            q.bid_exch_mask, q.ask_exch_mask, q.last_exch_mask,
-        ];
-
-        // Single lock acquisition for both read and write of last_quotes.
-        let mut map = self.last_quotes.lock().unwrap();
-        let st = map.entry(req_id).or_default();
-        let mut todo = [false; 15];
-        for (idx, pending) in todo.iter_mut().enumerate() {
-            *pending = match idx {
-                3 | 4 | 5 | 8 => {
-                    let kind = stream_size_kind(idx);
-                    (marks.seen(kind) || fields[idx] != 0)
-                        && (st.sizes_sent & (1 << kind as u8) == 0 || fields[idx] != st.fields[idx])
-                }
-                12 | 13 => fields[idx] != st.fields[idx],
-                14 => false,
-                _ => fields[idx] != 0 && fields[idx] != st.fields[idx],
-            };
-        }
-        if let Some(status) = marks.halted() {
-            let bits = (status & 3) as u8;
-            if bits != st.halted_bits {
-                st.halted_bits = bits;
-                st.halted_pending = true;
-            }
-        }
-        let delayed = self.delayed_reqs.lock().unwrap().contains(&req_id);
-        let (bid_auto, ask_auto) = if delayed {
-            (false, false)
-        } else if self.farm_auto_reqs.lock().unwrap().contains(&req_id) {
-            (marks.bid_auto() == Some(true), marks.ask_auto() == Some(true))
-        } else {
-            (true, true)
-        };
-        // Delayed data has its own halted tick (90), with the same rule.
-        let halted = marks.halted().map(crate::types::QuoteMarks::halted_tick_value);
-        let mut pending = st.halted_pending;
-
-        let mut out = StreamPass { ticks: Vec::new(), todo, fields: &fields, delayed, shared, instrument: iid, bid_auto, ask_auto };
-        let new_messages = marks.message_seq().wrapping_sub(st.seq) & 7;
-        st.seq = marks.message_seq();
-        if std::mem::take(&mut st.joined) {
-            // A stream on a quote that already had data: its first step
-            // sends all of it (the reference marks every known field when
-            // the request joins the record).
-            out.take(if delayed { &STEP_ALL_DELAYED } else { &STEP_ALL });
-            pending = halted.is_some();
-            if pending { out.halted(halted); }
-        } else {
-            let mut steps: [Option<&[usize]>; 50] = [None; 50];
-            let mut n = 0;
-            let mut push = |step: &'static [usize]| if n < steps.len() { steps[n] = Some(step); n += 1; };
-            let exact = new_messages == 1;
-            if exact {
-                for pass in marks.passes() {
-                    match pass {
-                        crate::types::Pass::Daily => push(if delayed { &STEP_DAILY_DELAYED } else { &STEP_DAILY }),
-                        crate::types::Pass::Trade { time, exchange } => {
-                            if time { push(&STEP_TIME); }
-                            if exchange { push(&STEP_NONE); }
-                            push(&STEP_LAST);
-                        }
-                    }
-                }
-                if marks.quote_update() {
-                    push(&STEP_QUOTE);
-                }
-            } else {
-                let daily: &'static [usize] = if delayed { &STEP_DAILY_DELAYED } else { &STEP_DAILY };
-                if marks.daily_first() { push(daily); }
-                push(&STEP_TIME);
-                push(&STEP_LAST);
-                if !marks.daily_first() { push(daily); }
-                push(&STEP_QUOTE);
-            }
-            for step in steps[..n].iter().flatten() {
-                let sent = out.take(step);
-                // Without the message's steps, a step with nothing sent did
-                // not happen.
-                if exact || sent {
-                    if pending { out.halted(halted); }
-                    if std::ptr::eq(*step, &STEP_QUOTE[..]) {
-                        pending = false;
-                    }
-                }
-            }
-            // Fields no step of the message took.
-            if out.take(if delayed { &STEP_ALL_DELAYED } else { &STEP_ALL }) && pending {
-                out.halted(halted);
-            }
-        }
-        st.halted_pending = pending;
-
-        st.fields = fields;
-        for idx in [3, 4, 5, 8] {
-            let kind = stream_size_kind(idx);
-            if marks.seen(kind) || fields[idx] != 0 {
-                st.sizes_sent |= 1 << kind as u8;
-            }
-        }
-        drop(map);
-
-        let ticks = out.ticks;
-        let delivered = !ticks.is_empty();
-        QuotePollResult { ticks, delivered }
-    }
-
-    /// A request joins a quote that already has data (another request's,
-    /// or the internal P&L subscription's): its first poll sends all of
-    /// it, as the reference marks every known field when a request joins
-    /// its record (ibx#446, ibx#444).
-    pub(crate) fn join_stream(&self, req_id: i64) {
-        self.last_quotes.lock().unwrap().insert(req_id, StreamState { joined: true, ..Default::default() });
-    }
-
-    /// Note a stream whose bid and ask auto-execution comes from the farm
-    /// (ibx#446).
-    fn note_auto_execution(&self, req_id: i64, sec_type: &str, exchange: &str) {
-        if auto_execution_from_farm(sec_type, exchange) {
-            self.farm_auto_reqs.lock().unwrap().insert(req_id);
-        }
-    }
-
-    /// Start a plain snapshot of the request (ibx#446).
-    fn start_snapshot(&self, req_id: i64, sec_type: &str) {
-        let snapshot = crate::control::snapshot::PlainSnapshot::new(sec_type, std::time::Instant::now());
-        let mut snaps = self.snapshot_reqs.lock().unwrap();
-        snaps.insert(req_id, snapshot);
-        self.snapshot_count.store(snaps.len(), Ordering::Release);
-    }
-
     /// Forget the plain snapshot of the request, if any.
     fn end_snapshot(&self, req_id: i64) {
         if self.snapshot_count.load(Ordering::Acquire) == 0 {
@@ -3330,114 +3105,6 @@ impl ClientCore {
             return Some((321, snapshot::rate_refusal(limit)));
         }
         None
-    }
-
-    /// The ticks of a market data request since the last poll, and whether
-    /// its snapshot ended now: a stream gives every change; a plain
-    /// snapshot each tick type once, then its end (ibx#446).
-    pub fn poll_market_ticks(&self, shared: &SharedState, iid: InstrumentId, req_id: i64) -> (QuotePollResult, bool) {
-        // `mdoff`: the reference's sender skips the top of book pass of the
-        // request (`jextend.dL.a(s,int,pa,Map,Set)@136-220`, `s.o()` false);
-        // a snapshot still ends as the quote completes (ibx#444).
-        let top_off = self.md_top_off.lock().unwrap().contains(&req_id);
-        if self.snapshot_count.load(Ordering::Acquire) > 0
-            && let Some((polled, ended)) = self.poll_snapshot_ticks(shared, iid, req_id, std::time::Instant::now())
-        {
-            return (if top_off { QuotePollResult::default() } else { polled }, ended);
-        }
-        if top_off {
-            return (QuotePollResult::default(), false);
-        }
-        (self.poll_instrument_ticks(shared, iid, req_id), false)
-    }
-
-    /// The ticks of a plain snapshot not sent yet, in the reference's
-    /// order (ibx#446). The reference sends what each update of a message
-    /// changed as it applies it: the trade (its time, then its price with
-    /// its size and the halted state; never its exchange) and the daily figures
-    /// (volume, high, low, close, open; for delayed data high, low, volume,
-    /// close, open) in the message's order, then the quotes (bid and ask,
-    /// each with its size, then their exchanges). A snapshot's bid or ask
-    /// can execute automatically only when the farm said so; its halted
-    /// state comes with the first trade that gives one. `None` when the
-    /// request is no snapshot. The end comes when every tick type it waits
-    /// for was sent, or at the time limit.
-    pub fn poll_snapshot_ticks(
-        &self, shared: &SharedState, iid: InstrumentId, req_id: i64, now: std::time::Instant,
-    ) -> Option<(QuotePollResult, bool)> {
-        let mut snaps = self.snapshot_reqs.lock().unwrap();
-        let snap = snaps.get_mut(&req_id)?;
-        let q = shared.market.quote(iid);
-        let marks = shared.market.marks(iid);
-        let delayed = self.delayed_reqs.lock().unwrap().contains(&req_id);
-        let api = |tick_type: i32| if delayed { delayed_tick_type(tick_type) } else { tick_type };
-        let price = |tick_type: i32, v: i64, can_auto_execute: bool| MdTick::Price {
-            tick_type, value: v as f64 / PRICE_SCALE_F, can_auto_execute,
-        };
-        let size = |tick_type: i32, v: i64| MdTick::Size { tick_type, value: v as f64 / QTY_SCALE as f64 };
-
-        let mut ticks = Vec::new();
-        let trade = |ticks: &mut Vec<MdTick>, snap: &mut crate::control::snapshot::PlainSnapshot| {
-            if q.timestamp_ns != 0 && snap.take(api(TICK_LAST_TIMESTAMP)) {
-                ticks.push(MdTick::Text {
-                    tick_type: api(TICK_LAST_TIMESTAMP), value: (q.timestamp_ns / 1_000_000_000).to_string(),
-                });
-            }
-            if q.last != 0 && snap.take(api(4)) {
-                ticks.push(price(api(4), q.last, false));
-                ticks.push(size(api(5), q.last_size));
-            }
-            if !delayed && let Some(status) = marks.halted() && snap.take(TICK_HALTED) {
-                ticks.push(MdTick::Generic { tick_type: TICK_HALTED, value: crate::types::QuoteMarks::halted_tick_value(status) });
-            }
-        };
-        let daily = |ticks: &mut Vec<MdTick>, snap: &mut crate::control::snapshot::PlainSnapshot| {
-            let volume = (q.volume != 0 && snap.take(api(8))).then(|| size(api(8), q.volume));
-            if !delayed && let Some(v) = volume.clone() {
-                ticks.push(v);
-            }
-            for (v, tt) in [(q.high, 6), (q.low, 7)] {
-                if v != 0 && snap.take(api(tt)) {
-                    ticks.push(price(api(tt), v, false));
-                }
-            }
-            if delayed && let Some(v) = volume {
-                ticks.push(v);
-            }
-            for (v, tt) in [(q.close, 9), (q.open, 14)] {
-                if v != 0 && snap.take(api(tt)) {
-                    ticks.push(price(api(tt), v, false));
-                }
-            }
-        };
-        if marks.daily_first() {
-            daily(&mut ticks, snap);
-            trade(&mut ticks, snap);
-        } else {
-            trade(&mut ticks, snap);
-            daily(&mut ticks, snap);
-        }
-        for (p, s, pt, st, auto) in [(q.bid, q.bid_size, 1, 0, marks.bid_auto()), (q.ask, q.ask_size, 2, 3, marks.ask_auto())] {
-            if p != 0 && snap.take(api(pt)) {
-                ticks.push(price(api(pt), p, !delayed && auto == Some(true)));
-                ticks.push(size(api(st), s));
-            }
-        }
-        for (mask, tt) in [(q.bid_exch_mask, TICK_BID_EXCHANGE), (q.ask_exch_mask, TICK_ASK_EXCHANGE)] {
-            if !delayed && mask != 0 && snap.take(tt) {
-                let value = render_exchange_mask(mask, iid, shared);
-                if !value.is_empty() {
-                    ticks.push(MdTick::Text { tick_type: tt, value });
-                }
-            }
-        }
-        let delivered = !ticks.is_empty();
-        let ended = snap.complete() || snap.timed_out(now);
-        if ended {
-            snaps.remove(&req_id);
-            self.snapshot_count.store(snaps.len(), Ordering::Release);
-        }
-        Some((QuotePollResult { ticks, delivered }, ended))
     }
 
     /// Snapshot the current instrument→req_id mapping: each request of

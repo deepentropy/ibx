@@ -335,7 +335,7 @@ fn market_data_subscribe_ticks_unsubscribe() {
     let mut q = Quote::default();
     q.bid = 450 * PRICE_SCALE;
     q.ask = 451 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -346,7 +346,7 @@ fn market_data_subscribe_ticks_unsubscribe() {
 
     // Push new quote — should NOT be dispatched
     q.bid = 449 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
     w.events.clear();
     client.process_msgs(&mut w);
     let bid_ticks: Vec<_> = w.events.iter().filter(|e| e.starts_with("tick_price:1:")).collect();
@@ -366,11 +366,11 @@ fn market_data_multi_instrument_independent() {
     // Quote for instrument 0
     let mut q0 = Quote::default();
     q0.bid = 450 * PRICE_SCALE;
-    shared.market.push_quote(0, &q0);
+    shared.market.push_test_message(0, &q0, &Default::default());
     // Quote for instrument 1
     let mut q1 = Quote::default();
     q1.bid = 150 * PRICE_SCALE;
-    shared.market.push_quote(1, &q1);
+    shared.market.push_test_message(1, &q1, &Default::default());
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -379,7 +379,7 @@ fn market_data_multi_instrument_independent() {
 
     // Update only instrument 1
     q1.bid = 149 * PRICE_SCALE;
-    shared.market.push_quote(1, &q1);
+    shared.market.push_test_message(1, &q1, &Default::default());
     w.events.clear();
     client.process_msgs(&mut w);
 
@@ -673,7 +673,7 @@ fn contract_lookup_then_subscribe() {
     let mut q = Quote::default();
     q.bid = 178 * PRICE_SCALE;
     q.ask = 179 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     // Map (simulating what engine would do)
     client.map_req_instrument(21, 0);
@@ -820,7 +820,7 @@ fn mixed_ticks_during_fills() {
     let mut q = Quote::default();
     q.bid = 150 * PRICE_SCALE;
     q.ask = 151 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     // Fill arrives at same time
     shared.orders.push_fill(Fill {
@@ -894,7 +894,7 @@ fn mixed_all_data_types_single_process() {
     // Quotes
     let mut q = Quote::default();
     q.bid = 150 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     // Fill
     shared.orders.push_fill(Fill {
