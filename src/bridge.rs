@@ -788,6 +788,9 @@ pub struct ReferenceState {
     soft_dollar_tiers: Mutex<Vec<crate::types::SoftDollarTier>>,
     family_codes: Mutex<Vec<crate::types::FamilyCode>>,
     white_branding_id: Mutex<String>,
+    /// The account ids of the logon's account list (6095), in logon order
+    /// (ibx#420).
+    managed_accounts: Mutex<Vec<String>>,
     /// FA session, from CCP logon tag 6108 (ibx#481).
     fa_session: std::sync::atomic::AtomicBool,
     /// The logon's super user and omnibus flags (ibx#417): either one lets
@@ -871,6 +874,7 @@ impl ReferenceState {
             soft_dollar_tiers: Mutex::new(Vec::new()),
             family_codes: Mutex::new(Vec::new()),
             white_branding_id: Mutex::new(String::new()),
+            managed_accounts: Mutex::new(Vec::new()),
             fa_session: std::sync::atomic::AtomicBool::new(false),
             super_user: AtomicBool::new(false),
             omnibus: AtomicBool::new(false),
@@ -1192,6 +1196,24 @@ impl ReferenceState {
         self.white_branding_id.lock().unwrap().clone()
     }
 
+    /// The account ids of the logon's account list, in logon order
+    /// (ibx#420).
+    pub fn managed_accounts(&self) -> Vec<String> {
+        self.managed_accounts.lock().unwrap().clone()
+    }
+
+    /// The text of the managed accounts callback (ibx#420): every account
+    /// of the logon's list, comma separated; `logon_account` when the
+    /// logon had no list.
+    pub fn managed_accounts_text(&self, logon_account: &str) -> String {
+        let accounts = self.managed_accounts.lock().unwrap();
+        if accounts.is_empty() {
+            logon_account.to_string()
+        } else {
+            crate::control::logon::managed_accounts_text(&accounts)
+        }
+    }
+
     /// True when the logon says this is an FA session (tag 6108, ibx#481).
     pub fn fa_session(&self) -> bool {
         self.fa_session.load(std::sync::atomic::Ordering::Relaxed)
@@ -1288,6 +1310,10 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_white_branding_id(&self, id: String) {
         *self.white_branding_id.lock().unwrap() = id;
+    }
+
+    #[doc(hidden)] pub fn set_managed_accounts(&self, accounts: Vec<String>) {
+        *self.managed_accounts.lock().unwrap() = accounts;
     }
 
     /// The account's feature list from the account config (6542), None

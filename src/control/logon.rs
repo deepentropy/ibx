@@ -213,6 +213,28 @@ impl ApiFeatures {
 /// (`jextend.ev`, API-SESSION 1.1).
 pub const API_NOT_ALLOWED: &str = "Disconnecting API request since regular API is not allowed.";
 
+/// The account ids of the logon's account list (tag 6095, ibx#420): a
+/// comma list of `acct` or `acct/alias`, in logon order, the alias left
+/// out, empty items skipped (`jfix.ba.<init>(...)@285` → `jfix.m`).
+pub fn managed_accounts(tag: &str) -> Vec<String> {
+    tag.split(',')
+        .map(|item| item.split('/').next().unwrap_or("").trim())
+        .filter(|id| !id.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// The managed accounts text of the API callback (ibx#420): every account
+/// of the list, in its order, with a comma between two accounts, as the
+/// reference writes MANAGED_ACCTS for a client at the server version ibx
+/// takes (the protobuf form, `jextend.dM.b(jfix.dr)@135-156`; captured
+/// 02/10/2026 as message 215 at server version 214). The older text form
+/// (`jextend.dL.a(jfix.dr)@131-205`) ends with a comma when there are
+/// several accounts; it is not the one of this server version.
+pub fn managed_accounts_text(accounts: &[String]) -> String {
+    accounts.join(",")
+}
+
 /// Most years of a historical data request: tag 6774 of the logon when
 /// above 0, else 1 (`jclient.gi.a(jfix.dk, jfix.bb, boolean, boolean, boolean)@573-594`).
 pub fn max_backfill_years(tag: Option<&str>) -> i32 {
@@ -336,5 +358,19 @@ mod tests {
             "Historical data request for 2 year(s) rejected. Max API Backfill Years=1");
         assert_eq!(backfill_years_refusal("1 y", 1), None);
         assert_eq!(backfill_years_refusal("300 d", 0), None);
+    }
+
+    // ibx#420: the account list of the logon (6095), alias left out, in
+    // logon order; the captured paper list has one account, the captured
+    // live login of 13/05/2026 two with their aliases.
+    #[test]
+    fn managed_accounts_of_the_logon_list() {
+        assert_eq!(managed_accounts("DUXXXXXXX"), ["DUXXXXXXX"]);
+        let two = managed_accounts("DUXXXXXX2/{alias},DUXXXXXX1/{alias}");
+        assert_eq!(two, ["DUXXXXXX2", "DUXXXXXX1"]);
+        assert_eq!(managed_accounts_text(&two), "DUXXXXXX2,DUXXXXXX1");
+        assert_eq!(managed_accounts(" DUXXXXXX1 ,,DUXXXXXX2,"), ["DUXXXXXX1", "DUXXXXXX2"]);
+        assert!(managed_accounts("").is_empty());
+        assert_eq!(managed_accounts_text(&["DUXXXXXXX".to_string()]), "DUXXXXXXX");
     }
 }

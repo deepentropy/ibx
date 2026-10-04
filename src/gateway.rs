@@ -692,6 +692,10 @@ pub struct CcpReconnect {
 /// Full gateway connection.
 pub struct Gateway {
     pub account_id: String,
+    /// The account ids of the logon's account list (6095), in logon
+    /// order: the managed accounts of the API (ibx#420). Empty when the
+    /// logon has no list.
+    pub managed_accounts: Vec<String>,
     pub session_token: BigUint,
     /// Session ID surfaced to webapp REST clients as `x-ccp-session-id`.
     /// Sourced from the post-auth FIX logon ACK, falling back to the locally generated
@@ -1696,6 +1700,7 @@ impl Gateway {
         tls.get_ref().set_read_timeout(Some(Duration::from_millis(FARM_LOGON_POLL_MS)))?;
         let ack_deadline = std::time::Instant::now() + Duration::from_secs_f64(TIMEOUT_FARM_LOGON);
         let mut account_id = String::new();
+        let mut managed_accounts: Vec<String> = Vec::new();
         let mut heartbeat_interval = CCP_HEARTBEAT;
         let mut server_session_id = String::new();
         let mut settings_object_key = String::new();
@@ -1784,6 +1789,10 @@ impl Gateway {
                 version_cutoff_date = fields.get(&6244).cloned();
                 max_backfill_years = crate::control::logon::max_backfill_years(fields.get(&6774).map(String::as_str));
                 log::info!("Normal logon [cutoffVersion={:?}], Max API Backfill Years is set to {}", version_cutoff, max_backfill_years);
+                // The account list of the logon, the managed accounts of
+                // the API (ibx#420).
+                managed_accounts = fields.get(&6095).map(|v| crate::control::logon::managed_accounts(v)).unwrap_or_default();
+                log::info!("Logon account list: {} account(s)", managed_accounts.len());
             }
             if let Some(v) = fields.get(&1) {
                 if account_id.is_empty() { account_id = v.clone(); }
@@ -2240,6 +2249,7 @@ impl Gateway {
 
         let gw = Gateway {
             account_id: if account_id.is_empty() { config.username.clone() } else { account_id },
+            managed_accounts,
             session_token: session_key,
             server_session_id,
             settings_object_key,
@@ -2335,6 +2345,8 @@ impl Gateway {
 
         // White branding ID (empty for standard accounts).
         shared.reference.set_white_branding_id(self.white_branding_id.clone());
+        // The account list of the logon: the managed accounts (ibx#420).
+        shared.reference.set_managed_accounts(self.managed_accounts.clone());
         shared.reference.set_fa_session(self.fa_session);
         shared.reference.set_short_sale_flags(self.super_user, self.omnibus);
         shared.reference.set_smart_combo_con_ids(&self.raw_smart_combo_con_ids);
@@ -2727,6 +2739,23 @@ mod tests {
         let err = ccp_login_start(&mut wire, &mut SecureChannel::new(), CAPTURED_CONNECT.as_bytes()).unwrap_err();
         assert_eq!(err.to_string(), "REDIRECT:cdc1.example:4000");
         assert_eq!(wire.sent(), vec![CAPTURED_CONNECT.to_string()]);
+    }
+
+    // ibx#420: the account list of a logon reply (6095), from the captured
+    // paper reply of 02/10/2026 and the same reply with two accounts.
+    #[test]
+    fn managed_accounts_of_a_logon_reply() {
+        let captured = "35=A34=00000143=N52=20261002-08:54:0198=0108=10141=Y            6059=17909146461=DUXXXXXXX6558=18364=06095=DUXXXXXXX6961=0";
+        let accounts = |frame: &str| {
+            let tags = fix_parse(frame.as_bytes());
+            crate::control::logon::managed_accounts(tags.get(&6095).map(String::as_str).unwrap_or(""))
+        };
+        assert_eq!(accounts(captured), ["DUXXXXXXX"]);
+        let two = captured.replace("6095=DUXXXXXXX", "6095=DUXXXXXX2/{alias},DUXXXXXX1/{alias}");
+        assert_eq!(accounts(&two), ["DUXXXXXX2", "DUXXXXXX1"]);
+        let shared = SharedState::new();
+        shared.reference.set_managed_accounts(accounts(&two));
+        assert_eq!(shared.reference.managed_accounts_text("DUXXXXXX1"), "DUXXXXXX2,DUXXXXXX1");
     }
 
     // ibx#423: an encrypted message on the auth connection, which has no

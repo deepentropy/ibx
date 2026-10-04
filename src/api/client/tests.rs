@@ -6750,3 +6750,24 @@ fn an_order_with_unset_fields_goes_out_and_shows_as_the_reference() {
     assert_eq!((o.volatility_type, o.reference_price_type, o.dont_use_auto_price_for_hedge), (0, 0, true));
     assert_eq!((o.min_qty, o.trailing_percent, o.cash_qty, o.filled_quantity), (i32::MAX, f64::MAX, f64::MAX, 0.0));
 }
+
+// ibx#420: reqManagedAccts answers every account of the logon's account
+// list, in logon order, comma separated (the protobuf form of the
+// reference's MANAGED_ACCTS at server version 214); the logon account
+// when the logon had no list.
+#[test]
+fn managed_accounts_are_the_logon_account_list() {
+    #[derive(Default)]
+    struct Accounts(Vec<String>);
+    impl Wrapper for Accounts {
+        fn managed_accounts(&mut self, accounts_list: &str) { self.0.push(accounts_list.to_string()); }
+    }
+    let (client, _rx, shared) = test_client();
+    let mut w = Accounts::default();
+    client.req_managed_accts(&mut w);
+    shared.reference.set_managed_accounts(crate::control::logon::managed_accounts("DUXXXXXX2/{alias},DUXXXXXX1/{alias}"));
+    client.req_managed_accts(&mut w);
+    shared.reference.set_managed_accounts(crate::control::logon::managed_accounts("DUXXXXXXX"));
+    client.req_managed_accts(&mut w);
+    assert_eq!(w.0, ["DU123", "DUXXXXXX2,DUXXXXXX1", "DUXXXXXXX"]);
+}

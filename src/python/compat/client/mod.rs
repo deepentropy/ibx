@@ -215,7 +215,7 @@ impl EClient {
         // Fire initial callbacks synchronously, matching official Python ibapi
         // where connect_ack signals "socket ready" before run() is called.
         self.wrapper.call_method0(py, "connect_ack")?;
-        self.wrapper.call_method1(py, "managed_accounts", (self.account().as_str(),))?;
+        self.wrapper.call_method1(py, "managed_accounts", (self.managed_accounts_text().as_str(),))?;
         self.wrapper.call_method1(py, "next_valid_id", (start_id,))?;
 
         Ok(())
@@ -334,6 +334,15 @@ impl EClient {
     /// Return the account id (empty string if not connected).
     pub(crate) fn account(&self) -> String {
         self.account_id.lock().unwrap().clone().unwrap_or_default()
+    }
+
+    /// The managed accounts callback text (ibx#420): the logon's account
+    /// list, comma separated; the account id when the logon had no list.
+    pub(crate) fn managed_accounts_text(&self) -> String {
+        match self.shared.lock().unwrap().as_ref() {
+            Some(shared) => shared.reference.managed_accounts_text(&self.account()),
+            None => self.account(),
+        }
     }
 
     /// Find instrument ID for a contract, registering if needed. A known

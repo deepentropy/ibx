@@ -126,8 +126,11 @@ impl EClient {
     }
 
     /// Request managed accounts. Matches `reqManagedAccts` in C++.
+    /// Every account of the logon's account list, in logon order, comma
+    /// separated, as the reference (ibx#420); the logon account when the
+    /// logon had no list.
     pub fn req_managed_accts(&self, wrapper: &mut impl Wrapper) {
-        wrapper.managed_accounts(&self.account_id);
+        wrapper.managed_accounts(&self.shared.reference.managed_accounts_text(&self.account_id));
     }
 
     /// Request account updates for multiple accounts/models. Matches `reqAccountUpdatesMulti` in C++.
