@@ -220,6 +220,11 @@ impl EClient {
                 self.core.peek_what_if(wi.order_id)
             };
             let (mut contract, mut order) = tracked.unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
+            // A preview placed without a conId shows the contract looked
+            // up (ibx#486).
+            if contract.con_id == 0 && wi.state.con_id != 0 && !contract.sec_type.eq_ignore_ascii_case("BAG") {
+                contract = self.core.get_contract(wi.state.con_id, &self.shared).unwrap_or(contract);
+            }
             // The order as the reference shows it (its unset values); a
             // combo shows its combo (ibx#470).
             crate::client_core::reported_unset_values(&mut order);

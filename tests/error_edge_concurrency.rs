@@ -122,20 +122,34 @@ fn place_order_unsupported_algo_returns_error() {
     assert!(result.unwrap_err().contains("Unsupported algo"));
 }
 
+// A contract without a conId gets a slot of its own for the order, which
+// the engine looks up before the order goes out (ibx#486).
 #[test]
 fn place_order_zero_con_id_still_sends() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
-    let contract = Contract { con_id: 0, symbol: "TEST".into(), exchange: "SMART".into(), ..Default::default() };
+    let contract = Contract { con_id: 0, symbol: "TEST".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "MKT".into(), ..Default::default()
     };
-    // Should not error — the engine handles zero con_id
+    let engine = thread::spawn(move || {
+        let mut sent = Vec::new();
+        while let Ok(cmd) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            match cmd {
+                ControlCommand::RegisterOrderContract { symbol, currency, reply_tx: Some(reply), .. } => {
+                    sent.push(format!("register {symbol} {currency}"));
+                    let _ = reply.send(Ok(7));
+                }
+                ControlCommand::Order(req) => sent.push(format!("order on {:?}", req.instrument())),
+                _ => {}
+            }
+        }
+        sent
+    });
     let result = client.place_order(1, &contract, &order);
-    assert!(result.is_ok());
-    // Drain to avoid channel filling
-    while rx.try_recv().is_ok() {}
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(engine.join().unwrap(), ["register TEST USD", "order on Some(7)"]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

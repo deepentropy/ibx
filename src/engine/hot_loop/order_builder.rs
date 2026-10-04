@@ -60,6 +60,17 @@ pub(crate) fn drain_and_send_orders(
             context.rth_parked.push(rewrap(order_req));
             continue;
         }
+        // A new order on a contract given without a conId waits for the
+        // contract's lookup, as the reference looks each API order's
+        // contract up before the order (ibx#486).
+        if order_req.combo().is_none()
+            && let Some(instrument) = order_req.instrument().filter(|_| !matches!(order_req, OrderRequest::CancelAll { .. }))
+            && context.market.con_id(instrument) == Some(0)
+        {
+            look_up_order_contract(context, conn, hb, instrument);
+            context.rth_parked.push(rewrap(order_req));
+            continue;
+        }
         // A quantity that is not whole: refused with 10243 and nothing
         // sent, as the reference refuses it for an API client (ib-agent#192
         // B3). Sent with the API client fields of every new order, it was
@@ -2530,6 +2541,85 @@ pub(crate) fn sweep_rth_lookups(context: &mut Context) {
     release_rth_parked(context);
 }
 
+/// Request numbers of the contract lookups of orders (ibx#486): a range
+/// of their own, below the historical-data lookups (0xD000_0000).
+pub(crate) const ORDER_LOOKUP_FIRST_ID: u32 = 0xC000_0000;
+const ORDER_LOOKUP_IDS: u32 = 0x1000_0000;
+
+/// Ask the contract of an order's slot by symbol, once per slot, as the
+/// reference asks it before each API order (ibx#486; captured: the
+/// `FixSecDefReqBySymbol` of contract details, `6088=Socket`, `100=BEST`).
+fn look_up_order_contract(context: &mut Context, conn: &mut Connection, hb: &mut HeartbeatState, instrument: crate::types::InstrumentId) {
+    if context.order_lookups.iter().any(|(_, i)| *i == instrument) {
+        return;
+    }
+    let lookup_id = ORDER_LOOKUP_FIRST_ID + context.next_order_lookup % ORDER_LOOKUP_IDS;
+    context.next_order_lookup = context.next_order_lookup.wrapping_add(1);
+    let (sec_type, _) = context.market.order_routing(instrument);
+    let sec_type = if sec_type == "CS" { "STK".to_string() } else { sec_type };
+    let lookup = super::ccp::SymbolLookup {
+        symbol: context.market.symbol(instrument).to_string(),
+        sec_type,
+        exchange: context.market.exchange(instrument).to_string(),
+        currency: context.market.currency(instrument).to_string(),
+        filters: Default::default(),
+        continuous: false,
+    };
+    super::ccp::send_symbol_lookup_on(conn, crate::types::ReqId::from(lookup_id), &lookup, "");
+    hb.last_ccp_sent = std::time::Instant::now();
+    log::info!("Order contract lookup {} for {} {}", lookup_id, lookup.symbol, lookup.sec_type);
+    context.order_lookups.push((lookup_id, instrument));
+}
+
+/// The answer to an order's contract lookup (ibx#486): one contract gives
+/// the slot its conId (or the waiting orders the slot of that conId when
+/// there is one already); none or several give error 200 to the waiting
+/// orders, which stay in the reference's API pending map. False when the
+/// reply is not for such a lookup. The cache of definitions takes the
+/// reply's records as any other reply.
+pub(crate) fn order_contract_reply(context: &mut Context, shared: &SharedState, req_id: &str, msg: &[u8]) -> bool {
+    let Some(number) = crate::control::contracts::secdef_request_number(req_id) else { return false };
+    let Some(idx) = context.order_lookups.iter().position(|(id, _)| crate::types::ReqId::from(*id) == number) else { return false };
+    let (_, slot) = context.order_lookups.swap_remove(idx);
+    let mut con_ids: Vec<i64> = crate::control::contracts::parse_secdef_records(msg).unwrap_or_default()
+        .iter().map(|d| d.con_id).filter(|c| *c != 0).collect();
+    con_ids.sort_unstable();
+    con_ids.dedup();
+    if let [con_id] = con_ids[..] {
+        // The slot of that conId when it routes the same way: the
+        // waiting orders take it and this slot is freed; else this slot
+        // keeps the conId.
+        let same_route = |m: &crate::engine::market_state::MarketState, a, b| {
+            m.order_routing(a) == m.order_routing(b) && m.currency(a) == m.currency(b)
+        };
+        match context.market.instrument_by_con_id(con_id).filter(|&known| known != slot && same_route(&context.market, known, slot)) {
+            Some(known) => {
+                for req in context.rth_parked.iter_mut() {
+                    if let Some(i) = req.new_order_instrument_mut().filter(|i| **i == slot) {
+                        *i = known;
+                    }
+                }
+                context.market.unregister(slot);
+            }
+            None => context.market.resolve_con_id(slot, con_id),
+        }
+        log::info!("Order contract lookup {}: conId {}", req_id, con_id);
+    } else {
+        log::warn!("Order contract lookup {}: {} contracts: error 200", req_id, con_ids.len());
+        let (refused, kept): (Vec<OrderRequest>, Vec<OrderRequest>) = std::mem::take(&mut context.rth_parked).into_iter()
+            .partition(|r| r.instrument() == Some(slot) && !matches!(r, OrderRequest::CancelAll { .. }));
+        context.rth_parked = kept;
+        for r in refused {
+            let oid = r.order_id();
+            context.api_pending.insert(oid);
+            shared.orders.push_order_error(oid, crate::engine::combo::NO_DEFINITION.0, crate::engine::combo::NO_DEFINITION.1.to_string());
+        }
+        context.market.unregister(slot);
+    }
+    release_rth_parked(context);
+    true
+}
+
 /// The waiting requests go back ahead of the queue, in their order.
 fn release_rth_parked(context: &mut Context) {
     let parked = std::mem::take(&mut context.rth_parked);
@@ -3386,15 +3476,46 @@ mod tests {
         assert!(contract_id_follows_routing(&bracket, "265598"));
     }
 
-    // An instrument registered without a contract id keeps the symbol-only form.
+    // ibx#486: an order on a contract given without a conId waits for the
+    // contract's lookup by symbol, as the reference looks each API order's
+    // contract up (captured: `320=FixSecDefReqBySymbol200|321=2|6088=Socket|
+    // 55=AAPL|167=CS|100=BEST|15=USD` before the 35=D); the answer gives the
+    // order its conId. A second order of the same contract is looked up
+    // again and takes the slot of that conId; no contract gives 200.
     #[test]
-    fn a_new_order_without_a_contract_id_sends_none() {
-        let tags = wire_tags_with(
-            |ctx| { ctx.market.register(0); },
-            OrderRequest::SubmitLimit { order_id: 6, instrument: 1, side: Side::Buy, qty: 1, price: 100 * P },
-        );
-        assert!(tag(&tags, 6210).is_some());
-        assert!(tag(&tags, 6008).is_none());
+    fn a_new_order_without_a_contract_id_waits_for_its_lookup() {
+        let mut context = Context::new();
+        let known = context.market.register(265598);
+        let slot = context.market.try_register_unresolved().unwrap();
+        context.market.set_symbol(slot, "AAPL".into());
+        context.market.set_routing(slot, "STK", "SMART");
+        context.market.set_currency(slot, "USD");
+        context.pending_orders.push(OrderRequest::SubmitLimit { order_id: 6, instrument: slot, side: Side::Buy, qty: 1, price: 100 * P });
+        let shared = Arc::new(SharedState::new());
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        let lookup: Vec<(u32, String)> = frames[0].iter().filter(|(t, _)| !matches!(*t, 8 | 9 | 34 | 52 | 10)).cloned().collect();
+        let id = format!("FixSecDefReqBySymbol{}", ORDER_LOOKUP_FIRST_ID);
+        let want: Vec<(u32, String)> = [(35, "c"), (320, id.as_str()), (321, "2"), (6088, "Socket"), (55, "AAPL"), (167, "CS"), (100, "BEST"), (15, "USD")]
+            .iter().map(|(t, v)| (*t, v.to_string())).collect();
+        assert_eq!(lookup, want);
+        assert_eq!(context.rth_parked.len(), 1);
+        // The answer: AAPL, a conId another slot routes the same way.
+        let reply = "8=FIX.4.1|9=0100|35=d|320=FixSecDefReqBySymbol3221225472|322=*|323=4|55=AAPL|167=STK|207=BEST|6008=265598|15=USD|146=1|6344=1|6008=265598|10=000|".replace('|', "\x01");
+        assert!(order_contract_reply(&mut context, &shared, &id, reply.as_bytes()));
+        assert_eq!(context.market.con_id(slot), None, "the slot is freed");
+        assert_eq!(context.drain_pending_orders().next().and_then(|r| r.instrument()), Some(known));
+        // No contract: 200 to the waiting order, kept in the API pending map.
+        let slot = context.market.try_register_unresolved().unwrap();
+        context.market.set_symbol(slot, "XYZ".into());
+        context.rth_parked.push(OrderRequest::SubmitLimit { order_id: 7, instrument: slot, side: Side::Buy, qty: 1, price: 100 * P });
+        context.order_lookups.push((ORDER_LOOKUP_FIRST_ID + 1, slot));
+        let empty = "8=FIX.4.1|35=d|320=FixSecDefReqBySymbol3221225473|322=*|323=4|6038=Y|6019=0|6344=0|".replace('|', "\x01");
+        assert!(order_contract_reply(&mut context, &shared, "FixSecDefReqBySymbol3221225473", empty.as_bytes()));
+        assert!(context.rth_parked.is_empty() && context.api_pending.contains(&7));
+        assert_eq!(shared.orders.drain_order_errors(), [(7, 200, "No security definition has been found for the request".to_string())]);
     }
 
     // ── Replace (ibx#247 ibx#324 ibx#334 ibx#349) ──

@@ -107,6 +107,11 @@ pub struct Context {
     /// reference keeps their id in its API pending map, and a cancel gets
     /// the ApiCancelled status (ibx#487).
     pub(crate) api_pending: std::collections::HashSet<OrderId>,
+    /// The contract lookups of orders given without a conId: request
+    /// number and the order's slot (ibx#486).
+    pub(crate) order_lookups: Vec<(u32, InstrumentId)>,
+    /// Sequence of those lookups.
+    pub(crate) next_order_lookup: u32,
     /// Set while a short-side order is encoded: its short-sale fields
     /// (ibx#417).
     pub(crate) short_sale_send: Option<crate::types::ShortSale>,
@@ -209,6 +214,8 @@ impl Context {
             what_ifs: HashMap::new(),
             what_if_send: None,
             api_pending: std::collections::HashSet::new(),
+            order_lookups: Vec::new(),
+            next_order_lookup: 0,
             short_sale_send: None,
             combos: Default::default(),
             combo_send: None,

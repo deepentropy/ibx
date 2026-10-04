@@ -362,6 +362,9 @@ pub struct WhatIfState {
     pub reject_reason: String,
     /// The permId of the preview's order (37 of the reply); 0 without one.
     pub perm_id: i64,
+    /// The conId of the reply (6008), for a preview placed without one: the
+    /// reference shows the contract it looked up (ibx#486).
+    pub con_id: i64,
 }
 
 /// Adjusted order type for adjustable stops (FIX tag 6261).
@@ -1309,6 +1312,54 @@ impl OrderRequest {
         }
     }
 
+    /// The instrument of a new order, to change: the slot of its contract
+    /// once the contract's lookup found it (ibx#486). None for a cancel, a
+    /// modify and a cancel-all.
+    pub fn new_order_instrument_mut(&mut self) -> Option<&mut InstrumentId> {
+        match self {
+            Self::Cancel { .. } | Self::Modify { .. } | Self::CancelAll { .. } => None,
+            Self::SubmitLimit { instrument, .. }
+            | Self::SubmitMarket { instrument, .. }
+            | Self::SubmitStop { instrument, .. }
+            | Self::SubmitStopLimit { instrument, .. }
+            | Self::SubmitLimitGtc { instrument, .. }
+            | Self::SubmitStopGtc { instrument, .. }
+            | Self::SubmitStopLimitGtc { instrument, .. }
+            | Self::SubmitLimitIoc { instrument, .. }
+            | Self::SubmitLimitFok { instrument, .. }
+            | Self::SubmitTrailingStop { instrument, .. }
+            | Self::SubmitTrailingStopLimit { instrument, .. }
+            | Self::SubmitTrailingStopPct { instrument, .. }
+            | Self::SubmitTrailingStopPctEx { instrument, .. }
+            | Self::SubmitMoc { instrument, .. }
+            | Self::SubmitLoc { instrument, .. }
+            | Self::SubmitMit { instrument, .. }
+            | Self::SubmitLit { instrument, .. }
+            | Self::SubmitLimitEx { instrument, .. }
+            | Self::SubmitRel { instrument, .. }
+            | Self::SubmitLimitOpg { instrument, .. }
+            | Self::SubmitAdaptive { instrument, .. }
+            | Self::SubmitMtl { instrument, .. }
+            | Self::SubmitMktPrt { instrument, .. }
+            | Self::SubmitStpPrt { instrument, .. }
+            | Self::SubmitMidPrice { instrument, .. }
+            | Self::SubmitSnapMkt { instrument, .. }
+            | Self::SubmitSnapMid { instrument, .. }
+            | Self::SubmitSnapPri { instrument, .. }
+            | Self::SubmitPegMkt { instrument, .. }
+            | Self::SubmitPegMid { instrument, .. }
+            | Self::SubmitAlgo { instrument, .. }
+            | Self::SubmitPegBench { instrument, .. }
+            | Self::SubmitLimitAuc { instrument, .. }
+            | Self::SubmitMtlAuc { instrument, .. }
+            | Self::SubmitLimitFractional { instrument, .. }
+            | Self::SubmitAdjustableStop { instrument, .. }
+            | Self::SubmitEx { instrument, .. }
+            | Self::SubmitBracket { instrument, .. } => Some(instrument),
+            Self::SubmitWhatIf { request } => request.new_order_instrument_mut(),
+        }
+    }
+
     /// The combo of a new combo (BAG) order (ibx#470).
     pub fn combo(&self) -> Option<&ComboSpec> {
         self.new_order_side()?.1?.combo.as_deref()
@@ -1911,6 +1962,10 @@ pub enum ControlCommand {
     Order(OrderRequest),
     /// Register an instrument from external caller (bridge mode).
     RegisterInstrument { con_id: i64, symbol: String, sec_type: String, exchange: String, reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>> },
+    /// A slot of its own for the contract of an order given without a
+    /// conId: the engine looks the contract up before the order goes out,
+    /// as the reference does for each API order (ibx#486).
+    RegisterOrderContract { symbol: String, sec_type: String, exchange: String, currency: String, reply_tx: Option<crossbeam_channel::Sender<Result<InstrumentId, String>>> },
     /// Request historical bar data via historical data connection.
     FetchHistorical {
         req_id: ReqId,

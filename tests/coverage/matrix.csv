@@ -319,7 +319,7 @@ rule,HIST-BARS 3.6,cancelHistoricalData (message 25),src/golden/hmds.rs::bars_an
 rule,HIST-BARS 4,reqHeadTimestamp (message 87),no test
 rule,HIST-BARS 4.1,Request and local refusals,no test
 rule,HIST-BARS 4.2,HMDS query,src/golden/hmds.rs::bars_and_head_timestamp_as_the_reference
-rule,HIST-BARS 4.3,"Reply, cache and API string",live:src/golden/hmds.rs::second_head_timestamp_from_the_cache ; src/golden/hmds.rs::bars_and_head_timestamp_as_the_reference
+rule,HIST-BARS 4.3,"Reply, cache and API string",src/golden/hmds.rs::second_head_timestamp_from_the_cache ; src/golden/hmds.rs::bars_and_head_timestamp_as_the_reference
 rule,HIST-BARS 4.4,cancelHeadTimestamp (message 90),no test
 rule,HIST-TICKS-HISTOGRAM 0,How to read this code,no test
 rule,HIST-TICKS-HISTOGRAM 1,reqHistoricalTicks,no test

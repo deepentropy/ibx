@@ -89,9 +89,10 @@ pub(crate) fn fix_utc_to_unix_secs(s: &str) -> Option<i64> {
 /// {action} {quantity} {symbol} {exchange}
 /// {text}", three lines (the API
 /// message of the four-leg recordings, ibx#486). The exchange is the
-/// listing as the contract details give it, `{primaryExchange}.{marketName}`
-/// (NASDAQ.NMS for AAPL, as in the capture; the form is only checked for
-/// AAPL), else the primary exchange, else the order's exchange. A combo
+/// listing of the contract's definition: the primary exchange (6470) and
+/// its suffix (8224) when the definition has one (NASDAQ.NMS for AAPL,
+/// ARCA for SPY, which has none: the recordings of 26/09 to 02/10/2026),
+/// else the order's exchange. A combo
 /// shows its own symbol and "Combo" (captured 26/09/2026,
 /// i105_combo_stock_smart and i105_combo_leg_prices: "BUY 1 QQQ,SPY Combo"
 /// where the report says 55=IECombo; ibx#487).
@@ -126,8 +127,8 @@ fn order_message_399(
         .unwrap_or_default();
     let primary = cached.as_ref().map(|c| c.primary_exchange.clone()).filter(|p| !p.is_empty());
     let exchange = match (primary, shared.reference.market_name(con_id)) {
-        (Some(p), Some(m)) => format!("{}.{}", p, m),
-        (Some(p), None) => p,
+        (Some(p), Some(m)) if !p.ends_with(&format!(".{m}")) => format!("{}.{}", p, m),
+        (Some(p), _) => p,
         (None, _) => parsed.get(&207).or_else(|| parsed.get(&6004))
             .map(|e| crate::control::contracts::exchange_from_fix(e).to_string())
             .unwrap_or_default(),
@@ -1142,6 +1143,7 @@ impl CcpState {
             // The reference's preview openOrder has the permId of its order
             // (ibx#486, b1_462_whatif of 02/10/2026).
             perm_id: parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0),
+            con_id: parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0),
         };
         let response = crate::types::WhatIfResponse {
             order_id,
@@ -2614,6 +2616,14 @@ impl CcpState {
                 return;
             }
             if super::order_builder::rth_definition_reply(context, rid, msg) { return; }
+            // Asked for the contract of an order given without a conId
+            // (ibx#486): its definition is cached, not a user reply.
+            if super::order_builder::order_contract_reply(context, shared, rid, msg) {
+                for def in crate::control::contracts::parse_secdef_records(msg).unwrap_or_default().iter().take(1) {
+                    self.cache_definition(def, shared);
+                }
+                return;
+            }
             // Asked for a round lot (ibx#287): not a user reply.
             if super::farm::round_lot_reply(context, rid, msg) { return; }
             // Asked for a SmartDepth component (#452): not a user reply.
@@ -2895,7 +2905,9 @@ impl CcpState {
             trading_class: def.trading_class.clone(),
             ..Default::default()
         });
-        shared.reference.cache_market_name(def.con_id, &def.market_name);
+        // The suffix of the primary exchange, which the 399 text names
+        // (ibx#486).
+        shared.reference.cache_market_name(def.con_id, &def.primary_suffix);
         self.try_release_scanner_enrichments(def.con_id, shared);
     }
 

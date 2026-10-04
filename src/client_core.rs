@@ -1510,6 +1510,31 @@ impl ClientCore {
             .map_err(|_| "Registration timed out".to_string())?
     }
 
+    /// The instrument of an order (ibx#486): by conId as any contract; a
+    /// contract given without a conId gets a slot of its own for each new
+    /// order, and the engine looks it up before the order goes out, as the
+    /// reference does for each API order (every four-leg recording of 26/09
+    /// to 02/10/2026: `FixSecDefReqBySymbol` before each 35=D). A modify
+    /// keeps the slot of its order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn order_instrument(
+        &self, control_tx: &Sender<ControlCommand>, order_id: OrderId, what_if: bool,
+        con_id: i64, symbol: &str, exchange: &str, sec_type: &str, currency: &str,
+    ) -> Result<InstrumentId, String> {
+        if con_id != 0 || sec_type.eq_ignore_ascii_case("BAG") {
+            return self.find_or_register_instrument(control_tx, con_id, symbol, exchange, sec_type);
+        }
+        if !what_if && let Some(t) = self.open_orders.lock().unwrap().get(&order_id) {
+            return Ok(t.instrument);
+        }
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        control_tx.send(ControlCommand::RegisterOrderContract {
+            symbol: symbol.to_string(), sec_type: sec_type.to_string(), exchange: exchange.to_string(),
+            currency: currency.to_string(), reply_tx: Some(reply_tx),
+        }).map_err(|e| format!("Engine stopped: {}", e))?;
+        Self::recv_registration(reply_rx)
+    }
+
     /// Find instrument ID for a contract, registering if needed.
     /// Returns `Err` if the control channel is closed.
     /// Tell the engine the currency of a contract before an order on it,
@@ -2962,6 +2987,9 @@ impl ClientCore {
     pub fn order_view(&self, order_id: OrderId, shared: &SharedState, status: &str) -> Option<OrderView> {
         let tracked = self.open_orders.lock().unwrap().get(&order_id).cloned();
         let info = shared.orders.get_order_info(order_id);
+        // The conId of the report, for an order placed without one: the
+        // reference shows the contract it looked up (ibx#486).
+        let reported_con_id = info.as_ref().map_or(0, |i| i.contract.con_id);
         let mut state = info.as_ref().map(|i| i.order_state.clone()).unwrap_or_default();
         state.status = status.into();
         let (contract, order, last_fill_price, client_id) = match (tracked, info) {
@@ -2998,8 +3026,11 @@ impl ClientCore {
             (None, Some(i)) => (i.contract, i.order, 0.0, 0),
             (None, None) => return None,
         };
-        let mut contract = if contract.con_id != 0 && !contract.sec_type.eq_ignore_ascii_case("BAG") {
+        let bag = contract.sec_type.eq_ignore_ascii_case("BAG");
+        let mut contract = if contract.con_id != 0 && !bag {
             self.get_contract(contract.con_id, shared).unwrap_or(contract)
+        } else if reported_con_id != 0 && !bag {
+            self.get_contract(reported_con_id, shared).unwrap_or(contract)
         } else {
             contract
         };

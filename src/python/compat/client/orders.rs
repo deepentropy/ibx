@@ -82,7 +82,14 @@ impl EClient {
 
         // A smart combo goes out on its currency's smart combo conId.
         let con_id = combo.as_ref().map(|c| c.smart_con_id).filter(|&c| c > 0).unwrap_or(contract.con_id);
-        let instrument = self.find_or_register_con_id(py, con_id, contract)?;
+        // A contract without a conId is looked up by the engine before the
+        // order goes out (ibx#486).
+        let instrument = if con_id == 0 && !contract.sec_type.eq_ignore_ascii_case("BAG") {
+            py.detach(|| self.core.order_instrument(&tx, oid, api_order.what_if, con_id, &contract.symbol,
+                &contract.exchange, &contract.sec_type, &contract.currency)).map_err(PyRuntimeError::new_err)?
+        } else {
+            self.find_or_register_con_id(py, con_id, contract)?
+        };
         // A send only for a new currency, then with the interpreter lock
         // released (ibx#271).
         if !self.core.currency_noted(con_id, &contract.currency) {

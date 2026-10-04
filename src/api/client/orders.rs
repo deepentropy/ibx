@@ -58,9 +58,9 @@ impl EClient {
 
         // A smart combo goes out on its currency's smart combo conId.
         let con_id = combo.as_ref().map(|c| c.smart_con_id).filter(|&c| c > 0).unwrap_or(contract.con_id);
-        let instrument = self.core.find_or_register_instrument(
-            &self.control_tx,
-            con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
+        let instrument = self.core.order_instrument(
+            &self.control_tx, oid, order.what_if,
+            con_id, &contract.symbol, &contract.exchange, &contract.sec_type, &contract.currency,
         )?;
         self.core.note_currency(&self.control_tx, con_id, &contract.currency);
 

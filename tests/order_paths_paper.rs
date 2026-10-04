@@ -501,6 +501,30 @@ fn server_reject(paper: &mut Paper, id: i64) {
     paper.check(status.is_some() && status < error, "server reject: the status before the error");
 }
 
+/// ibx#486: an order on a contract given without a conId: its contract is
+/// looked up by symbol first (35=c FixSecDefReqBySymbol before the 35=D),
+/// the order goes out with the conId found, and the server takes it.
+fn order_by_symbol(paper: &mut Paper, id: i64) {
+    println!("  order by symbol (order {})", id);
+    let by_symbol = Contract { con_id: 0, ..aapl() };
+    let order = Order {
+        action: "BUY".into(), order_type: "LMT".into(), total_quantity: 1.0, lmt_price: 100.0,
+        tif: "DAY".into(), ..Default::default()
+    };
+    paper.placed.push(id);
+    if let Err(e) = paper.client.place_order(id, &by_symbol, &order) {
+        paper.fail(&format!("order {}: place_order returned {}", id, e));
+    }
+    let done = paper.pump(20, |s| working(s, id));
+    paper.check(done, "order by symbol: working");
+    let lines = wire().lines.lock().unwrap().clone();
+    let lookup = lines.iter().position(|l| l.starts_with("WIRE>") && l.contains("35=c") && l.contains("FixSecDefReqBySymbol")
+        && l.contains("|55=AAPL|"));
+    let new_order = lines.iter().position(|l| l.starts_with("WIRE>") && l.contains("|35=D|") && l.contains(&format!("|6121={}|", id)));
+    paper.check(lookup.is_some() && lookup < new_order, "order by symbol: the lookup before the 35=D");
+    paper.check(new_order.is_some_and(|n| lines[n].contains("|6008=265598|")), "order by symbol: the conId found on the 35=D");
+}
+
 /// ibx#328: every new order carries the contract id after the secondary
 /// routing field, as the reference does (ib-agent#192 B4).
 fn contract_id_on_new_orders(paper: &mut Paper) {
@@ -542,6 +566,7 @@ fn order_paths_paper() {
     conditions(&mut paper, base + 400);
     server_reject(&mut paper, base + 500);
     contract_id_on_new_orders(&mut paper);
+    order_by_symbol(&mut paper, base + 600);
 
     println!("  cleanup: cancelling every order still working");
     // A modified order is placed twice under one id: cancel it once.

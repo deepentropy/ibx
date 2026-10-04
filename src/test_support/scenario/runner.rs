@@ -379,9 +379,6 @@ pub struct Outcome {
     pub unsent: Vec<(u64, String)>,
     /// Recorded requests the driver does not make (seq, name).
     pub not_made: Vec<(u64, String)>,
-    /// Orders whose contract had no conId: the conId of the reference's
-    /// order message was given to ibx.
-    pub con_id_given: Vec<i64>,
 }
 
 impl Outcome {
@@ -501,27 +498,6 @@ pub fn at_their_effect(recs: &[Rec]) -> Vec<Rec> {
     out
 }
 
-/// A placeOrder whose contract has no conId (not a combo) takes the conId
-/// of the reference's order message for this order: ibx does not look it
-/// up. The orders changed are returned.
-pub fn with_con_ids(recs: &mut [Rec]) -> Vec<i64> {
-    let mut given = Vec::new();
-    let refs: Vec<(String, String)> = recs.iter().filter(|o| o.leg == "fix_out" && o.msg == "D")
-        .filter_map(|o| Some((o.get(6121)?, o.get(6008)?))).collect();
-    for r in recs.iter_mut().filter(|r| r.leg == "api_out" && r.msg == "PLACE_ORDER") {
-        let id = r.request["orderId"].as_i64().unwrap_or(0);
-        let c = &mut r.request["contract"];
-        if c["conId"].as_i64().unwrap_or(0) != 0 || c["secType"] == "BAG" { continue; }
-        if let Some((_, con_id)) = refs.iter().find(|(o, _)| *o == id.to_string())
-            && let Ok(con_id) = con_id.parse::<i64>()
-        {
-            c["conId"] = con_id.into();
-            given.push(id);
-        }
-    }
-    given
-}
-
 /// The records a replay takes: up to `until`, without `skip_seqs` and the
 /// skipped orders, each order request at the reference's effect.
 fn prepare(sc: &Scenario, opts: &Options) -> Vec<Rec> {
@@ -581,13 +557,12 @@ pub fn replay(sc: &Scenario, opts: &Options) -> Outcome {
 /// the recording (`session::zone_of`) on this thread.
 pub fn run(sc: &Scenario, opts: &Options, links: &mut Links, driver: &mut dyn Driver) -> Outcome {
     crate::gateway::set_machine_zone_for_test(Some(super::session::zone_of(&sc.header)));
-    let mut recs = prepare(sc, opts);
-    let con_id_given = with_con_ids(&mut recs);
+    let recs = prepare(sc, opts);
     let mut run = Run {
         links, driver, opts, recs, at: 0,
         seen: [0; 3], queue: Default::default(), lookups: Vec::new(), ids: Ids::default(),
         seq_in: [0; 3], no_end: VecDeque::new(), gw_orders: HashMap::new(), pending_orders: Vec::new(),
-        out: Outcome { con_id_given, ..Default::default() },
+        out: Outcome::default(),
     };
     run.go();
     // The order id of a callback: its first field, the tenth of an

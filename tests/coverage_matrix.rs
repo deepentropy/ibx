@@ -234,7 +234,7 @@ const NOT_DECODERS: &[&str] = &[
     "connection::mem_pair", "connection::set_read_timeout", "connection::set_nonblocking",
     "connection::set_write_capacity", "connection::unread_output",
     "depth_decoder::api", "depth_decoder::book_side",
-    "fix::fmt_pipe", "fix::fix_checksum", "fix::fix_build", "fix::xor_fold", "fix::fix_sign",
+    "fix::fmt_pipe", "fix::fix_checksum", "fix::fix_build", "fix::xml_layout", "fix::xor_fold", "fix::fix_sign",
     "fixcomp::fixcomp_build",
     "ns::ns_build", "ns::ns_build_heart_beat",
     "tick_decoder::new", "tick_decoder::remaining", "tick_decoder::tbt_field_count",

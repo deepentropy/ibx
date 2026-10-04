@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use super::load;
 use super::replay::request as md_request;
 use crate::test_support::scenario::record::{canonical, rebuild_text};
-use crate::test_support::scenario::runner::{at_their_effect, base, comparable, with_con_ids};
+use crate::test_support::scenario::runner::{at_their_effect, base, comparable};
 use crate::test_support::scenario::{Rec, Scenario as Fixture, Session};
 use crate::test_support::{to_pipe, Fields};
 
@@ -61,9 +61,6 @@ pub(crate) struct OrderReplay {
     /// The order callbacks, one line each.
     pub cb_ours: Vec<String>,
     pub cb_theirs: Vec<String>,
-    /// Orders whose contract had no conId: the conId of the reference's
-    /// order message was given to ibx (ibx does not look it up).
-    pub con_id_given: Vec<i64>,
     /// Recorded server reports not sent (no order of ibx matches them).
     pub unsent: Vec<u64>,
 }
@@ -72,8 +69,7 @@ pub(crate) struct OrderReplay {
 /// a definition lookup of ibx is answered with the recorded reply for the
 /// same contract; the server's reports are sent with ibx's order ids.
 pub(crate) fn replay_orders(fx: &Fixture) -> OrderReplay {
-    let mut recs = at_their_effect(&fx.recs);
-    let con_id_given = with_con_ids(&mut recs);
+    let recs = at_their_effect(&fx.recs);
     let fx = &Fixture { header: fx.header.clone(), recs };
     let mut s = Session::new().in_zone(&fx.header);
     if let Some(start) = fx.recs.iter().find(|r| r.msg == "START_API") {
@@ -174,7 +170,7 @@ pub(crate) fn replay_orders(fx: &Fixture) -> OrderReplay {
             pairs.push((key.clone(), Some(comparable(&ours[j])), None));
         }
     }
-    OrderReplay { pairs, cb_ours: s.callbacks.clone(), cb_theirs, con_id_given, unsent }
+    OrderReplay { pairs, cb_ours: s.callbacks.clone(), cb_theirs, unsent }
 }
 
 /// The differences between ibx's order messages and the reference's, one
@@ -193,10 +189,6 @@ pub(crate) fn frame_differences(r: &OrderReplay) -> Vec<String> {
 /// with its own ignored test.
 #[derive(Clone, Copy, Default)]
 struct Known {
-    /// Warning 399 names the listing exchange of the contract's definition
-    /// (NASDAQ.NMS); ibx has no definition of a contract placed by conId
-    /// and names the order's exchange.
-    exchange_399: bool,
     /// openOrder lmtPrice of a STP order: the reference shows a price
     /// (250.03 for a SELL stop at 250) on the first report, none later;
     /// where it comes from is not read yet.
@@ -208,15 +200,6 @@ struct Known {
 fn order_lines(lines: &[String], known: Known) -> Vec<String> {
     lines.iter().filter(|l| !l.starts_with("error|-1|")).map(|l| {
         let mut f: Vec<String> = l.split('|').map(str::to_string).collect();
-        if known.exchange_399 && f[0] == "error" && f.get(2).map(String::as_str) == Some("399") {
-            let mut rows: Vec<String> = f[3].split('\n').map(str::to_string).collect();
-            if rows.len() == 3 {
-                let mut words: Vec<&str> = rows[1].split(' ').collect();
-                if let Some(w) = words.last_mut() { *w = "{exchange}"; }
-                rows[1] = words.join(" ");
-            }
-            f[3] = rows.join("\n");
-        }
         if known.stp_lmt && f[0] == "openOrder" && f[5].contains("orderType=STP,") {
             f[5] = f[5].split(',').map(|kv| if kv.starts_with("lmtPrice=") { "lmtPrice=-" } else { kv })
                 .collect::<Vec<_>>().join(",");
@@ -258,7 +241,7 @@ fn dump_all_order_fixtures() {
         "orders_b1_416_time_condition", "orders_b1_416_time_near", "orders_b1_462_whatif", "orders_b1_263_algo_refusals",
     ] {
         let r = replay_orders(&load(name));
-        eprintln!("== {name}: {} messages, conId given {:?}, unsent {:?}", r.pairs.len(), r.con_id_given, r.unsent);
+        eprintln!("== {name}: {} messages, unsent {:?}", r.pairs.len(), r.unsent);
         for d in frame_differences(&r) { eprintln!("{d}"); }
         if std::env::var_os("IBX_GOLDEN_CALLBACKS").is_some() {
             let keep = |l: &&String| !l.starts_with("error|-1|");
@@ -271,7 +254,7 @@ fn dump_all_order_fixtures() {
     }
 }
 
-const KNOWN: Known = Known { exchange_399: true, stp_lmt: true };
+const KNOWN: Known = Known { stp_lmt: true };
 
 fn all(_: &Rec) -> bool { true }
 
@@ -369,12 +352,12 @@ fn algo_scenario_orders() {
 // ── Differences found by the replays, each its own test ──
 
 // The reference's 399 names the listing of the contract's definition
-// (NASDAQ.NMS), which it looked up before the order; ibx looks up no
-// definition for an order placed by conId and names its exchange (SMART).
+// (NASDAQ.NMS), which it looks up before each order placed without a
+// conId; ibx too (ibx#486). Every order replay compares the 399 text.
 #[test]
-#[ignore = "ibx#486: an order is placed without the contract's definition (399 exchange)"]
 fn order_message_names_the_listing_exchange() {
-    replay_and_compare("orders_modify_cancelled", |r| r.seq < 2441, Known { exchange_399: false, ..KNOWN }, &[]);
+    let r = replay_and_compare("orders_modify_cancelled", |r| r.seq < 2441, KNOWN, &[]);
+    assert!(r.cb_ours.iter().any(|l| l.contains("|399|") && l.contains("BUY 1 AAPL NASDAQ.NMS")));
 }
 
 // orderStatus whyHeld "trigger" for a stop or trailing order before its

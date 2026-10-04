@@ -381,8 +381,13 @@ fn frame_ids(requests: &[OrderRequest]) -> Vec<i64> {
     out
 }
 
-/// The order id of a message: the id part of its ClOrdID.
+/// The order id of a message: its API order id (6121) on a new order, a
+/// what-if's ClOrdID being an id of its own (ibx#486); else the id part of
+/// its ClOrdID.
 fn frame_id(frame: &Fields) -> Option<i64> {
+    if let Some(id) = super::harness::field(frame, 6121).and_then(|v| v.parse().ok()) {
+        return Some(id);
+    }
     super::harness::field(frame, 11)?.split('.').next()?.parse().ok()
 }
 

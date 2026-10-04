@@ -17,24 +17,11 @@ use ibx::test_support::scenario::{load_scenario, replay, Options, Outcome};
 use ibx::test_support::Fields;
 
 /// Known differences the order scenarios mask on both sides, each with its
-/// own ignored test in src/golden/orders.rs (ibx#486):
-/// - warning 399 names the listing exchange of the contract's definition
-///   (NASDAQ.NMS), which the reference looked up; ibx has no definition of
-///   a contract placed by conId and names the order's exchange
-///   (`order_message_names_the_listing_exchange`);
-/// - the first openOrder of a STP order shows a limit price the wire does
-///   not carry (`stp_first_open_order_limit_price`).
+/// own ignored test in src/golden/orders.rs (ibx#486): the first openOrder
+/// of a STP order shows a limit price the wire does not carry
+/// (`stp_first_open_order_limit_price`).
 fn known(line: &str) -> String {
     let mut f: Vec<String> = line.split('|').map(str::to_string).collect();
-    if f[0] == "error" && f.get(2).map(String::as_str) == Some("399") {
-        let mut rows: Vec<String> = f[3].split('\n').map(str::to_string).collect();
-        if rows.len() == 3 {
-            let mut words: Vec<&str> = rows[1].split(' ').collect();
-            if let Some(w) = words.last_mut() { *w = "{exchange}"; }
-            rows[1] = words.join(" ");
-        }
-        f[3] = rows.join("\n");
-    }
     if f[0] == "openOrder" && f[5].contains("orderType=STP,") {
         f[5] = f[5].split(',').map(|kv| if kv.starts_with("lmtPrice=") { "lmtPrice=-" } else { kv }).collect::<Vec<_>>().join(",");
     }
@@ -342,7 +329,7 @@ fn news_ticks_twice() {
 fn dump(name: &str, o: &Outcome) {
     eprintln!("== {name}: frames compared {}, error {:?}", o.frames_compared, o.frame_error);
     eprintln!("   unsent {:?}", o.unsent);
-    eprintln!("   not made {:?}, conId given {:?}", o.not_made, o.con_id_given);
+    eprintln!("   not made {:?}", o.not_made);
     let theirs: Vec<&String> = o.theirs.iter().map(|(_, l)| l).collect();
     let first = o.ours.iter().zip(&theirs).position(|(a, b)| a != *b).unwrap_or(o.ours.len().min(theirs.len()));
     eprintln!("   callbacks: {} ours, {} reference, first difference {}", o.ours.len(), theirs.len(),
