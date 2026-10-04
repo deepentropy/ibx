@@ -208,6 +208,35 @@ fn batched(name: &str, messages: &[Vec<u8>], batch: usize) -> Stats {
     }
 }
 
+/// The engine alone: each message decoded and applied, no dispatch; with
+/// `listened` false no API request takes the instrument's steps (the
+/// engine API's own use).
+fn engine_only(name: &str, messages: &[Vec<u8>], listened: bool) -> Stats {
+    let mut s = spy_session();
+    if !listened {
+        // The first slot of the session.
+        assert!(s.shared.market.md_events.listened(0));
+        s.shared.market.md_events.listen(0, false);
+    }
+    let clock = quanta::Clock::new();
+    let mut ns = Vec::with_capacity(ITERATIONS);
+    let mut w = Counter::default();
+    for i in 0..WARMUP + ITERATIONS {
+        let t0 = clock.raw();
+        s.engine.inject_farm_message(&messages[i % messages.len()]);
+        let t1 = clock.raw();
+        if i >= WARMUP {
+            ns.push(clock.delta(t0, t1).as_nanos() as f64);
+        }
+        // The client reads now and then: the queue never fills.
+        if i % 1000 == 999 {
+            s.client.process_msgs(&mut w);
+        }
+    }
+    let what = if listened { "a request listens" } else { "no request listens" };
+    Stats { name: format!("{name}: decode only, {what}"), ns, ticks_per_message: 0.0 }
+}
+
 fn main() {
     println!("========================================");
     println!("  Bench: farm tick message to API callback");
@@ -221,6 +250,10 @@ fn main() {
     }
     for mut st in per_message("quote+trade+daily msg", &full) {
         st.print();
+    }
+    for listened in [true, false] {
+        engine_only("quote msg", &quotes, listened).print();
+        engine_only("quote+trade+daily msg", &full, listened).print();
     }
     batched("quote msg", &quotes, 10).print();
     batched("quote+trade+daily msg", &full, 10).print();
