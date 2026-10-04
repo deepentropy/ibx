@@ -564,6 +564,13 @@ pub fn run(sc: &Scenario, opts: &Options, links: &mut Links, driver: &mut dyn Dr
         seq_in: [0; 3], no_end: VecDeque::new(), gw_orders: HashMap::new(), pending_orders: Vec::new(),
         out: Outcome::default(),
     };
+    // ibx's client id is known when its engine starts, before the server
+    // frames of the logon (which a scenario may hold before the client's
+    // START_API): the reports of those frames go by it.
+    if let Some(id) = run.recs.iter().find(|r| r.msg == "START_API").and_then(|r| r.request["clientId"].as_i64()) {
+        run.links.shared.reference.set_api_client_id(id);
+        run.driver.start(id);
+    }
     run.go();
     // The order id of a callback: its first field, the tenth of an
     // execution (after the request id and the contract).
@@ -845,6 +852,12 @@ impl Run<'_> {
 
     /// The reference's new orders paired with ibx's of the same API order
     /// id and rank, once ibx sent them.
+    /// Whether the reference placed the order of this id in the scenario
+    /// (a new order frame of the recording carries it).
+    fn placed_here(&self, id: &str) -> bool {
+        self.recs.iter().any(|r| r.is("fix_out", "CCP", "D") && r.get(11).is_some_and(|c| base(&c) == id))
+    }
+
     fn pair_orders(&mut self) {
         let pending = std::mem::take(&mut self.pending_orders);
         for (gw, id, rank) in pending {
@@ -922,6 +935,9 @@ impl Run<'_> {
                     if matches!(t, 11 | 41 | 6107 | 583) && !v.is_empty() {
                         match self.ids.order.get(base(v)) {
                             Some(ours) => *v = v.replacen(base(v), ours, 1),
+                            // An order the server had before the recording
+                            // (the logon replay): the same id for ibx.
+                            None if matches!(t, 11 | 41) && v != "*" && !self.placed_here(base(v)) => {}
                             None if matches!(t, 11 | 41) => known = false,
                             None => {}
                         }

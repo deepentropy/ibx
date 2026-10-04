@@ -206,6 +206,8 @@ pub(super) fn as_client_session(hot_loop: &mut HotLoop, gw: &gateway::Gateway, c
         farm_name: gw.farm_name.clone(),
         session_epoch: gw.session_epoch.clone(),
         ns_secure_refused: gw.ns_secure_refused,
+        use_ssl: gw.use_ssl,
+        ssl_farms: gw.ssl_farms.clone(),
     });
 }
 
@@ -756,7 +758,7 @@ fn run_submit_cancel_phase_inner(
         OrderRequest::SubmitEx { order_id, .. } => *order_id,
         OrderRequest::SubmitBracket { parent_id, .. } => *parent_id,
         OrderRequest::Cancel { order_id } => *order_id,
-        OrderRequest::CancelAll { .. } => 0,
+        OrderRequest::CancelAll { .. } | OrderRequest::GlobalCancel => 0,
         OrderRequest::Modify { new_order_id, .. } => *new_order_id,
     };
 

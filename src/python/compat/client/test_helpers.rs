@@ -182,6 +182,7 @@ impl EClient {
             "Cancelled" => OrderStatus::Cancelled,
             "Rejected" => OrderStatus::Rejected,
             "Inactive" => OrderStatus::Inactive,
+            "ApiCancelled" => OrderStatus::ApiCancelled,
             _ => return Err(PyRuntimeError::new_err(format!("Invalid status: {}", status))),
         };
         shared.orders.push_order_update(OrderUpdate {
@@ -674,7 +675,7 @@ impl EClient {
         version_cutoff: Option<&str>,
         version_cutoff_date: Option<&str>,
     ) -> PyResult<()> {
-        let logon = crate::gateway::LogonValues { clock_offset_ms, features: Some(features.to_string()), data_permissions: None };
+        let logon = crate::gateway::LogonValues { clock_offset_ms, features: Some(features.to_string()), ..Default::default() };
         crate::gateway::apply_first_logon(&logon, version_cutoff, version_cutoff_date, max_backfill_years, &*self.shared_state()?);
         Ok(())
     }

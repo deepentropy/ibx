@@ -499,6 +499,44 @@ pub fn duration_start(end: i64, duration: &str, machine_zone: &str) -> i64 {
     span.ok().and_then(|sp| at.checked_sub(sp).ok()).map_or(end, |z| z.timestamp().as_second())
 }
 
+/// A time as the reference's `jutils.d1.T()` writes it (ibx#421):
+/// `yyyyMMdd HH:mm:ss` and the zone's abbreviation, in `zone`. The
+/// reference writes the short name of its Java zone when it reads back as
+/// the same zone, else the long name (`jutils.d1.aa()`); the zone
+/// database abbreviation is taken here, which was not compared with the
+/// reference's names.
+fn calendar_text(secs: i64, zone: &jiff::tz::TimeZone) -> String {
+    jiff::Timestamp::from_second(secs)
+        .map(|t| t.to_zoned(zone.clone()).strftime("%Y%m%d %H:%M:%S %Z").to_string())
+        .unwrap_or_default()
+}
+
+/// The reference's second years rule of a bar request (ibx#421,
+/// `jextend.bM.n()@1578-1601` → `jextend.bM.b(jutils.d1)`), for a
+/// contract without includeExpired and a session without NIGHTLY (the
+/// caller's): the limit is now moved back by `max_years` years, then by
+/// one day, on the calendar of the machine zone; a request whose start
+/// (its end, `end` with the zone it was written in, moved back by the
+/// normalised `duration`, [`duration_start`]) is before the limit is
+/// refused with the reference's text.
+pub fn backfill_start_refusal(end: i64, end_zone: Option<&str>, duration: &str, now: i64, max_years: i32, machine_zone: &str) -> Option<String> {
+    let machine = zone_named(machine_zone).unwrap_or_else(jiff::tz::TimeZone::system);
+    let limit = jiff::Timestamp::from_second(now).ok()?
+        .to_zoned(machine.clone())
+        .checked_sub(jiff::Span::new().try_years(max_years as i64).ok()?).ok()?
+        .checked_sub(jiff::Span::new().days(1)).ok()?
+        .timestamp().as_second();
+    let start = duration_start(end, duration, machine_zone);
+    if limit <= start {
+        return None;
+    }
+    let zone = end_zone.and_then(zone_named).unwrap_or(machine.clone());
+    Some(format!(
+        "Historical data queries on this contract requesting any data earlier than {} year(s) back from now which is {} are rejected.  Your query would have run from {} to {}.",
+        max_years, calendar_text(limit, &machine), calendar_text(start, &zone), calendar_text(end, &zone),
+    ))
+}
+
 /// Duration of a bar request in the reference form (ibx#430): a plain
 /// number is seconds, and the unit letter takes the case the reference
 /// sends. Err is the refusal text.
@@ -555,7 +593,10 @@ pub struct CheckedBarRequest {
 /// bars other than one day (321). Err is (code, text). A duration in years
 /// above `max_backfill_years` (the logon limit, None when it is not
 /// checked) is refused after the duration checks, as the reference
-/// (ibx#421).
+/// (ibx#421); with the same limit, a request of a contract without
+/// `include_expired` that starts before the limit is refused after the bar
+/// size checks ([`backfill_start_refusal`]).
+#[allow(clippy::too_many_arguments)]
 pub fn check_bar_request(
     end_date_time: &str,
     duration: &str,
@@ -565,6 +606,7 @@ pub fn check_bar_request(
     keep_up_to_date: bool,
     sec_type: &str,
     max_backfill_years: Option<i32>,
+    include_expired: bool,
 ) -> Result<CheckedBarRequest, (i32, String)> {
     let refuse = |cause: &str| (321, bar_request_refusal(cause));
     if !is_valid_end_date(end_date_time) {
@@ -581,6 +623,16 @@ pub fn check_bar_request(
     let bar_size = BarSize::from_api_str(bar_size).map_err(|e| refuse(&e))?;
     if adjusted && bar_size.is_multi_day() {
         return Err(refuse("Multi day bar size not supported with adjusted last"));
+    }
+    if let Some(max_years) = max_backfill_years.filter(|_| !include_expired) {
+        let machine_zone = crate::gateway::machine_time_zone();
+        let now = now_secs();
+        if let Ok(end) = parse_request_time(end_date_time, &machine_zone, now) {
+            let (end_secs, end_zone) = end.map_or((now, None), |t| (t.secs, t.zone));
+            if let Some(cause) = backfill_start_refusal(end_secs, end_zone.as_deref(), &duration, now, max_years, &machine_zone) {
+                return Err(refuse(&cause));
+            }
+        }
     }
     let data_type = BarDataType::from_api_str(what_to_show).map_err(|e| refuse(&e))?;
     if let Some(n) = format_date {
@@ -1844,52 +1896,82 @@ mod tests {
 
     #[test]
     fn check_bar_request_order_and_codes() {
-        let ok = check_bar_request("", "3600", "1 Min", "trades", Some(1), false, "", None).unwrap();
+        let ok = check_bar_request("", "3600", "1 Min", "trades", Some(1), false, "", None, false).unwrap();
         assert_eq!(ok, CheckedBarRequest { data_type: BarDataType::Trades, bar_size: BarSize::Min1, duration: "3600 S".into() });
         let code = |r: Result<CheckedBarRequest, (i32, String)>| r.unwrap_err();
-        assert_eq!(code(check_bar_request("garbage", "1 D", "1 day", "TRADES", None, false, "", None)).0, 10314);
-        assert_eq!(code(check_bar_request("", "400 D", "1 day", "TRADES", None, false, "", None)),
+        assert_eq!(code(check_bar_request("garbage", "1 D", "1 day", "TRADES", None, false, "", None, false)).0, 10314);
+        assert_eq!(code(check_bar_request("", "400 D", "1 day", "TRADES", None, false, "", None, false)),
             (321, "Error validating request.-'bM' : cause - Historical data requests for durations longer than 365 days must be made in years.".to_string()));
-        assert_eq!(code(check_bar_request("20260102 10:00:00", "1 D", "1 hour", "ADJUSTED_LAST", None, false, "", None)).1,
+        assert_eq!(code(check_bar_request("20260102 10:00:00", "1 D", "1 hour", "ADJUSTED_LAST", None, false, "", None, false)).1,
             "Error validating request.-'bM' : cause - End date not supported with adjusted last");
-        assert_eq!(code(check_bar_request("", "1 Y", "1 week", "ADJUSTED_LAST", None, false, "", None)).1,
+        assert_eq!(code(check_bar_request("", "1 Y", "1 week", "ADJUSTED_LAST", None, false, "", None, false)).1,
             "Error validating request.-'bM' : cause - Multi day bar size not supported with adjusted last");
-        assert!(check_bar_request("", "1 Y", "1 day", "ADJUSTED_LAST", None, false, "", None).is_ok());
-        assert_eq!(code(check_bar_request("", "1 D", "1 sec", "TRADES", None, false, "", None)).0, 321);
-        assert_eq!(code(check_bar_request("", "1 D", "1 day", "YIELD", None, false, "", None)).1,
+        assert!(check_bar_request("", "1 Y", "1 day", "ADJUSTED_LAST", None, false, "", None, false).is_ok());
+        assert_eq!(code(check_bar_request("", "1 D", "1 sec", "TRADES", None, false, "", None, false)).0, 321);
+        assert_eq!(code(check_bar_request("", "1 D", "1 day", "YIELD", None, false, "", None, false)).1,
             "Error validating request.-'bM' : cause - What to show value of YIELD rejected.");
-        assert_eq!(code(check_bar_request("", "1 D", "1 day", "TRADES", Some(4), false, "", None)).1,
+        assert_eq!(code(check_bar_request("", "1 D", "1 day", "TRADES", Some(4), false, "", None, false)).1,
             "Error validating request.-'bM' : cause - Date formatting selection of 4 rejected.");
-        assert_eq!(code(check_bar_request("", "1 M", "1 hour", "SCHEDULE", None, false, "", None)).1,
+        assert_eq!(code(check_bar_request("", "1 M", "1 hour", "SCHEDULE", None, false, "", None, false)).1,
             "Error validating request.-'bM' : cause - Only daily resolution supported for Schedule requests");
-        assert!(check_bar_request("", "1 M", "1 day", "SCHEDULE", None, false, "", None).is_ok());
+        assert!(check_bar_request("", "1 M", "1 day", "SCHEDULE", None, false, "", None, false).is_ok());
         // The issue's checks: 1 year and 3 months bars over 5 Y.
-        assert!(check_bar_request("", "5 Y", "1 year", "TRADES", None, false, "", None).is_ok());
-        assert!(check_bar_request("", "5 Y", "3 months", "TRADES", None, false, "", None).is_ok());
+        assert!(check_bar_request("", "5 Y", "1 year", "TRADES", None, false, "", None, false).is_ok());
+        assert!(check_bar_request("", "5 Y", "3 months", "TRADES", None, false, "", None, false).is_ok());
             // ibx#429: every bar size streams; the live update refusals, in
         // the reference order and texts (capture b1_429_keep_up_to_date).
         for size in ["1 secs", "1 min", "30 secs", "2 hours", "1 hour", "1 day"] {
-            assert!(check_bar_request("", "1 D", size, "TRADES", Some(1), true, "STK", None).is_ok(), "{}", size);
+            assert!(check_bar_request("", "1 D", size, "TRADES", Some(1), true, "STK", None, false).is_ok(), "{}", size);
         }
-        assert_eq!(code(check_bar_request("20261001 10:00:00 US/Eastern", "1 D", "1 hour", "TRADES", Some(1), true, "STK", None)),
+        assert_eq!(code(check_bar_request("20261001 10:00:00 US/Eastern", "1 D", "1 hour", "TRADES", Some(1), true, "STK", None, false)),
             (321, "Error validating request.-'bM' : cause - End date not supported with live updates".to_string()));
         for what in ["BID_ASK", "ADJUSTED_LAST", "HISTORICAL_VOLATILITY"] {
-            assert_eq!(code(check_bar_request("", "1 D", "1 hour", what, Some(1), true, "STK", None)).1,
+            assert_eq!(code(check_bar_request("", "1 D", "1 hour", what, Some(1), true, "STK", None, false)).1,
                 "Error validating request.-'bM' : cause - Source price not supported with live updates", "{}", what);
         }
         for what in ["TRADES", "MIDPOINT", "BID", "ASK"] {
-            assert!(check_bar_request("", "1 D", "1 hour", what, Some(1), true, "STK", None).is_ok(), "{}", what);
+            assert!(check_bar_request("", "1 D", "1 hour", what, Some(1), true, "STK", None, false).is_ok(), "{}", what);
         }
-        assert_eq!(code(check_bar_request("", "1 D", "1 hour", "TRADES", Some(1), true, "BAG", None)).1,
+        assert_eq!(code(check_bar_request("", "1 D", "1 hour", "TRADES", Some(1), true, "BAG", None, false)).1,
             "Error validating request.-'bM' : cause - Live updates for combos are not supported");
         // ibx#421: years above the logon limit, after the duration checks.
-        assert_eq!(code(check_bar_request("", "2 Y", "1 day", "TRADES", None, false, "", Some(1))).1,
+        assert_eq!(code(check_bar_request("", "2 Y", "1 day", "TRADES", None, false, "", Some(1), false)).1,
             "Error validating request.-'bM' : cause - Historical data request for 2 year(s) rejected. Max API Backfill Years=1");
-        assert!(check_bar_request("", "199 Y", "1 month", "TRADES", None, false, "", Some(199)).is_ok());
-        assert_eq!(code(check_bar_request("", "400 D", "1 day", "TRADES", None, false, "", Some(1))).1,
+        assert!(check_bar_request("", "199 Y", "1 month", "TRADES", None, false, "", Some(199), false).is_ok());
+        assert_eq!(code(check_bar_request("", "400 D", "1 day", "TRADES", None, false, "", Some(1), false)).1,
             "Error validating request.-'bM' : cause - Historical data requests for durations longer than 365 days must be made in years.");
-        assert_eq!(code(check_bar_request("", "2 Y", "1 day", "YIELD", None, false, "", Some(1))).1,
+        assert_eq!(code(check_bar_request("", "2 Y", "1 day", "YIELD", None, false, "", Some(1), false)).1,
             "Error validating request.-'bM' : cause - Historical data request for 2 year(s) rejected. Max API Backfill Years=1");
+    }
+
+    // ibx#421: the second years rule (`jextend.bM.b(jutils.d1)`): with
+    // includeExpired off, a request that starts before now moved back by
+    // M years and one day (machine calendar) is refused, with the start
+    // and end written in the zone of the end date.
+    #[test]
+    fn backfill_start_before_the_limit() {
+        let now = jiff::civil::date(2026, 10, 2).at(8, 54, 1, 0).to_zoned(jiff::tz::TimeZone::UTC).unwrap().timestamp().as_second();
+        let paris = "Europe/Paris";
+        assert_eq!(backfill_start_refusal(now, None, "1 y", now, 1, paris), None, "one year back: on the limit day");
+        let end = parse_request_time("20250101 00:00:00", paris, now).unwrap().unwrap();
+        assert_eq!(backfill_start_refusal(end.secs, None, "1 d", now, 1, paris).unwrap(),
+            "Historical data queries on this contract requesting any data earlier than 1 year(s) back from now which is 20251001 10:54:01 CEST are rejected.  Your query would have run from 20241231 00:00:00 CET to 20250101 00:00:00 CET.");
+        let end = parse_request_time("20250101 00:00:00 US/Eastern", paris, now).unwrap().unwrap();
+        let text = backfill_start_refusal(end.secs, end.zone.as_deref(), "1 d", now, 1, paris).unwrap();
+        assert!(text.ends_with("from 20241231 00:00:00 EST to 20250101 00:00:00 EST."), "{text}");
+        assert_eq!(backfill_start_refusal(end.secs, None, "1 d", now, 199, paris), None);
+
+        let code = |r: Result<CheckedBarRequest, (i32, String)>| r.unwrap_err();
+        let refused = check_bar_request("19900101 00:00:00", "1 D", "1 day", "TRADES", None, false, "", Some(1), false);
+        assert!(code(refused).1.starts_with("Error validating request.-'bM' : cause - Historical data queries on this contract requesting any data earlier than 1 year(s) back from now which is "));
+        assert!(check_bar_request("19900101 00:00:00", "1 D", "1 day", "TRADES", None, false, "", Some(1), true).is_ok(),
+            "includeExpired");
+        assert!(check_bar_request("19900101 00:00:00", "1 D", "1 day", "TRADES", None, false, "", None, false).is_ok(),
+            "no limit (NIGHTLY)");
+        // After the bar size checks, before whatToShow.
+        assert_eq!(code(check_bar_request("19900101 00:00:00", "1 D", "1 sec", "TRADES", None, false, "", Some(1), false)).0, 321);
+        assert!(code(check_bar_request("19900101 00:00:00", "1 D", "1 day", "YIELD", None, false, "", Some(1), false)).1
+            .contains("earlier than 1 year(s)"));
     }
 
     // ibx#408: BID_ASK bars from the Bid leg and the Ask leg.

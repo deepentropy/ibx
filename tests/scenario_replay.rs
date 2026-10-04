@@ -258,6 +258,20 @@ fn open_orders_and_positions() {
     check("20261002/b1_cleanup", Options::default());
 }
 
+// Orders of earlier sessions known from the logon replay (01/10/2026,
+// paper): 8 orders of client 0 the replay gives as not routed yet (150=A
+// 20=3 39=A), then client 193: reqAllOpenOrders lists them in the book's
+// order, API order id 0 (no 6121), permId the ClOrdID's id, client 0;
+// reqGlobalCancel sends the 8 cancels tagged ALL in the book's order, and
+// client 193 gets nothing of their reports (the orders are client 0's);
+// reqAllOpenOrders then lists none.
+#[test]
+fn global_cancel_of_orders_of_earlier_sessions() {
+    let o = check("20261001/global_cancel_replayed", orders());
+    assert_eq!(o.frames_compared, 8, "the 8 cancels");
+    assert_eq!(o.theirs.len(), 18);
+}
+
 // ── Historical data, scanners, news ──
 
 // keepUpToDate bars, then their cancel (26/09/2026, ibx#429, ibx#431): the

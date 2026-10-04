@@ -745,6 +745,18 @@ pub fn is_open_status(status: &str) -> bool {
     )
 }
 
+/// The average, last fill and market cap prices of an orderStatus: an
+/// order that never left (ApiCancelled) has them unset, as the reference
+/// writes them (`jextend.dL.a(Collection, String)`; scenario
+/// i105_combo_directed of 26/09/2026: MAX, MAX, MAX).
+pub fn status_prices(r: &OrderReport) -> (f64, f64, f64) {
+    if r.status == "ApiCancelled" {
+        (f64::MAX, f64::MAX, f64::MAX)
+    } else {
+        (r.avg_fill_price, r.last_fill_price, 0.0)
+    }
+}
+
 /// Convert OrderStatus enum to ibapi-compatible string.
 #[inline]
 pub fn order_status_str(status: OrderStatus) -> &'static str {
@@ -763,6 +775,7 @@ pub fn order_status_str(status: OrderStatus) -> &'static str {
         // with the rejection reason carried separately on OrderState.completedStatus.
         OrderStatus::Rejected => "Inactive",
         OrderStatus::Inactive => "Inactive",
+        OrderStatus::ApiCancelled => "ApiCancelled",
     }
 }
 
@@ -1151,6 +1164,9 @@ pub struct ClientCore {
     pub what_if_orders: Mutex<HashMap<OrderId, std::collections::VecDeque<(ApiContract, ApiOrder)>>>,
     // Ids of tracked orders that were filled or cancelled: never sent again (ibx#463).
     pub finished_orders: Mutex<HashSet<OrderId>>,
+    /// Executions of other clients' orders, by execution id without its
+    /// revision: their commission reports are not given.
+    pub silent_executions: Mutex<HashSet<String>>,
     /// The highest order id this client placed (orders and what-ifs), as
     /// the reference records it for the client when an order goes on
     /// (`jextend.bH.Z()@78`, `jextend.H.c(int)`): a new order at or below
@@ -1221,7 +1237,7 @@ const ORDER_TYPE_ALIASES: [(&str, &str); 15] = [
 
 /// The reference's text for an invalid date or time (errors 337 and 343);
 /// %s is the field's label.
-const INVALID_DATE_TIME: &str = "%s: The date, time, or time-zone entered is invalid.\n\
+pub(crate) const INVALID_DATE_TIME: &str = "%s: The date, time, or time-zone entered is invalid.\n\
 The correct format is yyyymmdd hh:mm:ss xx/xxxx\n\
 where yyyymmdd and xx/xxxx are optional.\n\
 E.g.: 20031126 15:59:00 US/Eastern\n\
@@ -1433,6 +1449,7 @@ impl ClientCore {
             held_open_orders: Mutex::new(Vec::new()),
             what_if_orders: Mutex::new(HashMap::new()),
             finished_orders: Mutex::new(HashSet::new()),
+            silent_executions: Mutex::new(HashSet::new()),
             highest_order_id: AtomicI64::new(0),
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashSet::new()),
@@ -2814,6 +2831,17 @@ impl ClientCore {
 
     /// Store an execution for `req_executions`. Returns the commission
     /// report that came before it, to send after `exec_details`.
+    /// Store an execution of another API client's order (kept for
+    /// `req_executions`); its commission report is not given to this
+    /// client (`jextend.ba.a(dq, aQ)`).
+    pub fn push_silent_execution(&self, contract: ApiContract, execution: ApiExecution, time_secs: Option<i64>) {
+        let (base, _) = crate::engine::hot_loop::ccp::split_exec_revision(&execution.exec_id);
+        if !base.is_empty() {
+            self.silent_executions.lock().unwrap().insert(base.to_string());
+        }
+        let _ = self.push_execution(-1, contract, execution, time_secs);
+    }
+
     pub fn push_execution(&self, req_id: i64, contract: ApiContract, execution: ApiExecution, time_secs: Option<i64>) -> Option<ApiCommissionAndFeesReport> {
         let (base, _) = crate::engine::hot_loop::ccp::split_exec_revision(&execution.exec_id);
         let commission_and_fees = if execution.exec_id.is_empty() {
@@ -2868,6 +2896,8 @@ impl ClientCore {
     /// only for a known execution (ibx#471).
     pub fn apply_commission(&self, report: &ApiCommissionAndFeesReport) -> bool {
         let (base, _) = crate::engine::hot_loop::ccp::split_exec_revision(&report.exec_id);
+        // The commission of another client's execution: kept, not reported.
+        let silent = self.silent_executions.lock().unwrap().contains(base);
         let mut execs = self.executions.lock().unwrap();
         let stored = execs.iter_mut().rev().find(|se| {
             !se.execution.exec_id.is_empty()
@@ -2876,7 +2906,7 @@ impl ClientCore {
         match stored {
             Some(se) => {
                 se.commission_and_fees = Some(report.clone());
-                true
+                !silent
             }
             None => {
                 self.pending_commissions.lock().unwrap().insert(base.to_string(), report.clone());
@@ -3023,7 +3053,8 @@ impl ClientCore {
                     || info.as_ref().is_some_and(|i| i.order.outside_rth);
                 (t.contract, order, t.last_fill_price, client_id)
             }
-            (None, Some(i)) => (i.contract, i.order, 0.0, 0),
+            // An order the server reported: its own client id.
+            (None, Some(i)) => { let client_id = i.order.client_id as i64; (i.contract, i.order, 0.0, client_id) }
             (None, None) => return None,
         };
         let bag = contract.sec_type.eq_ignore_ascii_case("BAG");
@@ -3037,6 +3068,9 @@ impl ClientCore {
         let mut order = order;
         reported_unset_values(&mut order);
         Self::apply_combo_view(order_id, &mut contract, &mut order, shared);
+        // The API order id the reference shows (0 for an order of another
+        // session whose report gave none).
+        order.order_id = shared.orders.api_order_id(order_id);
         Some(OrderView { contract, order, state, last_fill_price, client_id })
     }
 
@@ -3076,14 +3110,6 @@ impl ClientCore {
             why.push("trigger");
         }
         why.join(",")
-    }
-
-    /// An order cancelled in the reference's API pending map (ibx#487): its
-    /// quantity (the status's remaining) and this client's id; the client
-    /// no longer tracks it.
-    pub fn api_cancelled(&self, order_id: OrderId) -> (f64, i64) {
-        let remaining = self.open_orders.lock().unwrap().remove(&order_id).map_or(0.0, |t| t.order.total_quantity);
-        (remaining, self.client_id.load(Ordering::Relaxed))
     }
 
     /// Keep the openOrder and orderStatus just given for an order.
@@ -3144,6 +3170,12 @@ impl ClientCore {
             if matches!(status, "Filled" | "Cancelled") {
                 self.finished_orders.lock().unwrap().insert(order_id);
             }
+        }
+        // An order that never left (a global cancel came while it
+        // waited): the reference never put it in its book, so its id names
+        // no order any more.
+        if status == "ApiCancelled" {
+            orders.remove(&order_id);
         }
     }
 
@@ -3299,6 +3331,40 @@ impl ClientCore {
         }
 
         result
+    }
+
+    /// The answer to an open-order request, as the reference lists it
+    /// (`jextend.cs.o()`): the orders of the book in its order
+    /// (`jclient.jv.w()`, a hash table keyed by permId, walked bucket by
+    /// bucket in insertion order; captured 01/10/2026), every client's for
+    /// reqAllOpenOrders, this client's for reqOpenOrders
+    /// (`jextend.cu.b(List)@149`: `pe.T() == clientId`). Each with the
+    /// order id and client id the reference shows.
+    pub fn open_orders_listing(&self, shared: &SharedState, request: OpenOrdersRequest) -> Vec<(OrderId, TrackedOrder, i64)> {
+        let me = self.client_id.load(Ordering::Relaxed);
+        let tracked: HashSet<OrderId> = self.open_orders.lock().unwrap().keys().copied().collect();
+        let mut out: Vec<(OrderId, TrackedOrder, i64, (usize, u64))> = Vec::new();
+        for (oid, mut t) in self.collect_open_orders(shared) {
+            let client_id = if tracked.contains(&oid) { me } else { t.order.client_id as i64 };
+            if request == OpenOrdersRequest::Open && client_id != me {
+                continue;
+            }
+            if !tracked.contains(&oid) {
+                // An order the server reported: what is left of it.
+                t.filled = t.order.filled_quantity.max(0.0);
+                t.remaining = (t.order.total_quantity - t.filled).max(0.0);
+            }
+            let (seq, peak) = shared.orders.book_place(oid);
+            let perm = if t.order.perm_id != 0 { t.order.perm_id } else { oid };
+            let place = (crate::engine::context::book_bucket(perm, crate::engine::context::book_table_size(peak)),
+                seq.unwrap_or(u64::MAX));
+            let shown = shared.orders.api_order_id(oid);
+            t.order.order_id = shown;
+            t.order.client_id = client_id as i32;
+            out.push((shown, t, client_id, place));
+        }
+        out.sort_by_key(|(.., place)| *place);
+        out.into_iter().map(|(id, t, c, _)| (id, t, c)).collect()
     }
 
     // ── Dispatch preparation methods ──
@@ -4074,6 +4140,7 @@ impl ClientCore {
         sec_type: &str,
         exchange: &str,
         max_backfill_years: Option<i32>,
+        include_expired: bool,
     ) -> Option<(i32, String)> {
         use crate::control::historical::{bar_request_refusal, is_valid_end_date};
         if is_valid_end_date(end_date_time) && exchange.is_empty() && !sec_type.eq_ignore_ascii_case("CONTFUT") {
@@ -4081,7 +4148,7 @@ impl ClientCore {
         }
         crate::control::historical::check_bar_request(
             end_date_time, duration, bar_size, what_to_show, Some(format_date), keep_up_to_date, sec_type,
-            max_backfill_years,
+            max_backfill_years, include_expired,
         ).err()
     }
 
@@ -4360,10 +4427,69 @@ impl ClientCore {
     /// error code and text. Nothing is sent for such an order. `exchange`
     /// is the contract's.
     pub fn refusal_before_sending(order: &ApiOrder, exchange: &str) -> Option<(i64, String)> {
+        Self::refusal_before_sending_for(order, exchange, false)
+    }
+
+    /// [`Self::refusal_before_sending`] for an order whose account's
+    /// application is not approved yet when `account_pending` (see
+    /// [`Self::order_account_pending`], ibx#421).
+    pub fn refusal_before_sending_for(order: &ApiOrder, exchange: &str, account_pending: bool) -> Option<(i64, String)> {
         Self::read_refusal(order)
             .or_else(|| Self::exchange_refusal(exchange))
-            .or_else(|| Self::order_rule_refusal(order))
+            .or_else(|| Self::order_rule_refusal(order, account_pending))
             .or_else(|| Self::fractional_quantity_refusal(order))
+    }
+
+    /// Whether the account of an order is one whose application is not
+    /// approved yet (8092 of the logon, ibx#421): the reference refuses
+    /// such an order with 10136 on a session that is not an FA one
+    /// (`jextend.bH.S()@5072-5127`, `jextend.bi.g(String)`). The account
+    /// is the order's on a session with several accounts, else the logon
+    /// account, which the reference puts on the orders of a one-account
+    /// session.
+    pub fn order_account_pending(order: &ApiOrder, reference: &crate::bridge::ReferenceState, logon_account: &str) -> bool {
+        if reference.fa_session() {
+            return false;
+        }
+        reference.account_pending(Self::request_account(&order.account, reference, logon_account))
+    }
+
+    /// The account of a request (ibx#421): the one given on a session
+    /// with several accounts (the logon account when none is given), else
+    /// the logon account.
+    fn request_account<'a>(given: &'a str, reference: &crate::bridge::ReferenceState, logon_account: &'a str) -> &'a str {
+        if reference.managed_accounts().len() > 1 && !given.is_empty() { given } else { logon_account }
+    }
+
+    /// The pending accounts check of a reqPositions (ibx#421,
+    /// `jextend.cl.n()@162-251`): the accounts of the logon's list whose
+    /// application is not approved. All of them: Err, error 10275 and the
+    /// request stops; some: Ok with the warning 10275, the request goes
+    /// on; none: Ok(None).
+    pub fn positions_pending_check(reference: &crate::bridge::ReferenceState) -> Result<Option<(i64, String)>, (i64, String)> {
+        let pending = reference.pending_managed_accounts();
+        if pending.is_empty() {
+            return Ok(None);
+        }
+        let names: Vec<&str> = pending.iter().map(String::as_str).collect();
+        let error = (10275, crate::control::logon::positions_not_available(&names));
+        if reference.managed_accounts().len() <= pending.len() { Err(error) } else { Ok(Some(error)) }
+    }
+
+    /// A reqPositionsMulti for an account whose application is not
+    /// approved: error 10275 and the request stops (ibx#421,
+    /// `jextend.bk.n()@9-39`).
+    pub fn positions_multi_pending_refusal(account: &str, reference: &crate::bridge::ReferenceState, logon_account: &str) -> Option<(i64, String)> {
+        let account = Self::request_account(account, reference, logon_account);
+        reference.account_pending(account)
+            .then(|| (10275, crate::control::logon::positions_not_available(&[account])))
+    }
+
+    /// A reqAccountUpdates for an account whose application is not
+    /// approved: the warning 10275, and the request goes on (ibx#421,
+    /// `jextend.bl.n()@127-196`).
+    pub fn account_updates_pending_warning(acct_code: &str, reference: &crate::bridge::ReferenceState, logon_account: &str) -> Option<(i64, String)> {
+        Self::positions_multi_pending_refusal(acct_code, reference, logon_account)
     }
 
     /// An order whose contract has no exchange (empty, the official API's
@@ -4516,7 +4642,7 @@ impl ClientCore {
     /// 321 with the rule text (ibx#468), in the reference's order
     /// (`jextend.bH.S()` stops at the first). The text after "cause - " is
     /// the rule's; for the TRAIL LIMIT rule only its end is known.
-    fn order_rule_refusal(order: &ApiOrder) -> Option<(i64, String)> {
+    fn order_rule_refusal(order: &ApiOrder, account_pending: bool) -> Option<(i64, String)> {
         let refuse = |cause: &str| Some((321, format!("Error validating request.-'bH' : cause - {}", cause)));
         let order_type = order.order_type.to_uppercase();
         // An action the reference does not know reads as side 0, refused
@@ -4549,6 +4675,11 @@ impl ClientCore {
         // captured 02/10/2026, with this check's own 'v' in the text).
         if order.what_if && !order.transmit {
             return Some((321, "Error validating request.-'v' : cause - What-If order should have transmit flag set to TRUE.".into()));
+        }
+        // An account whose application is not approved (ibx#421,
+        // `jextend.bH.S()@5127`, thrown with its own code 10136).
+        if account_pending {
+            return Some((10136, crate::control::logon::PENDING_ACCOUNT.to_string()));
         }
         // A trailing percent below 0 or above 100 (ibx#263).
         let pct = order.trailing_percent;
@@ -4591,11 +4722,16 @@ impl ClientCore {
     /// against the algo definitions the server sent (ibx#263): 439 for an
     /// algorithm they do not have, 442 for one not allowed overnight on an
     /// overnight order, 443 for a parameter the algorithm does not have,
-    /// 441 for a number it cannot read, 145 for a value not in the
-    /// parameter's legal values, 441 for a number out of its bounds or a
-    /// required parameter with no value (`crate::control::algo::refusal`).
-    /// Nothing is checked before the first definitions came.
-    pub fn algo_definition_refusal(order: &ApiOrder, exchange: &str, reference: &crate::bridge::ReferenceState) -> Option<(i64, String)> {
+    /// 441 for a number it cannot read, 10314 for a time it cannot read,
+    /// 145 for a value not in the parameter's legal values, 441 for a
+    /// number out of its bounds or a required parameter with no value
+    /// (`crate::control::algo::refusal`). Nothing is checked before the
+    /// first definitions came.
+    /// The warnings 2174 of the time parameters the check reached, given
+    /// with no zone, go to `warnings`, in order (ibx#263).
+    pub fn algo_definition_refusal(order: &ApiOrder, exchange: &str, reference: &crate::bridge::ReferenceState,
+        warnings: &mut Vec<(i64, String)>) -> Option<(i64, String)>
+    {
         if order.algo_strategy.is_empty() {
             return None;
         }
@@ -4604,7 +4740,7 @@ impl ClientCore {
         // An overnight order: the overnight exchanges, or includeOvernight
         // (`jfix.R.C`, `jattrib.Attributes.bl`).
         let overnight = matches!(exchange, "OVERNIGHT" | "IBEOS") || order.include_overnight;
-        reference.algo_refusal(&order.algo_strategy, &values, overnight)
+        reference.algo_refusal(&order.algo_strategy, &values, overnight, warnings)
     }
 
     /// A limit price that is not a number is off the contract's price

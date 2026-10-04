@@ -49,6 +49,44 @@ pub enum StatusChange {
     Unknown,
 }
 
+/// What the reference's order book holds for an order beyond the order
+/// itself, for its global cancel (`trader.order.ay.c(List, bs, bE)`): the
+/// place the order took in the book, its parent and OCA group, and the API
+/// client of an order of another session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BookEntry {
+    /// Order of insertion in the book.
+    pub seq: u64,
+    /// The parent's order id, 0 for none.
+    pub parent: OrderId,
+    /// The OCA group, empty for none.
+    pub oca_group: String,
+    /// The API client of an order the server reported from another
+    /// session (6119); None for an order of this client.
+    pub owner: Option<i64>,
+}
+
+/// The table size of a `java.util.HashMap` that held `peak` entries: 16,
+/// doubled each time the entries pass three quarters of it; it never
+/// shrinks.
+pub(crate) fn book_table_size(peak: usize) -> usize {
+    let mut size = 16;
+    while peak > size * 3 / 4 {
+        size *= 2;
+    }
+    size
+}
+
+/// The bucket of a permId in the reference's book, a `java.util.HashMap`
+/// keyed by a `Long` (`jclient.jv.l`): the key's hash, spread, masked by
+/// the table size. The book is walked bucket by bucket, each in insertion
+/// order (`jclient.jv.w()`).
+pub(crate) fn book_bucket(perm_id: OrderId, table: usize) -> usize {
+    let v = perm_id as u64;
+    let h = (v ^ (v >> 32)) as u32;
+    ((h ^ (h >> 16)) as usize) & (table - 1)
+}
+
 /// What the server last reported for a TRAIL LIMIT order. The offset is
 /// restated on its replace; all three fill the reports that omit them and
 /// show in openOrder (ib-agent#194, ib-agent#195, ibx#491). 0 = not reported.
@@ -103,10 +141,6 @@ pub struct Context {
     pub(crate) what_ifs: HashMap<String, (OrderId, InstrumentId)>,
     /// Set while a what-if is encoded: the ClOrdID it goes out under.
     pub(crate) what_if_send: Option<String>,
-    /// Orders refused because their contract was not found (200): the
-    /// reference keeps their id in its API pending map, and a cancel gets
-    /// the ApiCancelled status (ibx#487).
-    pub(crate) api_pending: std::collections::HashSet<OrderId>,
     /// The contract lookups of orders given without a conId: request
     /// number and the order's slot (ibx#486).
     pub(crate) order_lookups: Vec<(u32, InstrumentId)>,
@@ -187,6 +221,16 @@ pub struct Context {
     /// Bounded: the oldest are dropped past `FINISHED_ORDERS_MAX`.
     finished_orders: HashMap<OrderId, OrderStatus>,
     finished_order_ids: std::collections::VecDeque<OrderId>,
+    /// The book entry of each order held (see [`BookEntry`]).
+    pub(crate) book: HashMap<OrderId, BookEntry>,
+    /// Orders of this client the reference keeps in its API pending map
+    /// with no order made: a combo refused with 200 at its contract
+    /// lookup. A cancel or a global cancel ends them as ApiCancelled.
+    pub(crate) api_pending: HashMap<OrderId, OrderRequest>,
+    next_book_seq: u64,
+    /// Most orders held at once: the reference's book is a hash table
+    /// that grows with it and never shrinks.
+    pub(crate) book_peak: usize,
     /// Timestamp when the last farm socket recv returned data (for decode latency measurement).
     pub(crate) recv_at: Instant,
     /// Total hot loop iterations since start.
@@ -213,7 +257,6 @@ impl Context {
             next_rth_lookup: 0,
             what_ifs: HashMap::new(),
             what_if_send: None,
-            api_pending: std::collections::HashSet::new(),
             order_lookups: Vec::new(),
             next_order_lookup: 0,
             short_sale_send: None,
@@ -247,6 +290,10 @@ impl Context {
             next_md_lookup: 0,
             finished_orders: HashMap::new(),
             finished_order_ids: std::collections::VecDeque::new(),
+            book: HashMap::new(),
+            api_pending: HashMap::new(),
+            next_book_seq: 0,
+            book_peak: 0,
             account: AccountState::default(),
             clock: Clock::new(),
             next_order_id: {
@@ -1157,6 +1204,46 @@ impl Context {
         self.open_orders.insert(oid, order);
         // Initialize modify version to 0 for new orders (don't reset on modify).
         self.modify_versions.entry(oid).or_insert(0);
+        if !self.book.contains_key(&oid) {
+            self.book.insert(oid, BookEntry { seq: self.next_book_seq, ..Default::default() });
+            self.next_book_seq += 1;
+        }
+        self.book_peak = self.book_peak.max(self.open_orders.len());
+    }
+
+    /// The server's id of an order, the id part of its ClOrdID: the order
+    /// id, or for an order of another session kept under its API order id,
+    /// the id the server holds it under (ibx#466).
+    pub(crate) fn server_id(&self, order_id: OrderId) -> OrderId {
+        self.recovered_keys.iter()
+            .find(|(_, key)| **key == order_id)
+            .map_or(order_id, |(&server, _)| server)
+    }
+
+    /// The parent and OCA group of a held order, when known.
+    pub(crate) fn set_links(&mut self, order_id: OrderId, parent: Option<OrderId>, oca_group: Option<&str>) {
+        if let Some(entry) = self.book.get_mut(&order_id) {
+            if let Some(parent) = parent { entry.parent = parent; }
+            if let Some(group) = oca_group { entry.oca_group = group.to_string(); }
+        }
+    }
+
+    /// Whether this client gets the reports of an order (openOrder,
+    /// orderStatus, executions, commissions): those of its own orders, and
+    /// as client 0 those of a client that is not connected
+    /// (`jextend.ba.d(dK)`: the order's client, else client 0; no master
+    /// client, `ApiSettings.m_masterClientID` -1 by default). ibx is the
+    /// only client of its engine.
+    pub(crate) fn delivered(&self, order_id: OrderId) -> bool {
+        self.api_client_id == 0 || self.owned(order_id)
+    }
+
+    /// Whether this client may act on an order by its id: an order of
+    /// this client, or one the server reported for this client's id. The
+    /// reference finds an API order by (client id, order id)
+    /// (`jclient.jv.b(int, int)`).
+    pub(crate) fn owned(&self, order_id: OrderId) -> bool {
+        self.book.get(&order_id).and_then(|e| e.owner).is_none_or(|owner| owner == self.api_client_id)
     }
 
     /// Apply a server-reported status. Returns true when the stored status
@@ -1235,6 +1322,7 @@ impl Context {
 
     pub fn remove_order(&mut self, order_id: OrderId) {
         self.open_orders.remove(&order_id);
+        self.book.remove(&order_id);
     }
 
     /// Remove an order that ended with `status`, and keep that status for a
@@ -1266,6 +1354,7 @@ impl Context {
         self.reported_stop.remove(&order_id);
         self.bracket_keys.remove(&order_id);
         self.bracket_next_child.remove(&order_id);
+        self.book.remove(&order_id);
         true
     }
 

@@ -69,6 +69,9 @@ pub enum OrderStatus {
     Rejected,
     /// Server reports order inactive (FIX 39=I).
     Inactive,
+    /// An order the client placed that never left: a global cancel came
+    /// while it waited (the reference's `ApiCancelled`).
+    ApiCancelled,
 }
 
 impl OrderStatus {
@@ -89,13 +92,13 @@ impl OrderStatus {
             // A partially filled order can still be cancelled, and a fill
             // can land while a cancel is pending.
             Self::PendingCancel | Self::PartiallyFilled => 4,
-            Self::Filled | Self::Cancelled | Self::Rejected => 5,
+            Self::Filled | Self::Cancelled | Self::Rejected | Self::ApiCancelled => 5,
         }
     }
 
     /// Terminal states are absorbing: no ordinary frame may leave them.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Filled | Self::Cancelled | Self::Rejected)
+        matches!(self, Self::Filled | Self::Cancelled | Self::Rejected | Self::ApiCancelled)
     }
 }
 
@@ -1200,6 +1203,9 @@ pub enum OrderRequest {
     CancelAll {
         instrument: InstrumentId,
     },
+    /// The API global cancel: every order of the book, whatever its
+    /// client or session, as the reference cancels them.
+    GlobalCancel,
     /// Replace a working order. Carries the full wanted state, like a new
     /// order does: the replace restates the order type, prices, time-in-force
     /// and the attributes the reference restates (ibx#247 ibx#324 ibx#334
@@ -1215,11 +1221,12 @@ pub enum OrderRequest {
 }
 
 impl OrderRequest {
-    /// Extract the order_id from any variant. Returns 0 for CancelAll (no order_id).
+    /// Extract the order_id from any variant. Returns 0 for CancelAll and
+    /// GlobalCancel (no order_id).
     pub fn order_id(&self) -> OrderId {
         match self {
             Self::Cancel { order_id } => *order_id,
-            Self::CancelAll { .. } => 0,
+            Self::CancelAll { .. } | Self::GlobalCancel => 0,
             Self::Modify { order_id, .. } => *order_id,
             Self::SubmitLimit { order_id, .. }
             | Self::SubmitMarket { order_id, .. }
@@ -1263,12 +1270,59 @@ impl OrderRequest {
         }
     }
 
+    /// The quantity of a new order, fixed-point (QTY_SCALE); None for a
+    /// cancel or a replace. A bracket gives its legs' quantity.
+    pub fn new_order_qty(&self) -> Option<Qty> {
+        match self {
+            Self::Cancel { .. } | Self::CancelAll { .. } | Self::GlobalCancel | Self::Modify { .. } => None,
+            Self::SubmitWhatIf { request } => request.new_order_qty(),
+            Self::SubmitLimitFractional { qty, .. } => Some(*qty),
+            Self::SubmitLimit { qty, .. }
+            | Self::SubmitMarket { qty, .. }
+            | Self::SubmitStop { qty, .. }
+            | Self::SubmitStopLimit { qty, .. }
+            | Self::SubmitLimitGtc { qty, .. }
+            | Self::SubmitStopGtc { qty, .. }
+            | Self::SubmitStopLimitGtc { qty, .. }
+            | Self::SubmitLimitIoc { qty, .. }
+            | Self::SubmitLimitFok { qty, .. }
+            | Self::SubmitTrailingStop { qty, .. }
+            | Self::SubmitTrailingStopLimit { qty, .. }
+            | Self::SubmitTrailingStopPct { qty, .. }
+            | Self::SubmitTrailingStopPctEx { qty, .. }
+            | Self::SubmitMoc { qty, .. }
+            | Self::SubmitLoc { qty, .. }
+            | Self::SubmitMit { qty, .. }
+            | Self::SubmitLit { qty, .. }
+            | Self::SubmitLimitEx { qty, .. }
+            | Self::SubmitRel { qty, .. }
+            | Self::SubmitLimitOpg { qty, .. }
+            | Self::SubmitAdaptive { qty, .. }
+            | Self::SubmitMtl { qty, .. }
+            | Self::SubmitMktPrt { qty, .. }
+            | Self::SubmitStpPrt { qty, .. }
+            | Self::SubmitMidPrice { qty, .. }
+            | Self::SubmitSnapMkt { qty, .. }
+            | Self::SubmitSnapMid { qty, .. }
+            | Self::SubmitSnapPri { qty, .. }
+            | Self::SubmitPegMkt { qty, .. }
+            | Self::SubmitPegMid { qty, .. }
+            | Self::SubmitAlgo { qty, .. }
+            | Self::SubmitPegBench { qty, .. }
+            | Self::SubmitLimitAuc { qty, .. }
+            | Self::SubmitMtlAuc { qty, .. }
+            | Self::SubmitAdjustableStop { qty, .. }
+            | Self::SubmitEx { qty, .. }
+            | Self::SubmitBracket { qty, .. } => Some(*qty as Qty * QTY_SCALE),
+        }
+    }
+
     /// Extract the instrument from any submit variant. None for
     /// Cancel/Modify, which carry no instrument (the engine resolves it from
     /// the tracked order).
     pub fn instrument(&self) -> Option<InstrumentId> {
         match self {
-            Self::Cancel { .. } | Self::Modify { .. } => None,
+            Self::Cancel { .. } | Self::Modify { .. } | Self::GlobalCancel => None,
             Self::CancelAll { instrument }
             | Self::SubmitLimit { instrument, .. }
             | Self::SubmitMarket { instrument, .. }
@@ -1314,10 +1368,10 @@ impl OrderRequest {
 
     /// The instrument of a new order, to change: the slot of its contract
     /// once the contract's lookup found it (ibx#486). None for a cancel, a
-    /// modify and a cancel-all.
+    /// modify, a cancel-all and a global cancel.
     pub fn new_order_instrument_mut(&mut self) -> Option<&mut InstrumentId> {
         match self {
-            Self::Cancel { .. } | Self::Modify { .. } | Self::CancelAll { .. } => None,
+            Self::Cancel { .. } | Self::Modify { .. } | Self::CancelAll { .. } | Self::GlobalCancel => None,
             Self::SubmitLimit { instrument, .. }
             | Self::SubmitMarket { instrument, .. }
             | Self::SubmitStop { instrument, .. }
@@ -1383,7 +1437,7 @@ impl OrderRequest {
     /// None for a cancel or a replace. A bracket gives its parent's side.
     pub fn new_order_side(&self) -> Option<(Side, Option<&OrderAttrs>)> {
         match self {
-            Self::Cancel { .. } | Self::CancelAll { .. } | Self::Modify { .. } => None,
+            Self::Cancel { .. } | Self::CancelAll { .. } | Self::GlobalCancel | Self::Modify { .. } => None,
             Self::SubmitWhatIf { request } => request.new_order_side(),
             Self::SubmitTrailingStopPctEx { side, attrs, .. }
             | Self::SubmitLimitEx { side, attrs, .. }
@@ -1434,7 +1488,7 @@ impl OrderRequest {
     pub fn off_grid_order(&self, tick: i64, signed: bool) -> Option<OrderId> {
         let off = |prices: &[Price]| prices.iter().any(|&p| off_grid(p, tick, signed));
         let checked: (OrderId, [Price; 2]) = match self {
-            Self::Cancel { .. } | Self::CancelAll { .. }
+            Self::Cancel { .. } | Self::CancelAll { .. } | Self::GlobalCancel
             | Self::SubmitMarket { .. } | Self::SubmitMoc { .. }
             | Self::SubmitMtl { .. } | Self::SubmitMktPrt { .. }
             | Self::SubmitMtlAuc { .. }

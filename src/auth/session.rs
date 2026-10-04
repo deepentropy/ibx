@@ -985,7 +985,7 @@ const MAX_FARM_MSG_SIZE: usize = 65536;
 /// This returns exactly the framed message and leaves any surplus bytes in
 /// `carry` so the caller can hand them to the next reader. Discarding that tail
 /// dropped the logon ACK and stalled the exchange (ibx#237).
-fn recv_8eq1(stream: &mut TcpStream, carry: &mut Vec<u8>) -> io::Result<Vec<u8>> {
+fn recv_8eq1<S: Read>(stream: &mut S, carry: &mut Vec<u8>) -> io::Result<Vec<u8>> {
     let mut tmp = [0u8; 4096];
     // Tolerate transient WouldBlock/TimedOut (os error 35 on macOS) from the
     // short poll timeout until an overall deadline; a slow segment from a
@@ -1400,8 +1400,8 @@ pub enum SoftTokenOutcome {
     Unknown,
 }
 
-pub fn do_soft_token(
-    stream: &mut TcpStream,
+pub fn do_soft_token<S: Read + Write>(
+    stream: &mut S,
     session_token: &BigUint,
     carry: &mut Vec<u8>,
 ) -> io::Result<SoftTokenOutcome> {
@@ -1483,8 +1483,8 @@ pub fn do_soft_token(
 /// SRP-6 authentication for farm connections using FIX framing (8=1).
 /// Called as fallback when `do_soft_token` returns `SoftTokenOutcome::Unknown`.
 /// Same SRP math as `do_srp`, different wire framing.
-pub fn do_srp_farm(
-    stream: &mut TcpStream,
+pub fn do_srp_farm<S: Read + Write>(
+    stream: &mut S,
     username: &str,
     password: &str,
     carry: &mut Vec<u8>,

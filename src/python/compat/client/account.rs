@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 
 use crate::types::*;
 use super::{send_cmd, EClient};
+use crate::client_core::ClientCore;
 use super::super::super::types::PRICE_SCALE_F;
 
 #[pymethods]
@@ -98,10 +99,19 @@ impl EClient {
     /// Request all positions.
     fn req_positions(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        let shared = self.shared_state()?;
+        // Accounts whose application is not approved (ibx#421).
+        match ClientCore::positions_pending_check(&shared.reference) {
+            Err((code, message)) => {
+                shared.orders.push_order_error(-1, code, message);
+                return Ok(());
+            }
+            Ok(Some((code, message))) => shared.orders.push_order_error(-1, code, message),
+            Ok(None) => {}
+        }
         // A subscription, as the reference (ibx#477): the snapshot and
         // position_end once the data is in, then a row on each change.
         self.core.subscribe_positions();
-        let shared = self.shared_state()?;
         self.dispatch_positions(py, &shared)
     }
 
@@ -116,6 +126,12 @@ impl EClient {
     #[pyo3(signature = (subscribe, _acct_code=""))]
     fn req_account_updates(&self, subscribe: bool, _acct_code: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        // An account whose application is not approved: a warning, the
+        // request goes on (ibx#421).
+        let shared = self.shared_state()?;
+        if let Some((code, message)) = ClientCore::account_updates_pending_warning(_acct_code, &shared.reference, &self.account()) {
+            shared.orders.push_order_error(-1, code, message);
+        }
         // An unsubscribe answers error 2100 with id -1 (ibx#475).
         if let Some((code, message)) = self.core.subscribe_account_updates(subscribe) {
             self.shared_state()?.orders.push_order_error(-1, code, message);
@@ -123,10 +139,11 @@ impl EClient {
         Ok(())
     }
 
-    /// Request managed accounts list.
+    /// Request managed accounts list: every account of the logon's
+    /// account list, in logon order, comma separated (ibx#420).
     fn req_managed_accts(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.wrapper.call_method1(py, "managed_accounts", (self.account().as_str(),))?;
+        self.wrapper.call_method1(py, "managed_accounts", (self.managed_accounts_text().as_str(),))?;
         Ok(())
     }
 
@@ -161,8 +178,13 @@ impl EClient {
     fn req_positions_multi(&self, py: Python<'_>, req_id: i64, account: &str, model_code: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_positions_multi", &[req_id]) { return Ok(()); }
-        self.core.subscribe_positions_multi(req_id, account, model_code);
         let shared = self.shared_state()?;
+        // An account whose application is not approved (ibx#421).
+        if let Some((code, message)) = ClientCore::positions_multi_pending_refusal(account, &shared.reference, &self.account()) {
+            shared.orders.push_order_error(req_id, code, message);
+            return Ok(());
+        }
+        self.core.subscribe_positions_multi(req_id, account, model_code);
         self.dispatch_multi(py, &shared)
     }
 

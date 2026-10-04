@@ -18,6 +18,22 @@ pub fn farm_host_override() -> Option<String> {
 }
 pub const AUTH_PORT: u16 = 4001;
 
+/// The auth connection runs on TLS, the reference's setting `[Logon]
+/// UseSSL` of its jts.ini (ibx#423). `IBX_USE_SSL=false` (or `0`) gives the
+/// reference's mode without it: a plain socket on the port before the TLS
+/// port (4000) and the key exchange on the auth connection. The default is
+/// the setting of the reference's install this was read from
+/// (`UseSSL=true`).
+pub fn use_ssl() -> bool {
+    use_ssl_setting(std::env::var("IBX_USE_SSL").ok().as_deref())
+}
+
+/// [`use_ssl`] of a setting value: false only for `false` (any case) or
+/// `0`.
+pub fn use_ssl_setting(value: Option<&str>) -> bool {
+    !matches!(value.map(str::trim), Some(v) if v.eq_ignore_ascii_case("false") || v == "0")
+}
+
 /// Heartbeat intervals (seconds).
 pub const CCP_HEARTBEAT: u64 = 10;
 pub const FARM_HEARTBEAT: u64 = 30;
@@ -345,5 +361,20 @@ mod expiry_tests {
         assert!(parse_ib_expiry("20260620 18:00").is_err()); // needs seconds
         assert!(parse_ib_expiry("20261320").is_err()); // month 13
         assert!(parse_ib_expiry("20260620 18:00:00 Mars/Olympus").is_err());
+    }
+}
+
+#[cfg(test)]
+mod use_ssl_tests {
+    // ibx#423: the TLS setting of the auth connection: on unless set to
+    // false or 0, as this machine's gateway runs with UseSSL=true.
+    #[test]
+    fn use_ssl_setting_values() {
+        assert!(super::use_ssl_setting(None));
+        assert!(super::use_ssl_setting(Some("true")));
+        assert!(super::use_ssl_setting(Some("1")));
+        assert!(!super::use_ssl_setting(Some("false")));
+        assert!(!super::use_ssl_setting(Some(" FALSE ")));
+        assert!(!super::use_ssl_setting(Some("0")));
     }
 }

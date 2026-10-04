@@ -54,16 +54,22 @@ impl EClient {
         // Refused before sending, like the reference: error() only.
         let session_account = self.account_id.lock().unwrap().clone().unwrap_or_default();
         let contract_zone = shared.reference.time_zone_id(contract.con_id);
-        if let Some((code, message)) = ClientCore::refusal_before_sending(&api_order, &contract.exchange)
-            .or_else(|| ClientCore::algo_definition_refusal(&api_order, &contract.exchange, &shared.reference))
+        let account_pending = ClientCore::order_account_pending(&api_order, &shared.reference, &session_account);
+        // The algo check's warnings come before its refusal (ibx#263).
+        let mut algo_warnings = Vec::new();
+        let refusal = ClientCore::refusal_before_sending_for(&api_order, &contract.exchange, account_pending)
+            .or_else(|| ClientCore::algo_definition_refusal(&api_order, &contract.exchange, &shared.reference, &mut algo_warnings))
             .or_else(|| ClientCore::account_config_refusal(
                 &api_order, shared.reference.account_features().as_deref(), &session_account))
             .or_else(|| ClientCore::good_till_date_refusal(&api_order, contract_zone.as_deref()))
             .or_else(|| ClientCore::condition_time_zone_refusal(&api_order, contract_zone.as_deref()))
             .or_else(|| ClientCore::price_refusal(&api_order))
             .or_else(|| ClientCore::order_id_refusal(oid))
-            .or_else(|| self.core.refusal_for_order_id(oid, &api_order, &shared))
-        {
+            .or_else(|| self.core.refusal_for_order_id(oid, &api_order, &shared));
+        for (code, message) in algo_warnings {
+            shared.orders.push_order_error(oid, code, message);
+        }
+        if let Some((code, message)) = refusal {
             shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }
@@ -161,16 +167,13 @@ impl EClient {
         Ok(())
     }
 
-    /// Cancel all orders globally.
+    /// Cancel all orders globally: every order of the account the session
+    /// knows, those of other clients and of earlier sessions too, as the
+    /// reference cancels them.
     fn req_global_cancel(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
-        let shared = self.shared_state()?;
-        let count = shared.market.instrument_count();
-        for instrument in 0..count {
-            let _ = send_cmd(py, &tx, ControlCommand::Order(OrderRequest::CancelAll { instrument }));
-        }
-        Ok(())
+        send_cmd(py, &tx, ControlCommand::Order(OrderRequest::GlobalCancel))
     }
 
     /// Request next valid order ID.
@@ -199,7 +202,7 @@ impl EClient {
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::Open, &shared) {
             return Ok(());
         }
-        self.answer_open_orders(py, &shared)
+        self.answer_open_orders(py, &shared, crate::client_core::OpenOrdersRequest::Open)
     }
 
     /// Request all open orders across all clients. Held like
@@ -210,7 +213,7 @@ impl EClient {
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::All, &shared) {
             return Ok(());
         }
-        self.answer_open_orders(py, &shared)
+        self.answer_open_orders(py, &shared, crate::client_core::OpenOrdersRequest::All)
     }
 
     /// Automatically bind future orders to this client.
@@ -351,9 +354,11 @@ impl EClient {
 impl EClient {
     /// The open orders, each as open_order then order_status, then the end
     /// of the list.
-    pub(crate) fn answer_open_orders(&self, py: Python<'_>, shared: &SharedState) -> PyResult<()> {
-        let orders = self.core.collect_open_orders(shared);
-        for (order_id, tracked) in &orders {
+    pub(crate) fn answer_open_orders(&self, py: Python<'_>, shared: &SharedState, request: crate::client_core::OpenOrdersRequest) -> PyResult<()> {
+        // In the book's order, with the order id and client id the
+        // reference shows; OPEN_ORDER then ORDER_STATUS for each.
+        let orders = self.core.open_orders_listing(shared, request);
+        for (order_id, tracked, client_id) in &orders {
             // A combo with its legs (ibx#470).
             let c_py = Py::new(py, Contract::from_api(py, &tracked.contract)?)?.into_any();
             // A combo's per-leg prices and routing with it (ibx#470).
@@ -370,7 +375,7 @@ impl EClient {
             self.wrapper.call_method(
                 py, "order_status",
                 (*order_id, tracked.status.as_str(), tracked.filled, tracked.remaining,
-                 0.0f64, tracked.order.perm_id, tracked.order.parent_id, 0.0f64, 0i64, why_held.as_str(), 0.0f64),
+                 0.0f64, tracked.order.perm_id, tracked.order.parent_id, tracked.last_fill_price, *client_id, why_held.as_str(), 0.0f64),
                 None,
             )?;
         }

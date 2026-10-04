@@ -30,16 +30,22 @@ impl EClient {
         }
         // Refused before sending, like the reference: error() only.
         let contract_zone = self.shared.reference.time_zone_id(contract.con_id);
-        if let Some((code, message)) = ClientCore::refusal_before_sending(order, &contract.exchange)
-            .or_else(|| ClientCore::algo_definition_refusal(order, &contract.exchange, &self.shared.reference))
+        let account_pending = ClientCore::order_account_pending(order, &self.shared.reference, &self.account_id);
+        // The algo check's warnings come before its refusal (ibx#263).
+        let mut algo_warnings = Vec::new();
+        let refusal = ClientCore::refusal_before_sending_for(order, &contract.exchange, account_pending)
+            .or_else(|| ClientCore::algo_definition_refusal(order, &contract.exchange, &self.shared.reference, &mut algo_warnings))
             .or_else(|| ClientCore::account_config_refusal(
                 order, self.shared.reference.account_features().as_deref(), &self.account_id))
             .or_else(|| ClientCore::good_till_date_refusal(order, contract_zone.as_deref()))
             .or_else(|| ClientCore::condition_time_zone_refusal(order, contract_zone.as_deref()))
             .or_else(|| ClientCore::price_refusal(order))
             .or_else(|| ClientCore::order_id_refusal(oid))
-            .or_else(|| self.core.refusal_for_order_id(oid, order, &self.shared))
-        {
+            .or_else(|| self.core.refusal_for_order_id(oid, order, &self.shared));
+        for (code, message) in algo_warnings {
+            self.shared.orders.push_order_error(oid, code, message);
+        }
+        if let Some((code, message)) = refusal {
             self.shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }
@@ -130,14 +136,11 @@ impl EClient {
         self.cancel_order(order_id, "")
     }
 
-    /// Cancel all orders. Matches `reqGlobalCancel` in C++.
+    /// Cancel all orders. Matches `reqGlobalCancel` in C++: every order of
+    /// the account the session knows, those of other clients and of
+    /// earlier sessions too, as the reference cancels them.
     pub fn req_global_cancel(&self) -> Result<(), String> {
-        // Use global instrument count (not just locally-tracked ones)
-        let count = self.shared.market.instrument_count();
-        for instrument in 0..count {
-            self.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }))?;
-        }
-        Ok(())
+        self.send(ControlCommand::Order(OrderRequest::GlobalCancel))
     }
 
     /// Request next valid order ID. Matches `reqIds` in C++.
@@ -162,7 +165,7 @@ impl EClient {
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::Open, &self.shared) {
             return;
         }
-        self.answer_open_orders(wrapper);
+        self.answer_open_orders(wrapper, crate::client_core::OpenOrdersRequest::Open);
     }
 
     /// Request all open orders. Matches `reqAllOpenOrders` in C++.
@@ -173,17 +176,24 @@ impl EClient {
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::All, &self.shared) {
             return;
         }
-        self.answer_open_orders(wrapper);
+        self.answer_open_orders(wrapper, crate::client_core::OpenOrdersRequest::All);
     }
 
-    /// The open orders, then the end of the list.
-    pub(crate) fn answer_open_orders(&self, wrapper: &mut impl Wrapper) {
-        for (order_id, tracked) in self.core.collect_open_orders(&self.shared) {
+    /// The open orders, each with its status, then the end of the list
+    /// (`jextend.dL.b(pe, int, String, String, String)@41-46`: OPEN_ORDER
+    /// then ORDER_STATUS).
+    pub(crate) fn answer_open_orders(&self, wrapper: &mut impl Wrapper, request: crate::client_core::OpenOrdersRequest) {
+        for (order_id, tracked, client_id) in self.core.open_orders_listing(&self.shared, request) {
             let state = crate::api::types::OrderState {
-                status: tracked.status,
+                status: tracked.status.clone(),
                 ..Default::default()
             };
             wrapper.open_order(order_id, &tracked.contract, &tracked.order, &state);
+            let why_held = self.core.why_held(&tracked.status, &tracked.order.order_type, tracked.order.parent_id);
+            wrapper.order_status(
+                order_id, &tracked.status, tracked.filled, tracked.remaining, 0.0,
+                tracked.order.perm_id, tracked.order.parent_id, tracked.last_fill_price, client_id, &why_held, 0.0,
+            );
         }
         wrapper.open_order_end();
     }

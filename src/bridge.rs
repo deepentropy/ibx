@@ -55,6 +55,10 @@ pub struct FillExec {
     /// A report of a combo order (ibx#470): the contract its execution
     /// shows, and for a leg report the leg's own execution values.
     pub combo: Option<Box<ComboExec>>,
+    /// An execution of an order of another API client: kept for
+    /// `req_executions`, with no live callback and no commission report
+    /// (`jextend.ba.a(dq, aQ)`: the reports go to the order's client).
+    pub other_client: bool,
 }
 
 /// The execution of a combo report (ibx#470): the reference shows the
@@ -531,9 +535,6 @@ pub struct OrderState {
     /// Notices of a server report given after the status of that report:
     /// the reject 201 and the cancel 202 (ibx#486).
     order_notices: Mutex<Vec<(i64, i64, String)>>,
-    /// Orders whose cancel the reference answers from its API pending map
-    /// with the ApiCancelled status (ibx#487).
-    api_cancelled: Mutex<Vec<OrderId>>,
     what_if_responses: Mutex<Vec<WhatIfResponse>>,
     completed_orders: Mutex<Vec<CompletedOrder>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
@@ -546,6 +547,14 @@ pub struct OrderState {
     /// Orders the engine dropped with no status for the client: filled
     /// while the auth link was lost (ibx#251).
     forgotten_orders: Mutex<Vec<OrderId>>,
+    /// The API order id of an order of another session whose id differs
+    /// from the engine's key: the report's 6121, 0 when it has none.
+    api_order_ids: Mutex<HashMap<OrderId, OrderId>>,
+    /// The place of each order in the reference's book (insertion number)
+    /// and the most orders the book held, for the order of the open-order
+    /// listings (`jclient.jv.w()`).
+    book_seqs: Mutex<HashMap<OrderId, u64>>,
+    book_peak: std::sync::atomic::AtomicUsize,
 }
 
 impl OrderState {
@@ -559,13 +568,39 @@ impl OrderState {
             cancel_rejects: Mutex::new(Vec::with_capacity(16)),
             order_errors: Mutex::new(Vec::new()),
             order_notices: Mutex::new(Vec::new()),
-            api_cancelled: Mutex::new(Vec::new()),
             what_if_responses: Mutex::new(Vec::with_capacity(8)),
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             order_cache: Mutex::new(HashMap::new()),
             open_orders_held: AtomicBool::new(false),
             forgotten_orders: Mutex::new(Vec::new()),
+            api_order_ids: Mutex::new(HashMap::new()),
+            book_seqs: Mutex::new(HashMap::new()),
+            book_peak: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// The API order id the client sees for an order: the engine's key,
+    /// or for an order of another session the id its report gave (0 when
+    /// none), as the reference shows it.
+    pub fn api_order_id(&self, order_id: OrderId) -> OrderId {
+        self.api_order_ids.lock().unwrap().get(&order_id).copied().unwrap_or(order_id)
+    }
+
+    #[doc(hidden)] pub fn set_api_order_id(&self, order_id: OrderId, api_id: OrderId) {
+        self.api_order_ids.lock().unwrap().insert(order_id, api_id);
+    }
+
+    /// An order's place in the reference's book, and the most orders the
+    /// book held (engine side).
+    #[doc(hidden)] pub fn note_book(&self, order_id: OrderId, seq: u64, peak: usize) {
+        self.book_seqs.lock().unwrap().insert(order_id, seq);
+        self.book_peak.store(peak, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The book place of an order, and the most orders the book held.
+    pub fn book_place(&self, order_id: OrderId) -> (Option<u64>, usize) {
+        (self.book_seqs.lock().unwrap().get(&order_id).copied(),
+            self.book_peak.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Hold the open-order requests (`true`, at the logon or when the auth
@@ -616,11 +651,6 @@ impl OrderState {
     /// The notices to give after the order statuses (ibx#486).
     pub fn drain_order_notices(&self) -> Vec<(i64, i64, String)> {
         self.order_notices.lock().unwrap().drain(..).collect()
-    }
-
-    /// The orders cancelled while in the API pending map (ibx#487).
-    pub fn drain_api_cancelled(&self) -> Vec<OrderId> {
-        self.api_cancelled.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_what_if_responses(&self) -> Vec<WhatIfResponse> {
@@ -717,11 +747,6 @@ impl OrderState {
         self.order_notices.lock().unwrap().push((order_id, code, message));
     }
 
-    /// A cancel of an order still in the API pending map (ibx#487).
-    #[doc(hidden)] pub fn push_api_cancelled(&self, order_id: OrderId) {
-        self.api_cancelled.lock().unwrap().push(order_id);
-    }
-
     #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {
         self.what_if_responses.lock().unwrap().push(response);
     }
@@ -802,6 +827,12 @@ pub struct ReferenceState {
     soft_dollar_tiers: Mutex<Vec<crate::types::SoftDollarTier>>,
     family_codes: Mutex<Vec<crate::types::FamilyCode>>,
     white_branding_id: Mutex<String>,
+    /// The account ids of the logon's account list (6095), in logon order
+    /// (ibx#420).
+    managed_accounts: Mutex<Vec<String>>,
+    /// The accounts whose application is not approved (8092 of the last
+    /// logon reply or logon update, ibx#421).
+    pending_accounts: Mutex<Vec<String>>,
     /// FA session, from CCP logon tag 6108 (ibx#481).
     fa_session: std::sync::atomic::AtomicBool,
     /// The logon's super user and omnibus flags (ibx#417): either one lets
@@ -885,6 +916,8 @@ impl ReferenceState {
             soft_dollar_tiers: Mutex::new(Vec::new()),
             family_codes: Mutex::new(Vec::new()),
             white_branding_id: Mutex::new(String::new()),
+            managed_accounts: Mutex::new(Vec::new()),
+            pending_accounts: Mutex::new(Vec::new()),
             fa_session: std::sync::atomic::AtomicBool::new(false),
             super_user: AtomicBool::new(false),
             omnibus: AtomicBool::new(false),
@@ -1206,6 +1239,37 @@ impl ReferenceState {
         self.white_branding_id.lock().unwrap().clone()
     }
 
+    /// The account ids of the logon's account list, in logon order
+    /// (ibx#420).
+    pub fn managed_accounts(&self) -> Vec<String> {
+        self.managed_accounts.lock().unwrap().clone()
+    }
+
+    /// The text of the managed accounts callback (ibx#420): every account
+    /// of the logon's list, comma separated; `logon_account` when the
+    /// logon had no list.
+    pub fn managed_accounts_text(&self, logon_account: &str) -> String {
+        let accounts = self.managed_accounts.lock().unwrap();
+        if accounts.is_empty() {
+            logon_account.to_string()
+        } else {
+            crate::control::logon::managed_accounts_text(&accounts)
+        }
+    }
+
+    /// Whether `account`'s application is not approved yet (8092,
+    /// ibx#421; `jextend.bi.g(String)`).
+    pub fn account_pending(&self, account: &str) -> bool {
+        self.pending_accounts.lock().unwrap().iter().any(|a| a == account)
+    }
+
+    /// The accounts of the logon's list whose application is not
+    /// approved, in list order (ibx#421).
+    pub fn pending_managed_accounts(&self) -> Vec<String> {
+        let pending = self.pending_accounts.lock().unwrap();
+        self.managed_accounts.lock().unwrap().iter().filter(|a| pending.contains(a)).cloned().collect()
+    }
+
     /// True when the logon says this is an FA session (tag 6108, ibx#481).
     pub fn fa_session(&self) -> bool {
         self.fa_session.load(std::sync::atomic::Ordering::Relaxed)
@@ -1304,6 +1368,14 @@ impl ReferenceState {
         *self.white_branding_id.lock().unwrap() = id;
     }
 
+    #[doc(hidden)] pub fn set_managed_accounts(&self, accounts: Vec<String>) {
+        *self.managed_accounts.lock().unwrap() = accounts;
+    }
+
+    #[doc(hidden)] pub fn set_pending_accounts(&self, accounts: Vec<String>) {
+        *self.pending_accounts.lock().unwrap() = accounts;
+    }
+
     /// The account's feature list from the account config (6542), None
     /// until the config is known (ibx#425).
     pub fn account_features(&self) -> Option<Vec<String>> {
@@ -1400,8 +1472,12 @@ impl ReferenceState {
 
     /// The refusal of an algo order by the algo definitions the server
     /// sent (ibx#263); None when it passes or no definition came yet.
-    pub fn algo_refusal(&self, algorithm: &str, values: &[(&str, &str)], overnight: bool) -> Option<(i64, String)> {
-        crate::control::algo::refusal(&self.algo_definitions.lock().unwrap(), algorithm, values, overnight)
+    /// The warnings 2174 of the time parameters with no zone go to
+    /// `warnings`.
+    pub fn algo_refusal(&self, algorithm: &str, values: &[(&str, &str)], overnight: bool,
+        warnings: &mut Vec<(i64, String)>) -> Option<(i64, String)>
+    {
+        crate::control::algo::check(&self.algo_definitions.lock().unwrap(), algorithm, values, overnight, warnings)
     }
 
     /// Keep one algo definition answer (ibx#263).

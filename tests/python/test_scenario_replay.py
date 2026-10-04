@@ -184,6 +184,10 @@ class Driver:
             c.cancel_historical_data(rid)
         elif name == "REQ_POSITIONS":
             c.req_positions()
+        elif name == "REQ_ALL_OPEN_ORDERS":
+            c.req_all_open_orders()
+        elif name == "REQ_GLOBAL_CANCEL":
+            c.req_global_cancel()
         elif name == "CANCEL_POSITIONS":
             c.cancel_positions()
         else:
@@ -243,6 +247,25 @@ def test_oca_group_and_the_refused_second_cancel():
 def test_cancel_of_an_unknown_order():
     out = replay("20260926/cancel_unknown", compare=["order"])
     assert assert_same(out)[0].startswith("error|")
+
+
+# Orders of client 0 of earlier sessions known from the logon replay
+# (01/10/2026, paper), then client 193: reqAllOpenOrders lists them in the
+# book's order (order id 0, client 0), reqGlobalCancel sends the 8 cancels
+# tagged ALL in that order and gives client 193 nothing of their reports, as
+# the Rust test (tests/scenario_replay.rs).
+def test_global_cancel_of_orders_of_earlier_sessions():
+    out = replay("20261001/global_cancel_replayed", compare=["order"])
+    assert out["frames_compared"] == 8
+    assert len(assert_same(out)) == 18
+
+
+# A combo directed to ARCA with no definition (26/09/2026): 200, then its
+# cancel gives orderStatus ApiCancelled (the order id stays pending).
+def test_directed_combo_without_definition_then_cancel():
+    out = replay("20260926b/i105_combo_directed", compare=["order"])
+    theirs = assert_same(out)
+    assert theirs[-1].startswith("orderStatus|") and "|ApiCancelled|" in theirs[-1]
 
 
 # A SMART combo bought and sold (30/09/2026, ibx#474, ibx#471): the fills of

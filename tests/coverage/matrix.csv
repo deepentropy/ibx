@@ -682,7 +682,7 @@ error,154,Orders cannot be transmitted for a halted security.,no test
 error,158,You must specify an offset amount or a percent offset value.,no test
 error,159,The percent offset value must be between 0% and 100%,no test
 error,160,The size value cannot be zero,no test
-error,161,Cancel attempted when order is not in a cancellable state. Order permId =,no test
+error,161,Cancel attempted when order is not in a cancellable state. Order permId =,src/engine/hot_loop/order_builder.rs::global_cancel_refuses_an_order_with_a_pending_cancel
 error,162,Historical Market Data Service error message,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::a_negative_request_id_round_trips_through_the_engine_queues ; src/engine/hot_loop/hmds.rs::bid_ask_each_failed_leg_reports_its_own_error_and_no_end ; src/engine/hot_loop/hmds.rs::query_error_releases_head_timestamp_without_sentinel
 error,163,n/a,no test
 error,165,Historical Market Data Service query message,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways
@@ -1066,7 +1066,7 @@ error,10141,Paper trading disclaimer must first be accepted for API connection.,
 error,10142,Real paper-trading has been rejected.,no test
 error,10144,Trading %s for a Model is not supported.,no test
 error,10145,No algorithm is selected. Please select a valid algorithm strategy from the list.,no test
-error,10147,OrderId %s that needs to be cancelled is not found.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/order_builder.rs::cancel_of_an_unknown_order_is_refused_with_10147 ; src/golden/orders.rs::algo_scenario_orders
+error,10147,OrderId %s that needs to be cancelled is not found.,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/order_builder.rs::cancel_of_an_unknown_order_is_refused_with_10147 ; src/engine/hot_loop/order_builder.rs::cancel_of_an_order_of_another_client_is_refused_with_10147 ; src/golden/orders.rs::algo_scenario_orders
 error,10148,"OrderId %s that needs to be cancelled can not be cancelled, state: %s.",tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/engine/hot_loop/order_builder.rs::cancel_of_an_order_with_a_pending_cancel_is_refused_with_10148 ; src/golden/orders.rs::oca_group_orders_and_the_refused_second_cancel
 error,10149,Invalid order id: %s,tests/gw_catalog/errors.rs::every_error_ibx_raises_is_the_gateways ; src/api/client/tests.rs::place_order_with_id_zero_is_refused_with_10149
 error,10150,Child orders stack is too big. New child orders can't be added.,no test
@@ -1494,7 +1494,8 @@ order_request,SubmitWhatIf,,tests/gw_catalog/writers.rs::every_order_request_var
 order_request,SubmitLimitFractional,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/context.rs::submit_limit_fractional_drains_correctly ; src/engine/hot_loop/order_builder.rs::fractional_quantity_is_refused_with_10243
 order_request,SubmitAdjustableStop,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_adjustable_trail_carries_trailing_amount_and_unit ; src/api/client/tests.rs::place_order_adjustable_trail_percent_unit_passes_through ; src/engine/context.rs::submit_adjustable_stop_drains_correctly
 order_request,Cancel,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::cancel_order_sends_cancel_command ; src/api/client/tests.rs::cancel_during_modify_no_panic ; src/api/client/tests.rs::negative_ids_round_trip
-order_request,CancelAll,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::req_global_cancel_sends_cancel_all_for_each_instrument ; src/engine/context.rs::cancel_all_drains_correctly ; src/engine/hot_loop/ccp.rs::recovered_order_is_inside_the_global_cancel_range
+order_request,CancelAll,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/engine/context.rs::cancel_all_drains_correctly ; src/engine/hot_loop/ccp.rs::recovered_order_is_inside_the_global_cancel_range
+order_request,GlobalCancel,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::req_global_cancel_sends_one_global_cancel ; src/engine/hot_loop/order_builder.rs::global_cancel_reaches_every_order_of_the_book ; src/engine/hot_loop/order_builder.rs::global_cancel_goes_in_the_books_order ; tests/scenario_replay.rs::global_cancel_of_orders_of_earlier_sessions
 order_request,Modify,,tests/gw_catalog/writers.rs::every_order_request_variant_follows_the_gateway_writers ; src/api/client/tests.rs::place_order_type_aliases ; src/api/client/tests.rs::what_if_on_a_working_order_id_is_a_preview_not_a_modify ; src/api/client/tests.rs::modify_limit_order_price_via_resubmit
 local_rule,"110 dx.a(dy,boolean)@1961",110 build: the absolute price is off the tick of the contract's market rule (server data),src/api/client/tests.rs::algo_refusals_of_20261002_through_place_order ; src/engine/hot_loop/order_builder.rs::a_price_off_the_grid_is_refused_with_110
 local_rule,"145 algo.a.a(pe,OrderCreator)@212",145 build: an algo parameter value is not one of the legal strings of the algo definition (server data); text = the bad value,src/control/algo.rs::refusals_follow_the_definitions
@@ -2039,7 +2040,7 @@ eclient,token_type,,src/api/client/tests.rs::token_type_default_is_empty
 eclient,place_order,,tests/scenario_replay.rs::lmt_order_then_cancel ; src/api/client/tests.rs::place_order_market ; src/api/client/tests.rs::place_order_limit
 eclient,cancel_order,,tests/scenario_replay.rs::lmt_order_then_cancel ; src/api/client/tests.rs::cancel_order_sends_cancel_command ; src/api/client/tests.rs::cancel_during_modify_no_panic
 eclient,cancel_order_by_perm_id,,no test
-eclient,req_global_cancel,,src/api/client/tests.rs::req_global_cancel_sends_cancel_all_for_each_instrument ; src/api/client/tests.rs::req_global_cancel_no_instruments_no_commands ; tests/error_edge_concurrency.rs::req_global_cancel_no_instruments_no_commands
+eclient,req_global_cancel,,src/api/client/tests.rs::req_global_cancel_sends_one_global_cancel ; src/api/client/tests.rs::req_global_cancel_without_contracts_still_goes ; tests/error_edge_concurrency.rs::req_global_cancel_without_contracts_still_goes ; tests/scenario_replay.rs::global_cancel_of_orders_of_earlier_sessions
 eclient,req_ids,,src/api/client/tests.rs::req_ids_calls_wrapper
 eclient,next_order_id,,src/api/client/tests.rs::next_order_id_monotonic ; tests/error_edge_concurrency.rs::concurrent_place_order_and_process_msgs
 eclient,req_open_orders,,src/api/client/tests.rs::a_forgotten_order_leaves_without_callbacks ; src/api/client/tests.rs::open_order_requests_wait_for_the_order_replay

@@ -100,6 +100,9 @@ pub struct HotLoop {
     /// Earliest instant the next HMDS reconnect attempt may spawn. `None` once
     /// retries are exhausted or HMDS is healthy.
     hmds_next_attempt_at: Option<Instant>,
+    /// The timing of the market data resubscription after a data
+    /// permission change (ibx#421).
+    permission_change: crate::control::logon::PermissionChange,
 }
 
 /// Maximum HMDS reconnect attempts before giving up (ibx#187).
@@ -140,6 +143,7 @@ impl HotLoop {
             hmds_next_attempt_at: None,
             links: None,
             farm_name: "usfarm".to_string(),
+            permission_change: Default::default(),
         }
     }
 
@@ -919,6 +923,78 @@ impl HotLoop {
             self.send_farm_messages(msgs);
         }
         self.hmds.sweep_head_timestamps(&self.shared);
+        self.service_logon_updates(Instant::now());
+    }
+
+    /// What a logon update or a relogin left for the hot loop (ibx#421,
+    /// ibx#276): the data permission change and its market data
+    /// resubscription, and the SSL farm list.
+    pub(crate) fn service_logon_updates(&mut self, now: Instant) {
+        if std::mem::take(&mut self.ccp.permissions_changed) && self.permission_change.change(now) {
+            // The reference's API access manager: a warning to the API
+            // clients when a request was refused for an API subscription
+            // since the last change (`jextend.F.onPermissionsChanged()`).
+            if self.farm.take_refused_api_subscriptions() {
+                use crate::control::logon::{MARKET_DATA_SUBSCRIPTION_CHANGED, MARKET_DATA_SUBSCRIPTION_CHANGED_CODE};
+                log::info!("Market data subscription has been changed: warning {}", MARKET_DATA_SUBSCRIPTION_CHANGED_CODE);
+                self.shared.push_connection_notice(MARKET_DATA_SUBSCRIPTION_CHANGED_CODE, MARKET_DATA_SUBSCRIPTION_CHANGED.to_string());
+            }
+        }
+        if self.permission_change.take_due(now) {
+            self.resubscribe_market_data();
+        }
+        if let Some(list) = self.ccp.ssl_farms_update.take() {
+            let old = self.reconnect_auth.as_ref().map(|a| a.ssl_farms.clone()).unwrap_or_default();
+            log::info!("Unsolicited logon [oldUseSslFarmList={},useSslFarmList={}].", old, list);
+            if let Some(auth) = self.reconnect_auth.as_mut() {
+                auth.ssl_farms = list.clone();
+            }
+            if !old.is_empty() && list.is_empty() {
+                log::info!("Disconnecting/reconnecting farms without SSL...");
+                self.reconnect_all_farms();
+            }
+        }
+    }
+
+    /// The reference's market data resubscription after a data permission
+    /// change (ibx#421, `jclient.ij.r()`): "Desubscribing all farm mkt
+    /// data", then every streaming subscription and news entry asked again
+    /// on new ids.
+    fn resubscribe_market_data(&mut self) {
+        log::info!("Resubscribing market data. desubscribe=true");
+        log::info!("Desubscribing all farm mkt data");
+        let cancels = self.farm.desubscribe_all();
+        self.send_farm_messages(cancels);
+        self.resend_unsent_subscriptions();
+        let mut msgs = Vec::new();
+        for farm in self.farm.news_farms_to_resend() {
+            msgs.extend(self.farm.resend_news(farm));
+        }
+        self.send_farm_messages(msgs);
+    }
+
+    /// Every farm connection is closed and opened again (ibx#276,
+    /// `jmdclient.aP.j()`): the market data farm, the historical data farm
+    /// and the farms opened on demand; their reconnects follow.
+    fn reconnect_all_farms(&mut self) {
+        if let Some(conn) = self.farm_conn.as_mut() {
+            conn.shutdown();
+        }
+        if !self.farm.disconnected {
+            self.farm.handle_disconnect(&mut self.context, &self.event_tx);
+        }
+        if let Some(conn) = self.hmds_conn.as_mut() {
+            conn.shutdown();
+        }
+        self.hmds.disconnected = true;
+        self.hmds_conn = None;
+        let ids: Vec<pool::FarmId> = self.pool.farms.iter().filter(|f| f.conn.is_some()).map(|f| f.id).collect();
+        for id in ids {
+            if let Some(conn) = self.pool.get_mut(id).and_then(|f| f.conn.as_mut()) {
+                conn.shutdown();
+            }
+            self.pool_farm_lost(id);
+        }
     }
 
     /// A market data subscription without a conId (ibx#278): the contract
@@ -2013,10 +2089,11 @@ impl HotLoop {
         let spawned = std::thread::Builder::new()
             .name(format!("{}-connect", name))
             .spawn(move || {
+                let link = auth.farm_link(&name, crate::gateway::FarmService::of_slot(slot));
                 let result = crate::gateway::connect_farm_opts(
                     &host, &name, &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key, &auth.hw_info, &auth.encoded, slot, false,
-                    !auth.ns_secure_refused,
+                    link,
                 ).map(|(conn, _)| conn);
                 let _ = tx.send(result);
             });
@@ -2148,11 +2225,12 @@ impl HotLoop {
         std::thread::Builder::new()
             .name(format!("farm-reconnect-{}", attempt))
             .spawn(move || {
+                let link = auth.farm_link(&farm_name, crate::gateway::FarmService::MarketData);
                 let result = crate::gateway::connect_farm_opts(
                     &farm_host, &farm_name,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
-                    &auth.hw_info, &auth.encoded, 18, true, !auth.ns_secure_refused,
+                    &auth.hw_info, &auth.encoded, 18, true, link,
                 ).map(|(conn, _)| conn);
                 let _ = tx.send(result);
             })
@@ -2227,12 +2305,12 @@ impl HotLoop {
         match rx.try_recv() {
             Ok(Ok(CcpReconnect { conn, session_epoch, ns_secure_refused, logon })) => {
                 log::info!("CCP auto-reconnect succeeded (attempt {})", self.ccp_reconnect_attempt);
-                // Every logon reply sets the clock offset and the feature
-                // tokens; a changed data permission stamp is logged
-                // (ibx#421).
+                // Every logon reply sets the clock offset, the feature
+                // tokens and the pending accounts; a changed data
+                // permission stamp runs the permission change (ibx#421).
                 crate::gateway::apply_logon_values(&logon, &self.shared);
-                if let Some(stamp) = &logon.data_permissions {
-                    self.ccp.data_permissions_seen(stamp);
+                if self.ccp.relogin_data_permissions(logon.data_permissions.as_deref()) {
+                    self.ccp.permissions_changed = true;
                 }
                 // The next reconnect resumes this server session (ibx#422).
                 if let (Some(epoch), Some(auth)) = (session_epoch, self.reconnect_auth.as_mut()) {
@@ -2297,11 +2375,12 @@ impl HotLoop {
         std::thread::Builder::new()
             .name(format!("hmds-reconnect-{}", attempt))
             .spawn(move || {
+                let link = auth.farm_link(&auth.hmds_farm, crate::gateway::FarmService::Historical);
                 let result = crate::gateway::connect_farm_opts(
                     &auth.hmds_host, &auth.hmds_farm,
                     &auth.username, &auth.password, auth.paper,
                     &auth.server_session_id, &auth.session_key,
-                    &auth.hw_info, &auth.encoded, 17, true, !auth.ns_secure_refused,
+                    &auth.hw_info, &auth.encoded, 17, true, link,
                 ).map(|(conn, _)| conn);
                 let _ = tx.send(result);
             })
@@ -3474,6 +3553,8 @@ mod tests {
             farm_name: String::new(),
             session_epoch: String::new(),
             ns_secure_refused: false,
+            use_ssl: true,
+            ssl_farms: String::new(),
         }
     }
 
@@ -4306,6 +4387,92 @@ mod tests {
         let (c3, mut s3) = socket_pair();
         engine.reconnect_farm(Connection::new_mem(c3));
         assert_eq!(farm_messages_sent(&mut s3).len(), 2);
+    }
+
+    // ibx#421: a logon update with a new data permission stamp makes the
+    // reference resubscribe its market data (`jclient.ij`): every
+    // streaming top of book and news entry cancelled, then asked again on
+    // new ids, at once the first time, then at most every 30 s; a change
+    // within 1 s of the last one is ignored. A refusal for an API
+    // subscription since the last change gives warning 2134 with id -1.
+    #[test]
+    fn data_permission_change_resubscribes_market_data() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        let (c1, mut s1) = socket_pair();
+        engine.farm_conn = Some(Connection::new_mem(c1));
+        let aapl = engine.context.market.register(265598);
+        engine.farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "", aapl, 0,
+            &mut engine.farm_conn, &mut engine.hb);
+        let first = farm_messages_sent(&mut s1);
+        assert_eq!(first.len(), 1);
+        engine.ccp.data_permissions = Some("1788356313".into());
+        engine.farm.note_refused_api_subscription_for_test("12,0,none");
+        let update = |engine: &mut HotLoop, stamp: &str| {
+            let frame = format!("35=A\x0152=20261002-06:20:00\x016764={}\x01", stamp);
+            let mut hb = HeartbeatState::new();
+            engine.ccp.process_ccp_message(frame.as_bytes(), &mut None, &mut engine.context, &engine.shared,
+                &None, &mut hb, "DU1");
+        };
+        let t = Instant::now();
+        update(&mut engine, "1788999999");
+        engine.service_logon_updates(t);
+        let sent = farm_messages_sent(&mut s1);
+        assert_eq!(sent.len(), 2, "{:?}", sent);
+        assert!(sent[0].contains("263=2|") && sent[0].contains("262=1|") && sent[0].contains("262=2|"), "cancel: {}", sent[0]);
+        assert!(sent[1].contains("263=1|") && sent[1].contains("262=3|") && sent[1].contains("262=4|"), "new ids: {}", sent[1]);
+        assert_eq!(shared.drain_connection_notices(), [(2134, "Market Data subscription has been changed.".to_string())]);
+
+        // The same stamp: no change. A new one within 1 s: ignored.
+        update(&mut engine, "1788999999");
+        engine.service_logon_updates(t + Duration::from_millis(500));
+        update(&mut engine, "1789000000");
+        engine.service_logon_updates(t + Duration::from_millis(900));
+        assert!(farm_messages_sent(&mut s1).is_empty());
+        // A change 10 s later runs 30 s after the last resubscription,
+        // with no warning (no refusal since the last change).
+        update(&mut engine, "1789000001");
+        engine.service_logon_updates(t + Duration::from_secs(10));
+        engine.service_logon_updates(t + Duration::from_secs(29));
+        assert!(farm_messages_sent(&mut s1).is_empty());
+        engine.service_logon_updates(t + Duration::from_secs(30));
+        assert_eq!(farm_messages_sent(&mut s1).len(), 2);
+        assert!(shared.drain_connection_notices().is_empty());
+    }
+
+    // ibx#421: a relogin's stamp is a change only when the old and the
+    // new one are both set and differ (`jclient.gi.a(jfix.dk, jfix.bb,
+    // LogonType)@297-388`).
+    #[test]
+    fn relogin_data_permission_rule() {
+        let mut ccp = CcpState::new();
+        assert!(!ccp.relogin_data_permissions(Some("1")), "no old stamp");
+        assert!(!ccp.relogin_data_permissions(Some("1")));
+        assert!(ccp.relogin_data_permissions(Some("2")));
+        assert!(!ccp.relogin_data_permissions(None), "no new stamp");
+        assert_eq!(ccp.data_permissions, None, "kept even unset");
+        assert!(!ccp.relogin_data_permissions(Some("3")));
+    }
+
+    // ibx#276: a logon update whose SSL farm list goes from a list to
+    // nothing closes every farm, to open them again without TLS.
+    #[test]
+    fn ssl_farm_list_emptied_reconnects_the_farms() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared, None, None);
+        let (c1, _s1) = socket_pair();
+        engine.farm_conn = Some(Connection::new_mem(c1));
+        let mut auth = reconnect_auth_with_host("gw.example");
+        auth.ssl_farms = "usfarm".into();
+        engine.set_reconnect_auth(auth);
+        engine.ccp.ssl_farms_update = Some("usfarm;ushmds".into());
+        engine.service_logon_updates(Instant::now());
+        assert!(!engine.farm.disconnected, "a list replaced by a list");
+        assert_eq!(engine.reconnect_auth.as_ref().unwrap().ssl_farms, "usfarm;ushmds");
+        engine.ccp.ssl_farms_update = Some(String::new());
+        engine.service_logon_updates(Instant::now());
+        assert!(engine.farm.disconnected, "farms closed to reconnect without TLS");
+        assert_eq!(engine.reconnect_auth.as_ref().unwrap().ssl_farms, "");
     }
 
     #[test]

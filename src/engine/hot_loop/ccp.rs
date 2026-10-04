@@ -183,6 +183,53 @@ fn fill_exec_of(parsed: &std::collections::HashMap<u32, String>, exec_id: &str) 
         order_ref: tag(6010).cloned().unwrap_or_default(),
         last_liquidity: tag(851).and_then(|s| s.parse().ok()).unwrap_or(0),
         combo: None,
+        other_client: false,
+    }
+}
+
+/// The permId of a report's order: the id part of its ClOrdID (11), as
+/// the reference gives it (`pe.aY().a()`, the long of `jfix.cx`; captured
+/// 01/10/2026: openOrder permId 1790865742870063 for 11=1790865742870063.0).
+/// 0 for none.
+fn perm_id_of(parsed: &std::collections::HashMap<u32, String>) -> i64 {
+    parsed.get(&11)
+        .map(|s| s.strip_prefix('C').unwrap_or(s))
+        .and_then(|s| s.split('.').next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The API order id a report gives (6121), 0 when it gives none
+/// (`jexec.fq.k()`: absent reads as the int maximum, shown as 0).
+fn report_api_order_id(parsed: &std::collections::HashMap<u32, String>) -> OrderId {
+    parsed.get(&6121).and_then(|s| s.parse::<OrderId>().ok())
+        .filter(|&id| id != i32::MAX as OrderId)
+        .unwrap_or(0)
+}
+
+/// The execution of a fill report, as stored for `req_executions`.
+fn report_execution(
+    parsed: &std::collections::HashMap<u32, String>,
+    exec_id: &str,
+    side: Side,
+    last_shares: Qty,
+    last_px: f64,
+    account_id: &str,
+    order_id: OrderId,
+) -> api::Execution {
+    api::Execution {
+        exec_id: exec_id.to_string(),
+        acct_number: parsed.get(&1).filter(|s| !s.is_empty()).cloned()
+            .unwrap_or_else(|| account_id.to_string()),
+        side: match side { Side::Buy => "BOT", Side::Sell | Side::ShortSell => "SLD" }.to_string(),
+        shares: last_shares as f64 / QTY_SCALE as f64,
+        price: last_px,
+        perm_id: perm_id_of(parsed),
+        order_id,
+        cum_qty: parsed.get(&14).and_then(|s| parse_qty(s)).unwrap_or(0) as f64 / QTY_SCALE as f64,
+        avg_price: parsed.get(&6).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        last_liquidity: parsed.get(&851).and_then(|s| s.parse().ok()).unwrap_or(0),
+        ..Default::default()
     }
 }
 
@@ -206,20 +253,6 @@ fn parent_order_id(parsed: &std::collections::HashMap<u32, String>, context: &Co
     context.last_clord.iter()
         .find(|(_, clord)| same_id(clord))
         .map_or(id, |(&order_id, _)| order_id)
-}
-
-fn perm_id_from_fix_order_id(s: &str) -> i64 {
-    // Hash only the stable prefix: "00cf16ed.000225ed.69ca0941" (drop ".0001")
-    let stable = match s.rmatch_indices('.').next() {
-        Some((idx, _)) if s[..idx].contains('.') => &s[..idx],
-        _ => s, // no dots or only one segment — hash entire string
-    };
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in stable.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    (h >> 1) as i64
 }
 
 pub(crate) struct CcpState {
@@ -293,6 +326,12 @@ pub(crate) struct CcpState {
     pub(crate) data_permissions: Option<String>,
     /// The feature list of the last logon update has DENYAPI (ibx#421).
     pub(crate) deny_api: bool,
+    /// A logon update or a relogin changed the data permission stamp: the
+    /// hot loop runs the reference's permission change (ibx#421).
+    pub(crate) permissions_changed: bool,
+    /// The SSL farm list (8449) of the last logon update, for the hot
+    /// loop (ibx#276); None when no update came since it was taken.
+    pub(crate) ssl_farms_update: Option<String>,
     /// HMAC signing key for XML-carrying CCP messages (selective signing).
     pub(crate) ccp_sign_key: Vec<u8>,
     /// HMAC signing IV — advances only for signed messages, independent of unsigned ones.
@@ -671,6 +710,8 @@ impl CcpState {
             matching_acked: Vec::new(),
             data_permissions: None,
             deny_api: false,
+            permissions_changed: false,
+            ssl_farms_update: None,
             ccp_sign_key: Vec::new(),
             ccp_sign_iv: std::sync::Mutex::new(Vec::new()),
             pending_schedule_pair: Vec::new(),
@@ -1018,12 +1059,15 @@ impl CcpState {
     /// A logon message on the logged-on auth connection (ibx#421). With a
     /// session epoch (6059) it is a solicited logon, which the reference
     /// ignores with a warning. Without one it is a logon update
-    /// (`jclient.gi.j(jfix.dk)`): a feature list (6542) that turns DENYAPI
-    /// on stops the API, as the reference stops its API connections
-    /// (`jfix.s.c(jfix.dk)@587-620`, `jclient.gi.dT()`); a changed data
-    /// permission stamp (6764) is kept and logged. The reference then
-    /// resubscribes its market data; what that sends was not read and no
-    /// update is captured, so ibx does not resubscribe.
+    /// (`jclient.gi.j(jfix.dk)`), whose steps run in the reference's order:
+    /// the pending accounts (8092, when present, `@61-76`); the feature
+    /// list (6542), where DENYAPI turning on stops the API, as the
+    /// reference stops its API connections (`jfix.s.c(jfix.dk)@587-620`,
+    /// `jclient.gi.dT()`); the private label misc URLs (6321, when not
+    /// empty, `jfix.d0.a(jfix.dk)`, `@171-231`); a changed data permission
+    /// stamp (6764, `@235-308`), which makes the hot loop run the
+    /// permission change; the SSL farm list (8449, `@427-506`), replaced
+    /// by the update's (empty when absent).
     pub(crate) fn handle_logon_update(
         &mut self,
         parsed: &std::collections::HashMap<u32, String>,
@@ -1035,6 +1079,10 @@ impl CcpState {
             return;
         }
         log::info!("Handling logon update");
+        if let Some(v) = parsed.get(&crate::gateway::TAG_PENDING_ACCOUNTS) {
+            log::debug!("In AccountManager.updatePendingAccounts(): tag={} val=[{}]", crate::gateway::TAG_PENDING_ACCOUNTS, v);
+            shared.reference.set_pending_accounts(crate::control::logon::pending_accounts(v));
+        }
         if let Some(features) = parsed.get(&6542) {
             let deny_api = crate::control::logon::ApiFeatures::parse(features).deny_api;
             log::info!("Updated Enabled features: {}", features);
@@ -1047,14 +1095,24 @@ impl CcpState {
                 }
             }
         }
-        if let Some(stamp) = parsed.get(&crate::gateway::TAG_DATA_PERMISSIONS).filter(|v| !v.is_empty()) {
-            self.data_permissions_seen(stamp);
+        if let Some(urls) = parsed.get(&crate::gateway::TAG_MISC_URLS).filter(|v| !v.is_empty()) {
+            log::info!("Private label misc URLs updated ({} bytes)", urls.len());
+            shared.reference.set_misc_urls(crate::gateway::parse_misc_urls(urls));
         }
+        match parsed.get(&crate::gateway::TAG_DATA_PERMISSIONS).filter(|v| !v.is_empty()) {
+            Some(stamp) => {
+                if self.data_permissions_seen(stamp) {
+                    self.permissions_changed = true;
+                }
+            }
+            None => log::info!("Data permissions are not changed"),
+        }
+        let ssl_farms = parsed.get(&crate::gateway::TAG_SSL_FARMS).cloned().unwrap_or_default();
+        self.ssl_farms_update = Some(ssl_farms);
     }
 
-    /// A data permission stamp of a logon reply or update: kept and
-    /// logged when it changed, as the reference (ibx#421). True when it
-    /// changed.
+    /// A data permission stamp of a logon update: kept and logged when it
+    /// changed, as the reference (ibx#421). True when it changed.
     pub(crate) fn data_permissions_seen(&mut self, stamp: &str) -> bool {
         if self.data_permissions.as_deref() == Some(stamp) {
             log::info!("Data permissions are not changed");
@@ -1063,6 +1121,22 @@ impl CcpState {
         self.data_permissions = Some(stamp.to_string());
         log::info!("Data permissions are changed. Market data is to be resubscribed");
         true
+    }
+
+    /// The data permission stamp of a relogin's logon reply (ibx#421): a
+    /// change only when the old and the new stamp are both set and differ;
+    /// the new one is kept in any case, even unset
+    /// (`jclient.gi.a(jfix.dk, jfix.bb, LogonType)@297-388`). True when it
+    /// changed.
+    pub(crate) fn relogin_data_permissions(&mut self, stamp: Option<&str>) -> bool {
+        let changed = matches!((self.data_permissions.as_deref(), stamp), (Some(old), Some(new)) if old != new);
+        if changed {
+            log::info!("Data permissions are changed. Market data is to be resubscribed");
+        } else {
+            log::info!("Data permissions are not changed");
+        }
+        self.data_permissions = stamp.map(String::from);
+        changed
     }
 
     /// A reply to a what-if preview (ibx#462). The gateway may first send a
@@ -1142,7 +1216,7 @@ impl CcpState {
             reject_reason: if final_reply { text(58) } else { String::new() },
             // The reference's preview openOrder has the permId of its order
             // (ibx#486, b1_462_whatif of 02/10/2026).
-            perm_id: parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0),
+            perm_id: perm_id_of(parsed),
             con_id: parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0),
         };
         let response = crate::types::WhatIfResponse {
@@ -1180,6 +1254,8 @@ impl CcpState {
         event_tx: &Option<Sender<Event>>,
         account_id: &str,
     ) {
+        // This client's id, for whose reports are given to it.
+        context.api_client_id = shared.reference.api_client_id();
         // End markers are not orders (ibx#399): the end of a trades reply
         // (it carries the request id), and the end of the order status
         // replay (wildcard order id).
@@ -1232,14 +1308,30 @@ impl CcpState {
         }).unwrap_or(0);
         let mut clord_id = context.recovered_keys.get(&server_id).copied().unwrap_or(server_id);
 
-        // Recovery insert: a 35=8 with status New/New (150=0/39=0) for an order
-        // that is NOT in this session's context is a cross-session recovery entry
-        // pushed by CCP on session establishment. Insert into context.open_orders
-        // so subsequent cancel/modify ACKs at ~line 668 can match via
-        // context.order(clord_id) and emit OrderUpdate events to the user. ibx#191.
-        let is_new_ack = parsed.get(&150).map(|s| s.as_str()) == Some("0")
-            && parsed.get(&39).map(|s| s.as_str()) == Some("0");
-        if is_new_ack && context.order(clord_id).is_none() {
+        // An order this session does not hold, reported working: an order
+        // of another session or client, put in the book so it can be
+        // cancelled, by its id or by a global cancel, and its reports reach
+        // it (ibx#191). The reference makes an order of any report of an
+        // unknown order (`jclient.pe.<init>(jexec.fq, boolean,
+        // jclient.dy)`: API order id 6121, client id 6119, ClOrdID 11); the
+        // logon replay reports an order not routed yet as 39=A (captured
+        // 01/10/2026: 8 orders of earlier sessions, 150=A 20=3 39=A), which
+        // was left out when only 150=0 39=0 was taken (paper 04/10/2026:
+        // 10147 on their cancel, nothing sent by a global cancel).
+        let replayed_status = match parsed.get(&39).map(|s| s.as_str()) {
+            Some("0" | "5") => {
+                let routed = parsed.get(&100).is_some_and(|s| !s.is_empty())
+                    || parsed.get(&198).is_some_and(|s| s != "NONE" && !s.is_empty());
+                Some(if routed { crate::types::OrderStatus::Submitted } else { crate::types::OrderStatus::PreSubmitted })
+            }
+            Some("A") => Some(crate::types::OrderStatus::PreSubmitted),
+            Some("1") => Some(crate::types::OrderStatus::PartiallyFilled),
+            Some("6" | "D") => Some(crate::types::OrderStatus::PendingCancel),
+            _ => None,
+        };
+        let replayed_status = replayed_status
+            .filter(|_| context.order(clord_id).is_none() && context.finished_status(clord_id).is_none());
+        if let Some(replayed_status) = replayed_status {
             // The API order id only names the order to the caller (ibx#466):
             // taken when no order of this session has it.
             let api_id = parsed.get(&6121).and_then(|s| s.parse::<OrderId>().ok())
@@ -1279,8 +1371,8 @@ impl CcpState {
                 None
             };
             if let Some(instrument) = instrument {
-                // req_global_cancel walks ids below this count; without it a
-                // recovered order on a new contract was never cancelled.
+                // The shared count covers the contract of the order, for the
+                // per-instrument requests that walk ids below it.
                 shared.market.set_instrument_count(context.market.count());
                 if let Some(sym) = parsed.get(&55) {
                     context.set_symbol(instrument, sym.clone());
@@ -1291,12 +1383,28 @@ impl CcpState {
                     side,
                     price: limit_price_i64,
                     qty_fixed: qty,
-                    filled_fixed: 0,
-                    status: crate::types::OrderStatus::Submitted,
+                    filled_fixed: parsed.get(&14).and_then(|s| parse_qty(s)).unwrap_or(0),
+                    status: replayed_status,
                     ord_type: ord_type_byte,
                     tif: tif_byte,
                     stop_price: stop_price_i64,
                 });
+                // Its ClOrdID version, the one the server gives: the next
+                // cancel or replace goes out under the next one.
+                let version = parsed.get(&11)
+                    .and_then(|c| c.split_once('.')).and_then(|(_, v)| v.parse::<u32>().ok()).unwrap_or(0);
+                context.modify_versions.insert(clord_id, version);
+                // Its API client (0 when the report names none, as the
+                // reference reads it).
+                if let Some(entry) = context.book.get_mut(&clord_id) {
+                    entry.owner = Some(parsed.get(&6119).and_then(|s| s.parse().ok()).unwrap_or(0));
+                }
+                // The API order id the client sees: the report's, 0 for
+                // none (captured 01/10/2026: openOrder orderId 0).
+                let api_id = report_api_order_id(parsed);
+                if api_id != clord_id {
+                    shared.orders.set_api_order_id(clord_id, api_id);
+                }
                 log::info!("CCP recovery: inserted orderId={} sym={:?} side={:?} qty={} px={}",
                     clord_id, parsed.get(&55), side, qty as f64 / QTY_SCALE as f64,
                     limit_price_i64 as f64 / PRICE_SCALE as f64);
@@ -1311,6 +1419,13 @@ impl CcpState {
                 parsed.get(&55), parsed.get(&39));
             return;
         }
+
+        // Who gets the reports of this order (`jextend.ba.d(dK)`): its client,
+        // else client 0; its errors and notices only its client
+        // (`pe.gY()`, `trader.order.bg.a`). Captured 01/10/2026: client 193
+        // got nothing of the cancel of 8 orders of client 0.
+        let delivered = context.delivered(clord_id);
+        let owned = context.owned(clord_id);
 
         // Record the ClOrdID exactly as the server reports it so subsequent
         // cancel/modify can echo back the same string. Skip reports of a
@@ -1394,6 +1509,14 @@ impl CcpState {
                 ord_status, exec_type, clord_id,
                 parsed.get(&58).map(|s| s.as_str()).unwrap_or(""),
                 parsed.get(&103).map(|s| s.as_str()).unwrap_or(""));
+        }
+
+        // The parent and OCA group the server gives for a held order, as
+        // the reference's book keeps them for its global cancel.
+        if context.order(clord_id).is_some() && (parsed.contains_key(&6107) || parsed.contains_key(&583)) {
+            let parent = parsed.contains_key(&6107).then(|| parent_order_id(parsed, context)).filter(|&p| p > 0);
+            let group = parsed.get(&583).map(String::as_str);
+            context.set_links(clord_id, parent, group);
         }
 
         // A bracket key on a report: kept for an order that has none, and
@@ -1541,7 +1664,7 @@ impl CcpState {
         // "Order Message:\nBUY 1 AAPL NASDAQ.NMS\nWarning: your order will
         // not be placed at the exchange until ..."). The other types (PRICECAP
         // in the capture) did not reach the API.
-        if parsed.get(&6360).map(|s| s.as_str()) == Some("TIME") && context.order(clord_id).is_some() {
+        if parsed.get(&6360).map(|s| s.as_str()) == Some("TIME") && context.order(clord_id).is_some() && owned {
             if let Some(text) = parsed.get(&6361).filter(|t| !t.is_empty()) {
                 if self.order_messages_sent.insert((clord_id, text.clone())) {
                     let message = order_message_399(parsed, text, context, clord_id, shared, combo_view.as_ref().map(|v| &v.contract));
@@ -1644,7 +1767,7 @@ impl CcpState {
 
         if report_status && !had_fill {
             if let Some(order) = context.order(clord_id).copied() {
-                let perm_id: i64 = parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
+                let perm_id: i64 = perm_id_of(parsed);
                 let parent_id = parent_order_id(parsed, context);
                 // Average fill price rides on status reports too (ibx#315).
                 let avg_px = parsed.get(&6).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
@@ -1685,7 +1808,7 @@ impl CcpState {
             let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
             let local_symbol = parsed.get(&6035).cloned().unwrap_or_default();
             let _routing_exchange = parsed.get(&6004).cloned().unwrap_or_default();
-            let perm_id: i64 = parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0);
+            let perm_id: i64 = perm_id_of(parsed);
             let total_qty: f64 = parsed.get(&38).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let ord_type_tag = parsed.get(&40).map(|s| s.as_str()).unwrap_or("");
             let limit_price: f64 = parsed.get(&44).and_then(|s| s.parse().ok()).unwrap_or(0.0);
@@ -1859,8 +1982,13 @@ impl CcpState {
                 lmt_price_offset: trail_limit.map_or(f64::MAX, |r| r.offset as f64 / PRICE_SCALE as f64),
                 // A combo's per-leg prices as reported (ibx#470).
                 order_combo_legs: shared.orders.combo_view(clord_id).map(|v| v.leg_prices).unwrap_or_default(),
+                // The order's API client (6119, 0 when absent) and order id.
+                client_id: parsed.get(&6119).and_then(|s| s.parse().ok()).unwrap_or(0),
                 ..Default::default()
             };
+            if let Some(entry) = context.book.get(&clord_id) {
+                shared.orders.note_book(clord_id, entry.seq, context.book_peak);
+            }
 
             let completed_time = if matches!(status,
                 crate::types::OrderStatus::Filled |
@@ -1917,15 +2045,26 @@ impl CcpState {
             });
         }
 
-        if let Some((fill, exec)) = fill_out {
-            shared.orders.push_fill_with_exec(fill, exec);
+        if let Some((fill, mut exec)) = fill_out {
+            if delivered {
+                shared.orders.push_fill_with_exec(fill, exec);
+            } else {
+                // An execution of another client's order: stored, no
+                // callback.
+                exec.other_client = true;
+                let execution = report_execution(parsed, exec_id, fill.side, fill.qty_fixed, last_px,
+                    account_id, shared.orders.api_order_id(clord_id));
+                shared.orders.push_untracked_execution(report_contract(parsed, shared), execution, exec);
+            }
             emit(event_tx, Event::Fill(fill));
         }
         if let Some(update) = update_out {
-            shared.orders.push_order_update(update);
+            if delivered {
+                shared.orders.push_order_update(update);
+            }
             emit(event_tx, Event::OrderUpdate(update));
         }
-        if let Some((code, text)) = notice_out {
+        if let Some((code, text)) = notice_out.filter(|_| owned) {
             shared.orders.push_order_notice(clord_id, code, text);
         }
 
@@ -2131,24 +2270,17 @@ impl CcpState {
         shared.portfolio.add_money_since_seed(con_id, cash);
         shared.portfolio.apply_fill_to_position(con_id, delta, (last_px * PRICE_SCALE as f64) as i64);
 
-        let execution = api::Execution {
-            exec_id: exec_id.to_string(),
-            acct_number: parsed.get(&1).filter(|s| !s.is_empty()).cloned()
-                .unwrap_or_else(|| account_id.to_string()),
-            side: match side { Side::Buy => "BOT", Side::Sell | Side::ShortSell => "SLD" }.to_string(),
-            shares,
-            price: last_px,
-            perm_id: parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0),
-            // The placing client's order id when the report carries it.
-            order_id: parsed.get(&6121).and_then(|s| s.parse().ok()).unwrap_or(clord_id),
-            cum_qty: parsed.get(&14).and_then(|s| parse_qty(s)).unwrap_or(0) as f64 / QTY_SCALE as f64,
-            avg_price: parsed.get(&6).and_then(|s| s.parse().ok()).unwrap_or(0.0),
-            last_liquidity: parsed.get(&851).and_then(|s| s.parse().ok()).unwrap_or(0),
-            ..Default::default()
-        };
+        // The placing client's order id when the report carries it.
+        let order_id = parsed.get(&6121).and_then(|s| s.parse().ok()).unwrap_or(clord_id);
+        let execution = report_execution(parsed, exec_id, side, last_shares, last_px, account_id, order_id);
         log::info!("Fill {} of untracked order {}: con_id={} {:?} {} @ {}, stored",
             exec_id, clord_id, con_id, side, shares, last_px);
-        Some((execution, fill_exec_of(parsed, exec_id)))
+        // The execution's reports go to its client, else to client 0
+        // (`jextend.ba.a(dq, aQ)`).
+        let mut exec = fill_exec_of(parsed, exec_id);
+        let me = context.api_client_id;
+        exec.other_client = me != 0 && exec.client_id != me;
+        Some((execution, exec))
     }
 
     /// A cancel or modify the server refused (ibx#252). As the reference:
@@ -6230,9 +6362,9 @@ mod tests {
         assert!(shared.orders.drain_order_notices().is_empty());
     }
 
-    // req_global_cancel sends a cancel-all for each id below the shared
-    // instrument count. A recovered order on a new contract took a slot
-    // without raising that count, so the global cancel never reached it.
+    // A recovered order on a new contract took a slot without raising the
+    // shared instrument count, so a cancel-all walking the ids below it
+    // never reached the order.
     #[test]
     fn recovered_order_is_inside_the_global_cancel_range() {
         let mut ccp = CcpState::new();
@@ -6251,6 +6383,112 @@ mod tests {
         }
         assert!(context.pending_orders.drain().any(|r| matches!(r,
             crate::types::OrderRequest::CancelAll { instrument } if instrument == order.instrument)));
+    }
+
+    /// A report in pipe form, as `handle_exec_report` reads it.
+    fn report_of(text: &str) -> std::collections::HashMap<u32, String> {
+        text.split('|').filter_map(|kv| kv.split_once('='))
+            .filter_map(|(t, v)| Some((t.parse::<u32>().ok()?, v.to_string())))
+            .collect()
+    }
+
+    /// An order of an earlier session in the logon replay, not routed yet
+    /// (captured 01/10/2026, fix-agent-gw.20261001-171159 seq 1124, account
+    /// masked): 150=A 20=3 39=A, no API order id or client id.
+    const REPLAY_NOT_ROUTED: &str = "35=8|11=1790862363895062.0|17=140781.1790867253.0|150=A|20=3|39=A|167=CS|55=SPY|6210=BEST|38=1|44=0.00|32=0|31=0.00|14=0|151=1|6=0|54=1|37=00cf16ed.000225ed.6abde767.0001|1=DUXXXXXXX|60=20261001-15:07:33|6571=20261001-13:46:05|40=5|59=0|6008=756733|15=USD|6004=BEST|6122=c|6205=1|198=NONE|6115=0|6088=Socket|6035=SPY|6419=IB";
+
+    // The logon replay gives an order of an earlier session that is not
+    // routed yet as 39=A: it is in the book, PreSubmitted, of client 0
+    // (no 6119, read as 0 by the reference), at the server's version.
+    // Paper 04/10/2026: such orders were listed and then not found by a
+    // cancel (10147), and a global cancel sent nothing.
+    #[test]
+    fn a_replayed_order_not_routed_yet_is_in_the_book() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        ccp.handle_exec_report(&report_of(REPLAY_NOT_ROUTED), &mut context, &shared, &None, "");
+        let order = context.order(1790862363895062).copied().expect("in the book");
+        assert_eq!(order.status, crate::types::OrderStatus::PreSubmitted);
+        assert_eq!(context.book.get(&1790862363895062).and_then(|e| e.owner), Some(0));
+        assert_eq!(context.modify_versions.get(&1790862363895062), Some(&0));
+        assert_eq!(context.last_clord.get(&1790862363895062).map(String::as_str), Some("1790862363895062.0"));
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.len(), 1, "its status, as for every report of a held order");
+        assert_eq!(updates[0].status, crate::types::OrderStatus::PreSubmitted);
+    }
+
+    // An order of another client, with its API ids: kept under its API
+    // order id, of its client (6119), at the version the server gives; its
+    // parent and OCA group as reported. A finished report of an unknown
+    // order puts nothing in the book.
+    #[test]
+    fn a_replayed_order_keeps_its_client_version_and_links() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let parent = "35=8|11=57311390.0|17=e.1|150=0|20=3|39=0|55=AAPL|100=NASDAQ|38=1|44=238.44|14=0|151=1|54=1|37=x|40=2|6119=198|6121=35|59=0|6008=265598";
+        let child = "35=8|11=57311391.2|17=e.2|150=5|20=3|39=5|55=AAPL|38=1|44=250|14=0|151=1|54=2|37=y|40=2|6119=198|6121=36|59=1|6008=265598|583=57311390|6107=57311390.0";
+        ccp.handle_exec_report(&report_of(parent), &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&report_of(child), &mut context, &shared, &None, "");
+        assert_eq!(context.order(35).map(|o| o.status), Some(crate::types::OrderStatus::Submitted));
+        assert_eq!(context.order(36).map(|o| o.status), Some(crate::types::OrderStatus::PreSubmitted));
+        assert_eq!((context.server_id(35), context.server_id(36)), (57311390, 57311391));
+        assert_eq!(context.modify_versions.get(&36), Some(&2));
+        let entry = context.book.get(&36).cloned().unwrap();
+        assert_eq!((entry.owner, entry.parent, entry.oca_group.as_str()), (Some(198), 35, "57311390"));
+
+        let filled = "35=8|11=57311399.0|17=e.3|150=2|20=0|39=2|55=AAPL|38=1|32=1|31=1|14=1|151=0|54=1|37=z|40=2|59=0|6008=265598";
+        ccp.handle_exec_report(&report_of(filled), &mut context, &shared, &None, "");
+        assert!(context.order(57311399).is_none());
+    }
+
+    // The reports of an order go to its client, else to client 0
+    // (`jextend.ba.d(dK)`); its notices only to its client (`pe.gY()`).
+    // Captured 01/10/2026: client 193 got nothing of client 0's orders.
+    #[test]
+    fn reports_of_another_clients_order_reach_only_its_client_or_client_0() {
+        let cancelled = "35=8|11=57311390.1|41=57311390.0|17=e.9|150=4|20=0|39=4|55=AAPL|38=1|44=238.44|14=0|151=0|54=1|37=x|40=2|6119=198|6121=35|59=0|6008=265598";
+        let fill = "35=8|11=57311390.0|17=e.8|150=1|20=0|39=1|55=AAPL|38=2|44=238.44|32=1|31=238.4|14=1|151=1|6=238.4|54=1|37=x|40=2|6119=198|6121=35|59=0|6008=265598";
+        let parent = "35=8|11=57311390.0|17=e.1|150=0|20=3|39=0|55=AAPL|100=NASDAQ|38=2|44=238.44|14=0|151=2|54=1|37=x|40=2|6119=198|6121=35|59=0|6008=265598";
+        for (me, delivered) in [(193, false), (0, true), (198, true)] {
+            let mut ccp = CcpState::new();
+            let mut context = Context::new();
+            let shared = SharedState::new();
+            shared.reference.set_api_client_id(me);
+            ccp.handle_exec_report(&report_of(parent), &mut context, &shared, &None, "");
+            ccp.handle_exec_report(&report_of(fill), &mut context, &shared, &None, "");
+            ccp.handle_exec_report(&report_of(cancelled), &mut context, &shared, &None, "");
+            let updates = shared.orders.drain_order_updates();
+            assert_eq!(!updates.is_empty(), delivered, "client {me}: statuses");
+            assert_eq!(shared.orders.drain_fills_with_exec().len(), usize::from(delivered), "client {me}: live fill");
+            let untracked = shared.orders.drain_untracked_executions();
+            assert_eq!(untracked.len(), usize::from(!delivered), "client {me}: fill kept with no callback");
+            assert!(untracked.iter().all(|(_, e, fe)| fe.other_client && e.order_id == 35));
+            // 202 only to the order's own client.
+            assert_eq!(!shared.orders.drain_order_notices().is_empty(), me == 198, "client {me}: 202");
+            // The order is in the book whoever gets its reports: listed,
+            // and in a global cancel.
+            assert!(shared.orders.get_order_info(35).is_some());
+        }
+    }
+
+    // The permId is the id part of the ClOrdID, as the reference
+    // (captured 01/10/2026: permId 1790865742870063 for
+    // 11=1790865742870063.0); an order of another session with no 6121 is
+    // shown with order id 0.
+    #[test]
+    fn perm_id_is_the_clordid_id_and_no_6121_shows_order_id_0() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        ccp.handle_exec_report(&report_of(REPLAY_NOT_ROUTED), &mut context, &shared, &None, "");
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates[0].perm_id, 1790862363895062);
+        assert_eq!(shared.orders.api_order_id(1790862363895062), 0);
+        let info = shared.orders.get_order_info(1790862363895062).unwrap();
+        assert_eq!((info.order.perm_id, info.order.client_id), (1790862363895062, 0));
+        assert_eq!(shared.orders.book_place(1790862363895062), (Some(0), 1));
     }
 
     // ibx#475: account frames captured on paper 25/09/2026 (account masked,
@@ -6958,6 +7196,31 @@ mod logon_update_tests {
         assert_eq!(ccp.data_permissions.as_deref(), Some("1788356313"));
         assert!(ccp.data_permissions_seen("1788999999"));
         assert!(!ccp.data_permissions_seen("1788999999"));
+    }
+
+    // ibx#421: a logon update refreshes the pending accounts (8092, only
+    // when present), the private label misc URLs (6321, only when not
+    // empty) and gives its SSL farm list (8449, empty when absent) to the
+    // hot loop; a solicited logon does none of it.
+    #[test]
+    fn logon_update_refreshes_accounts_urls_and_ssl_farms() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let mut hb = HeartbeatState::new();
+        ccp.process_ccp_message(&pipe_frame("35=A|6059=1790914646|8092=DUXXXXXX1|8449=allmd|"),
+            &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(!shared.reference.account_pending("DUXXXXXX1"));
+        assert_eq!(ccp.ssl_farms_update, None);
+        ccp.process_ccp_message(&pipe_frame("35=A|8092=DUXXXXXX1,DUXXXXXX2|6321=account_partitions=https://example/p|8449=allmd|"),
+            &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(shared.reference.account_pending("DUXXXXXX1") && shared.reference.account_pending("DUXXXXXX2"));
+        assert_eq!(shared.reference.misc_url("account_partitions").as_deref(), Some("https://example/p"));
+        assert_eq!(ccp.ssl_farms_update.take().as_deref(), Some("allmd"));
+        ccp.process_ccp_message(&pipe_frame("35=A|6321=|"), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(shared.reference.account_pending("DUXXXXXX1"), "no 8092: kept");
+        assert_eq!(shared.reference.misc_url("account_partitions").as_deref(), Some("https://example/p"), "empty 6321: kept");
+        assert_eq!(ccp.ssl_farms_update.take().as_deref(), Some(""), "no 8449: empty list");
+        ccp.process_ccp_message(&pipe_frame("35=A|8092=|"), &mut None, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(!shared.reference.account_pending("DUXXXXXX1"));
     }
 
     // ibx#421: a test request refreshes the clock offset from its server
