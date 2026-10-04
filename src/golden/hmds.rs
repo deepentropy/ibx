@@ -138,9 +138,8 @@ fn flat(q: &str) -> String {
 // reference's (the chart name in the id, no cutoff date, whole days for
 // daily bars, the head timestamp's TRADES label), its layout and the
 // times of a request without an end left out; the bars, ends and head
-// timestamp as the reference's; the cancel of an unknown request gives
-// 366. The second head timestamp is answered from the reference's cache
-// (ignored test below).
+// timestamps as the reference's; the cancel of an unknown request gives
+// 366.
 #[test]
 fn bars_and_head_timestamp_as_the_reference() {
     let r = replay_hmds(&load("hmds_bars_and_head_timestamp"));
@@ -150,18 +149,14 @@ fn bars_and_head_timestamp_as_the_reference() {
     for (a, b) in ours.iter().zip(&theirs) {
         assert_eq!(a, b);
     }
-    let not_cached = |l: &String| !l.starts_with("headTimestamp|9545|");
-    let (ours, theirs): (Vec<String>, Vec<String>) =
-        (r.ours.into_iter().filter(not_cached).collect(), r.theirs.into_iter().filter(not_cached).collect());
-    assert!(theirs.len() > 60, "{}", theirs.len());
-    assert_same_callbacks(&ours, &theirs);
+    assert!(r.theirs.len() > 60, "{}", r.theirs.len());
+    assert_same_callbacks(&r.ours, &r.theirs);
 }
 
 // A second head timestamp of the same contract and data: the reference
 // answers from its cache (`hmdscore.store.b`, HIST-BARS 4.3), no query,
-// here with formatDate 2 (345479400); ibx asks the farm again.
+// here with formatDate 2 (345479400).
 #[test]
-#[ignore = "ibx#486: head timestamps are not answered from a cache"]
 fn second_head_timestamp_from_the_cache() {
     let r = replay_hmds(&load("hmds_bars_and_head_timestamp"));
     assert_eq!(r.queries_ours.len(), r.queries_theirs.len());

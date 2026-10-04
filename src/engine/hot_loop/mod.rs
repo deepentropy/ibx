@@ -1458,6 +1458,12 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::FetchHeadTimestamp { req_id, con_id, sec_type, exchange, what_to_show, use_rth, format_date } => {
+                    // A value the farm gave before is the answer (ibx#486).
+                    if self.hmds.head_timestamp_from_cache(req_id, con_id, &sec_type, &exchange, &what_to_show, use_rth,
+                        format_date, &self.shared, &self.event_tx)
+                    {
+                        continue;
+                    }
                     if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {

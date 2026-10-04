@@ -307,13 +307,11 @@ fn keep_up_to_date_update_order() {
 }
 
 // Bars with formatDate 1 and 2, head timestamps (02/10/2026, ibx#431); the
-// second head timestamp, answered from the reference's cache, is left out
-// (src/golden/hmds.rs `second_head_timestamp_from_the_cache`, ibx#486).
+// second head timestamp answered from the store, with no query (ibx#486).
 #[test]
 fn historical_formats_and_head_timestamps() {
-    let sc = load_scenario("20261002/b1_431_hist_format");
-    let second = sc.recs.iter().filter(|r| r.msg == "REQ_HEAD_TIMESTAMP").nth(1).map(|r| r.seq).unwrap();
-    check("20261002/b1_431_hist_format", Options::default().skip_seqs(&[second]).keep(|l| !l.starts_with("headTimestamp|9545|")));
+    let o = check("20261002/b1_431_hist_format", Options::default());
+    assert!(o.theirs.iter().any(|(_, l)| l.starts_with("headTimestamp|9545|")));
 }
 
 // Historical ticks of AAPL: start, end, both, refusals, AGGTRADES

@@ -83,6 +83,12 @@ pub(crate) struct HmdsState {
     pub(crate) pending_ticks: Vec<(String, ReqId, String)>,
     /// formatDate of the head timestamp requests waiting (ibx#431).
     pub(crate) head_ts_format: std::collections::HashMap<ReqId, i32>,
+    /// The cache key of the head timestamp requests waiting (ibx#486).
+    head_ts_keys: std::collections::HashMap<ReqId, HeadTsKey>,
+    /// Head timestamps the farm gave, Unix seconds, by contract, route,
+    /// data and RTH flag: a later request is answered from here with no
+    /// query, as the reference's store (`hmdscore.store.b`, ibx#486).
+    head_ts_cache: std::collections::HashMap<HeadTsKey, i64>,
     /// How the bars of each bar request are written (ibx#431), until its
     /// answer ended (keepUpToDate: until its cancel).
     pub(crate) bar_requests: Vec<BarRequestInfo>,
@@ -467,6 +473,8 @@ impl HmdsState {
             pending_schedule: Vec::new(),
             pending_ticks: Vec::new(),
             head_ts_format: std::collections::HashMap::new(),
+            head_ts_keys: std::collections::HashMap::new(),
+            head_ts_cache: std::collections::HashMap::new(),
             bar_requests: Vec::new(),
             live_bars: Vec::new(),
             router_bars: Vec::new(),
@@ -691,8 +699,15 @@ impl HmdsState {
                             let (_, req_id, _) = self.pending_head_ts.remove(pos);
                             // The time by formatDate, as the reference writes it (ibx#431).
                             let format_date = self.head_ts_format.remove(&req_id).unwrap_or(1);
+                            let key = self.head_ts_keys.remove(&req_id);
                             if let Some(secs) = crate::control::historical::parse_server_time(&resp.head_timestamp) {
                                 resp.head_timestamp = crate::control::historical::head_timestamp_text(secs, format_date);
+                                // Kept for the next request; the later of two
+                                // values stays (`store.b.a(a, long)@19-66`).
+                                if let Some(key) = key {
+                                    let kept = self.head_ts_cache.entry(key).or_insert(secs);
+                                    *kept = (*kept).max(secs);
+                                }
                             }
                             let for_event = clone_for_event(event_tx, &resp);
                             shared.reference.push_head_timestamp(req_id, resp);
@@ -822,6 +837,7 @@ impl HmdsState {
                             } else if let Some(pos) = self.pending_head_ts.iter().position(|(q, _, _)| q == wid) {
                                 let (_, req_id, _) = self.pending_head_ts.remove(pos);
                                 self.head_ts_format.remove(&req_id);
+                                self.head_ts_keys.remove(&req_id);
                                 released = Some((req_id, 162, historical_service_error(&error_msg)));
                             } else if let Some(pos) = self.pending_histogram.iter().position(|h| h.window_id == wid) {
                                 let req_id = self.pending_histogram.remove(pos).req_id;
@@ -1665,6 +1681,32 @@ impl HmdsState {
         Self::send_cancel_xml(&crate::control::historical::query_cancel_xml(&format!("ticker:{}", ticker_id)), hmds_conn, hb);
     }
 
+    /// A head timestamp request the store answers (ibx#486): the reference
+    /// answers a contract, route, data and RTH flag it was given before
+    /// with the stored value and sends no query (`headtime.k.a(store.a,
+    /// long)@0-86`; captured 02/10/2026, b1_431_hist_format: the second
+    /// TRADES head timestamp of AAPL after the contract lookup, no 35=W).
+    /// False when the store has no value for it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn head_timestamp_from_cache(&self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, what_to_show: &str,
+        use_rth: bool, format_date: i32, shared: &SharedState, event_tx: &Option<Sender<Event>>) -> bool
+    {
+        let Some(&secs) = self.head_ts_cache.get(&head_ts_key(con_id, sec_type, exchange, what_to_show, use_rth)) else {
+            return false;
+        };
+        let resp = crate::control::historical::HeadTimestampResponse {
+            head_timestamp: crate::control::historical::head_timestamp_text(secs, format_date),
+            timezone: String::new(),
+        };
+        log::info!("Head timestamp req_id={} con_id={} answered from the store", req_id, con_id);
+        let for_event = clone_for_event(event_tx, &resp);
+        shared.reference.push_head_timestamp(req_id, resp);
+        if let Some(data) = for_event {
+            emit(event_tx, Event::HeadTimestamp { req_id, data });
+        }
+        true
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn send_head_timestamp_request(&mut self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, what_to_show: &str, use_rth: bool, format_date: i32, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         // Same shared table as the bar paths — this was a third divergent
@@ -1703,6 +1745,7 @@ impl HmdsState {
         }
         self.pending_head_ts.push((window_id, req_id, Instant::now() + HEAD_TIMESTAMP_TIMEOUT));
         self.head_ts_format.insert(req_id, format_date);
+        self.head_ts_keys.insert(req_id, head_ts_key(con_id, sec_type, exchange, what_to_show, use_rth));
     }
 
     pub(crate) fn send_scanner_params_request(&mut self, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
@@ -2361,6 +2404,16 @@ fn reply_window_id(xml: &str) -> &str {
         .unwrap_or("")
 }
 
+/// The key of a stored head timestamp: contract, route, data (as the
+/// API names it, upper case) and the RTH flag (`hmdscore.store.a(dy, flag,
+/// ...)`; the flag is useRTH for the contracts ibx asks).
+type HeadTsKey = (i64, String, String, bool);
+
+fn head_ts_key(con_id: i64, sec_type: &str, exchange: &str, what_to_show: &str, use_rth: bool) -> HeadTsKey {
+    let route = crate::engine::hot_loop::farm::routing_exchange(exchange, if sec_type.is_empty() { "STK" } else { sec_type });
+    (con_id, route.to_string(), what_to_show.to_ascii_uppercase(), use_rth)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -2699,6 +2752,28 @@ pub(crate) mod tests {
             .map(|(r, h)| (r, h.head_timestamp)).collect();
         assert_eq!(got, vec![(2, "19930129-14:30:00".to_string()), (1, "19801212-14:30:00".to_string())]);
         assert!(hmds.pending_head_ts.is_empty());
+    }
+
+    // ibx#486: a head timestamp the farm gave answers the next request of
+    // the same contract, route, data and RTH flag, in its formatDate, with
+    // no query; another RTH flag or data is asked.
+    #[test]
+    fn a_stored_head_timestamp_answers_the_next_request() {
+        let mut hmds = HmdsState::new();
+        let shared = SharedState::new();
+        let mut hb = HeartbeatState::new();
+        let mut conn: Option<Connection> = None;
+        assert!(!hmds.head_timestamp_from_cache(1, 265598, "STK", "SMART", "TRADES", true, 1, &shared, &None));
+        hmds.send_head_timestamp_request(1, 265598, "STK", "SMART", "TRADES", true, 1, &mut conn, &mut hb, &shared);
+        hmds.process_hmds_message(&head_ts_reply("TickHeadClient1;;265598@BEST Last;;0;;true;;0;;U", "19801212-14:30:00"),
+            &mut conn, &shared, &None, &mut hb);
+        shared.reference.drain_head_timestamps();
+        assert!(hmds.head_timestamp_from_cache(2, 265598, "STK", "", "trades", true, 2, &shared, &None));
+        let got: Vec<(ReqId, String)> = shared.reference.drain_head_timestamps().into_iter()
+            .map(|(r, h)| (r, h.head_timestamp)).collect();
+        assert_eq!(got, vec![(2, "345479400".to_string())]);
+        assert!(!hmds.head_timestamp_from_cache(3, 265598, "STK", "SMART", "TRADES", false, 1, &shared, &None));
+        assert!(!hmds.head_timestamp_from_cache(4, 265598, "STK", "SMART", "MIDPOINT", true, 1, &shared, &None));
     }
 
     #[test]
