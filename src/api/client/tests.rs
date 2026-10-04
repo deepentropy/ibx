@@ -59,8 +59,10 @@ fn test_client() -> (EClient, crossbeam_channel::Receiver<ControlCommand>, Arc<S
 }
 
 /// Helper: SPY contract.
+// The API's Contract has no default security type or exchange: the
+// contract names them, as an order needs its exchange.
 fn spy() -> Contract {
-    Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() }
+    Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1690,7 +1692,7 @@ fn place_order_explicit_stk_contract_accepted() {
     // An explicit sec_type="STK" must still be accepted.
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
-    let stk = Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), ..Default::default() };
+    let stk = Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() };
     let order = Order { action: "BUY".into(), total_quantity: 100.0, order_type: "MKT".into(), ..Default::default() };
     client.place_order(1, &stk, &order).unwrap();
     assert!(rx.try_recv().is_ok());
@@ -1998,7 +2000,7 @@ fn historical_requests_without_con_id_ask_for_the_contract_first() {
 #[test]
 fn req_historical_data_sends_include_expired() {
     let (client, rx, _shared) = test_client();
-    let fut = Contract { con_id: 495512551, include_expired: true, ..Default::default() };
+    let fut = Contract { con_id: 495512551, sec_type: "FUT".into(), exchange: "CME".into(), include_expired: true, ..Default::default() };
     client.req_historical_data(1, &fut, "", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
     assert!(matches!(rx.try_recv().unwrap(), ControlCommand::FetchHistorical { con_id: 495512551, include_expired: true, .. }));
 }
@@ -2468,7 +2470,7 @@ fn news_request_refusals() {
 fn req_fundamental_data_sends_fetch() {
     let (client, rx, shared) = test_client();
     // #434: only a stock may be asked; anything else is 321 at once.
-    client.req_fundamental_data(5, &spy(), "ReportSnapshot").unwrap();
+    client.req_fundamental_data(5, &Contract { sec_type: String::new(), ..spy() }, "ReportSnapshot").unwrap();
     assert!(rx.try_recv().is_err());
     assert_eq!(shared.reference.drain_historical_errors(),
         [(5, 321, "Error validating request.-'bL' : cause - Please enter a valid security type".to_string())]);
@@ -6480,7 +6482,7 @@ fn an_invalid_generic_tick_list_is_refused() {
     assert_eq!(w.events, [
         format!("error:9570:321:Error validating request.-'bQ' : cause - Incorrect generic tick list of mdoff,292:.  Legal ones for (STK) are: {legal}"),
         format!("error:7:321:Error validating request.-'bQ' : cause - Incorrect generic tick list of 999.  Legal ones for (CASH) are: {legal}"),
-        format!("error:8:321:Error validating request.-'bQ' : cause - Incorrect generic tick list of mdoff.  Legal ones for () are: {legal}"),
+        format!("error:8:321:Error validating request.-'bQ' : cause - Incorrect generic tick list of mdoff.  Legal ones for (STK) are: {legal}"),
     ]);
 }
 
@@ -6615,4 +6617,83 @@ fn past_the_ticker_limit_a_stream_gets_101_and_waits_for_a_line() {
     assert_eq!(client.core.md_lines_in_use(), 1);
     let seen = engine.join().unwrap();
     assert_eq!(seen, ["subscribe:265598:0", "unsubscribe:10", "subscribe:756733:0"]);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Unset contract fields (the official API's defaults)
+// ═══════════════════════════════════════════════════════════════════
+
+// A contract with no exchange (empty, the official API's default): the
+// reference's refusal of each request that needs one, nothing sent.
+#[test]
+fn requests_of_a_contract_with_no_exchange_are_refused() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let no_exchange = Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), ..Default::default() };
+    let order = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "MKT".into(), ..Default::default() };
+    client.place_order(1, &no_exchange, &order).unwrap();
+    client.req_mkt_data(2, &no_exchange, "", false, false).unwrap();
+    client.req_historical_data(3, &no_exchange, "", "1 D", "1 hour", "TRADES", true, 1, false).unwrap();
+    client.req_head_time_stamp(4, &no_exchange, "TRADES", true, 1).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let errors: Vec<&String> = w.events.iter().filter(|e| e.starts_with("error:")).collect();
+    assert_eq!(errors, [
+        "error:1:321:Error validating request.-'bH' : cause - Missing order exchange",
+        "error:2:321:Error validating request.-'bQ' : cause - Please enter exchange",
+        "error:3:321:Error validating request.-'bM' : cause - Please enter exchange",
+        "error:4:321:Error validating request.-'bN' : cause - Please enter exchange",
+    ]);
+}
+
+// A contract lookup with no security type (empty, the official API's
+// default) and no conId: 321; with no symbol either, the symbol's text
+// first. An empty exchange or currency is not refused: the lookup goes
+// out without them.
+#[test]
+fn contract_details_of_an_unset_contract() {
+    let (client, rx, shared) = test_client();
+    client.req_contract_details(1, &Contract::default()).unwrap();
+    client.req_contract_details(2, &Contract { symbol: "AAPL".into(), ..Default::default() }).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    assert_eq!(shared.reference.drain_historical_errors(), [
+        (1, 321, "Error validating request.-'bK' : cause - The symbol or the local-symbol or the security id must be entered".to_string()),
+        (2, 321, "Error validating request.-'bK' : cause - Please enter a valid security type".to_string()),
+    ]);
+    client.req_contract_details(3, &Contract { symbol: "AAPL".into(), sec_type: "STK".into(), ..Default::default() }).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::FetchContractDetails { req_id: 3, exchange, currency, .. } => assert_eq!((exchange.as_str(), currency.as_str()), ("", "")),
+        other => panic!("expected FetchContractDetails, got {:?}", other),
+    }
+    // A conId alone, or an issuer id alone, needs no security type.
+    client.req_contract_details(4, &Contract { con_id: 265598, ..Default::default() }).unwrap();
+    client.req_contract_details(5, &Contract { issuer_id: "e1234567".into(), ..Default::default() }).unwrap();
+    assert_eq!(rx.try_iter().count(), 2);
+    assert!(shared.reference.drain_historical_errors().is_empty());
+}
+
+// An order with the official API's defaults beside its type, side and
+// quantity goes out as before: no price, no minimum quantity, no cash
+// quantity, DAY; openOrder shows the reference's values of the unset
+// fields (lmtPrice and auxPrice 0, volatilityType and referencePriceType 0,
+// dontUseAutoPriceForHedge true, DAY).
+#[test]
+fn an_order_with_unset_fields_goes_out_and_shows_as_the_reference() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "MKT".into(), ..Default::default() };
+    client.place_order(5, &spy(), &order).unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), ControlCommand::Order(OrderRequest::SubmitMarket { order_id: 5, qty: 1, .. })));
+    let lmt = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 1.0, ..Default::default() };
+    client.place_order(6, &spy(), &lmt).unwrap();
+    match rx.try_recv().unwrap() {
+        ControlCommand::Order(OrderRequest::SubmitLimit { order_id: 6, price, .. }) => assert_eq!(price, PRICE_SCALE),
+        other => panic!("expected SubmitLimit, got {:?}", other),
+    }
+    let view = client.core.order_view(5, &client.shared, "Submitted").expect("tracked");
+    let o = &view.order;
+    assert_eq!((o.lmt_price, o.aux_price, o.tif.as_str()), (0.0, 0.0, "DAY"));
+    assert_eq!((o.volatility_type, o.reference_price_type, o.dont_use_auto_price_for_hedge), (0, 0, true));
+    assert_eq!((o.min_qty, o.trailing_percent, o.cash_qty, o.filled_quantity), (i32::MAX, f64::MAX, f64::MAX, 0.0));
 }

@@ -19,7 +19,7 @@ impl EClient {
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_historical_data", &[req_id, contract.con_id]) { return Ok(()); }
         if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration, bar_size, what_to_show,
-            format_date, keep_up_to_date, &contract.sec_type, self.shared.reference.backfill_years_limit()) {
+            format_date, keep_up_to_date, &contract.sec_type, &contract.exchange, self.shared.reference.backfill_years_limit()) {
             self.shared.reference.push_historical_error(req_id, code, text);
             return Ok(());
         }
@@ -62,6 +62,10 @@ impl EClient {
         &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool, format_date: i32,
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_head_time_stamp", &[req_id, contract.con_id]) { return Ok(()); }
+        if let Some((code, text)) = ClientCore::head_timestamp_refusal(&contract.exchange) {
+            self.shared.reference.push_historical_error(req_id, code, text);
+            return Ok(());
+        }
         self.send(ClientCore::resolve_first(req_id, contract, ControlCommand::FetchHeadTimestamp {
             req_id,
             con_id: contract.con_id,
@@ -78,6 +82,10 @@ impl EClient {
     /// Request contract details. Matches `reqContractDetails` in C++.
     pub fn req_contract_details(&self, req_id: i64, contract: &Contract) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_contract_details", &[req_id, contract.con_id]) { return Ok(()); }
+        if let Some((code, text)) = ClientCore::contract_details_refusal(contract) {
+            self.shared.reference.push_historical_error(req_id, code as i32, text);
+            return Ok(());
+        }
         self.send(ControlCommand::FetchContractDetails {
             req_id,
             con_id: contract.con_id,

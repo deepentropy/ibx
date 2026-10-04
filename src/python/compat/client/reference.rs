@@ -33,7 +33,7 @@ impl EClient {
         // 10314) and no query (ibx#430).
         let shared = self.shared_state()?;
         if let Some((code, text)) = ClientCore::historical_refusal(end_date_time, duration_str, bar_size_setting,
-            what_to_show, format_date, keep_up_to_date, &contract.sec_type, shared.reference.backfill_years_limit()) {
+            what_to_show, format_date, keep_up_to_date, &contract.sec_type, &contract.exchange, shared.reference.backfill_years_limit()) {
             shared.reference.push_historical_error(req_id, code, text);
             return Ok(());
         }
@@ -90,6 +90,10 @@ impl EClient {
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_head_time_stamp", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
+        if let Some((code, text)) = ClientCore::head_timestamp_refusal(&contract.exchange) {
+            self.shared_state()?.reference.push_historical_error(req_id, code, text);
+            return Ok(());
+        }
         send_cmd(py, &tx, ClientCore::resolve_first(req_id, &contract.to_api(), ControlCommand::FetchHeadTimestamp {
             req_id,
             con_id: contract.con_id,
@@ -116,6 +120,10 @@ impl EClient {
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_contract_details", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
+        if let Some((code, text)) = ClientCore::contract_details_refusal(&contract.to_api()) {
+            self.shared_state()?.reference.push_historical_error(req_id, code as i32, text);
+            return Ok(());
+        }
         send_cmd(py, &tx, ControlCommand::FetchContractDetails {
             req_id,
             con_id: contract.con_id,

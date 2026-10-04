@@ -4136,7 +4136,11 @@ impl ClientCore {
     /// ibx#429): (code, text) to report as an error, 321 or 10314, with no
     /// end. Every legal bar size streams with keepUpToDate.
     /// `max_backfill_years` is the logon limit of the session, None when
-    /// it is not checked (ibx#421).
+    /// it is not checked (ibx#421). A contract with no exchange (empty, the
+    /// official API's default) is refused first after an end date the
+    /// reference cannot read, but for a continuous future
+    /// (`jextend.bM.n()@4-63`, HIST-BARS 1.2).
+    #[allow(clippy::too_many_arguments)]
     pub fn historical_refusal(
         end_date_time: &str,
         duration: &str,
@@ -4145,12 +4149,57 @@ impl ClientCore {
         format_date: i32,
         keep_up_to_date: bool,
         sec_type: &str,
+        exchange: &str,
         max_backfill_years: Option<i32>,
     ) -> Option<(i32, String)> {
+        use crate::control::historical::{bar_request_refusal, is_valid_end_date};
+        if is_valid_end_date(end_date_time) && exchange.is_empty() && !sec_type.eq_ignore_ascii_case("CONTFUT") {
+            return Some((321, bar_request_refusal("Please enter exchange")));
+        }
         crate::control::historical::check_bar_request(
             end_date_time, duration, bar_size, what_to_show, Some(format_date), keep_up_to_date, sec_type,
             max_backfill_years,
         ).err()
+    }
+
+    /// A reqHeadTimeStamp whose contract has no exchange (empty, the official
+    /// API's default): 321, the reference's first check
+    /// (`jextend.bN.n()@4-37`, HIST-BARS 4.1). Nothing is sent.
+    pub fn head_timestamp_refusal(exchange: &str) -> Option<(i32, String)> {
+        exchange.is_empty()
+            .then(|| (321, "Error validating request.-'bN' : cause - Please enter exchange".to_string()))
+    }
+
+    /// A reqMktData whose contract has no exchange (empty, the official
+    /// API's default), but a news contract: 321, the reference's first
+    /// check (`jextend.bQ.n()@12-65`, MKTDATA-L1 1.2). Nothing is sent.
+    pub fn market_data_exchange_refusal(exchange: &str, sec_type: &str) -> Option<(i64, String)> {
+        (exchange.is_empty() && !sec_type.eq_ignore_ascii_case("NEWS"))
+            .then(|| (321, "Error validating request.-'bQ' : cause - Please enter exchange".to_string()))
+    }
+
+    /// The reference's checks of a reqContractDetails contract
+    /// (`jextend.bK.n()` → `jextend.bF.B()`, CONTRACT-DETAILS 1.2, 1.3),
+    /// 321: with no conId, no symbol, local symbol nor security id (an
+    /// issuer id or a news contract need none); then with no conId and no
+    /// security id, a security type that is not one (empty, the official
+    /// API's default; `UNK`, `All`, `*`); an issuer id makes the type a
+    /// fixed income one. An empty exchange or currency is not refused:
+    /// those fields are left out of the lookup.
+    pub fn contract_details_refusal(c: &crate::api::types::Contract) -> Option<(i64, String)> {
+        let refuse = |cause: &str| Some((321, format!("Error validating request.-'bK' : cause - {}", cause)));
+        let sec_type = c.sec_type.trim();
+        let news = sec_type.eq_ignore_ascii_case("NEWS");
+        let sec_id = !c.sec_id.is_empty();
+        let issuer = !c.issuer_id.trim().is_empty();
+        if c.con_id <= 0 && c.symbol.is_empty() && c.local_symbol.is_empty() && !sec_id && !news && !issuer {
+            return refuse("The symbol or the local-symbol or the security id must be entered");
+        }
+        let no_type = sec_type.is_empty() || ["UNK", "All", "*"].iter().any(|t| sec_type.eq_ignore_ascii_case(t));
+        if c.con_id <= 0 && no_type && !sec_id && !issuer {
+            return refuse("Please enter a valid security type");
+        }
+        None
     }
 
     /// The reference's local answers to a reqHistoricalTicks before its
@@ -4385,11 +4434,24 @@ impl ClientCore {
     }
 
     /// Every order the reference refuses before sending anything, with its
-    /// error code and text. Nothing is sent for such an order.
-    pub fn refusal_before_sending(order: &ApiOrder) -> Option<(i64, String)> {
+    /// error code and text. Nothing is sent for such an order. `exchange`
+    /// is the contract's.
+    pub fn refusal_before_sending(order: &ApiOrder, exchange: &str) -> Option<(i64, String)> {
         Self::read_refusal(order)
+            .or_else(|| Self::exchange_refusal(exchange))
             .or_else(|| Self::order_rule_refusal(order))
             .or_else(|| Self::fractional_quantity_refusal(order))
+    }
+
+    /// An order whose contract has no exchange (empty, the official API's
+    /// default): error 452's text "Missing order exchange", sent as 321,
+    /// nothing sent. The reference checks it before its other order rules
+    /// (`jextend.bH.S()@437-455`: `jutils.dO.c(String)`, null or empty, on
+    /// the contract's exchange `jclient.ph.G()`); ibx used to send the
+    /// order with no exchange.
+    fn exchange_refusal(exchange: &str) -> Option<(i64, String)> {
+        exchange.is_empty()
+            .then(|| (321, "Error validating request.-'bH' : cause - Missing order exchange".to_string()))
     }
 
     /// The refusals of the reference's reading of the order, in its order
@@ -5793,8 +5855,8 @@ mod tests {
         assert!(ClientCore::implied_zone_warnings(&with_time("20991231-23:59:59")).is_empty());
         assert!(ClientCore::implied_zone_warnings(&with_time("20991231 23:59:59 US/Eastern")).is_empty());
         assert!(ClientCore::implied_zone_warnings(&with_time("tomorrow")).is_empty());
-        assert_eq!(ClientCore::refusal_before_sending(&with_time("tomorrow")), Some((10314, invalid.clone())));
-        assert_eq!(ClientCore::refusal_before_sending(&with_time("20991231-23:59:59")), None);
+        assert_eq!(ClientCore::refusal_before_sending(&with_time("tomorrow"), "SMART"), Some((10314, invalid.clone())));
+        assert_eq!(ClientCore::refusal_before_sending(&with_time("20991231-23:59:59"), "SMART"), None);
 
         let zone = |t: &str, contract: Option<&str>| ClientCore::condition_time_zone_refusal(&with_time(t), contract);
         let machine = crate::gateway::machine_time_zone();
@@ -5910,25 +5972,25 @@ mod tests {
         let rule = |cause: &str| Some((321, format!("Error validating request.-'bH' : cause - {}", cause)));
         let read = |cause: &str| Some((320, format!("Error reading request:{}", cause)));
         for qty in [-1.0, 1_000_000_000.0, f64::INFINITY] {
-            assert_eq!(ClientCore::refusal_before_sending(&ApiOrder { total_quantity: qty, ..lmt(100.0) }),
+            assert_eq!(ClientCore::refusal_before_sending(&ApiOrder { total_quantity: qty, ..lmt(100.0) }, "SMART"),
                 rule("Order size does not conform to market rule."), "{qty}");
         }
-        assert_eq!(ClientCore::refusal_before_sending(&ApiOrder { total_quantity: 999_999_999.0, ..lmt(100.0) }), None);
+        assert_eq!(ClientCore::refusal_before_sending(&ApiOrder { total_quantity: 999_999_999.0, ..lmt(100.0) }, "SMART"), None);
         let trail = |pct: f64| ApiOrder { order_type: "TRAIL".into(), trailing_percent: pct, ..lmt(0.0) };
         for pct in [-0.5, 100.5, f64::INFINITY] {
-            assert_eq!(ClientCore::refusal_before_sending(&trail(pct)),
+            assert_eq!(ClientCore::refusal_before_sending(&trail(pct), "SMART"),
                 rule("Invalid Trailing Percent value. Valid values are greater than 0 and less than 100."), "{pct}");
         }
-        assert_eq!(ClientCore::refusal_before_sending(&trail(1.5)), None);
+        assert_eq!(ClientCore::refusal_before_sending(&trail(1.5), "SMART"), None);
         let both = ApiOrder { aux_price: 0.5, ..trail(1.5) };
-        assert_eq!(ClientCore::refusal_before_sending(&both),
+        assert_eq!(ClientCore::refusal_before_sending(&both, "SMART"),
             read("Cannot specify Trailing Amount and Trailing Percent at the same time"));
         let disc = ApiOrder { discretionary_amt: -0.1, ..lmt(100.0) };
-        assert_eq!(ClientCore::refusal_before_sending(&disc),
+        assert_eq!(ClientCore::refusal_before_sending(&disc, "SMART"),
             read("Discretionary amount does not conform to the minimum price variation for this contract "));
         // Only the last reading error is given.
         let two = ApiOrder { discretionary_amt: -0.1, ..both };
-        assert_eq!(ClientCore::refusal_before_sending(&two).unwrap().1,
+        assert_eq!(ClientCore::refusal_before_sending(&two, "SMART").unwrap().1,
             "Error reading request:Cannot specify Trailing Amount and Trailing Percent at the same time");
     }
 
@@ -5940,40 +6002,52 @@ mod tests {
         let rule = |cause: &str| Some((321, format!("Error validating request.-'bH' : cause - {}", cause)));
         let typed = |t: &str, aux: f64| ApiOrder { order_type: t.into(), aux_price: aux, ..lmt(100.0) };
         for t in ["STP", "STP LMT", "STP PRT"] {
-            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::MAX)), rule("Please enter a stop price"), "{t}");
-            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::NAN)), rule("Invalid Stop Price"), "{t}");
-            assert_eq!(ClientCore::refusal_before_sending(&typed(t, 90.0)), None, "{t}");
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::MAX), "SMART"), rule("Please enter a stop price"), "{t}");
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::NAN), "SMART"), rule("Invalid Stop Price"), "{t}");
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, 90.0), "SMART"), None, "{t}");
         }
         for t in ["MIT", "LIT"] {
-            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::MAX)), rule("Invalid Trigger Price"), "{t}");
-            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::INFINITY)), rule("Invalid Trigger Price"), "{t}");
-            assert_eq!(ClientCore::refusal_before_sending(&typed(t, 90.0)), None, "{t}");
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::MAX), "SMART"), rule("Invalid Trigger Price"), "{t}");
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, f64::INFINITY), "SMART"), rule("Invalid Trigger Price"), "{t}");
+            assert_eq!(ClientCore::refusal_before_sending(&typed(t, 90.0), "SMART"), None, "{t}");
         }
         // The stop price comes before the trigger method.
         let both = ApiOrder { trigger_method: 5, ..typed("STP", f64::MAX) };
-        assert_eq!(ClientCore::refusal_before_sending(&both), rule("Please enter a stop price"));
+        assert_eq!(ClientCore::refusal_before_sending(&both, "SMART"), rule("Please enter a stop price"));
+    }
+
+    // An order whose contract has no exchange (empty, the official API's
+    // default): 321 "Missing order exchange", before the other order rules
+    // (`jextend.bH.S()@437-455`), nothing sent.
+    #[test]
+    fn an_order_with_no_exchange_is_refused() {
+        let text = "Error validating request.-'bH' : cause - Missing order exchange".to_string();
+        assert_eq!(ClientCore::refusal_before_sending(&lmt(100.0), ""), Some((321, text.clone())));
+        let unknown_side = ApiOrder { action: "X".into(), ..lmt(100.0) };
+        assert_eq!(ClientCore::refusal_before_sending(&unknown_side, ""), Some((321, text)));
+        assert_eq!(ClientCore::refusal_before_sending(&lmt(100.0), "ISLAND"), None);
     }
 
     // ibx#468: two local refusals of the reference.
     #[test]
     fn midprice_outside_rth_and_trail_limit_fields_are_refused() {
         let midprice = ApiOrder { order_type: "MIDPRICE".into(), outside_rth: true, ..lmt(100.0) };
-        let (code, text) = ClientCore::refusal_before_sending(&midprice).expect("refused");
+        let (code, text) = ClientCore::refusal_before_sending(&midprice, "SMART").expect("refused");
         assert_eq!(code, 321);
         assert!(text.ends_with("Midprice orders are not supported outside of regular trading hours."), "{text}");
         let rth = ApiOrder { order_type: "MIDPRICE".into(), outside_rth: false, ..lmt(100.0) };
-        assert!(ClientCore::refusal_before_sending(&rth).is_none());
+        assert!(ClientCore::refusal_before_sending(&rth, "SMART").is_none());
 
         let trail = |lmt_price: f64, offset: f64| ApiOrder {
             order_type: "TRAIL LIMIT".into(), aux_price: 1.0, trail_stop_price: 150.0,
             lmt_price, lmt_price_offset: offset, ..lmt(0.0)
         };
-        let both = ClientCore::refusal_before_sending(&trail(100.0, 0.30)).expect("both: refused");
+        let both = ClientCore::refusal_before_sending(&trail(100.0, 0.30), "SMART").expect("both: refused");
         assert_eq!(both.0, 321);
         assert!(both.1.ends_with("You must specify one value: limit price or limit price offset value."));
-        assert!(ClientCore::refusal_before_sending(&trail(0.0, f64::MAX)).is_some(), "neither: refused");
-        assert!(ClientCore::refusal_before_sending(&trail(0.0, 0.30)).is_none(), "offset only");
-        assert!(ClientCore::refusal_before_sending(&trail(100.0, f64::MAX)).is_none(), "limit price only");
+        assert!(ClientCore::refusal_before_sending(&trail(0.0, f64::MAX), "SMART").is_some(), "neither: refused");
+        assert!(ClientCore::refusal_before_sending(&trail(0.0, 0.30), "SMART").is_none(), "offset only");
+        assert!(ClientCore::refusal_before_sending(&trail(100.0, f64::MAX), "SMART").is_none(), "limit price only");
     }
 
     fn lmt(price: f64) -> ApiOrder {

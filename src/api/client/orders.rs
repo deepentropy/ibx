@@ -30,7 +30,7 @@ impl EClient {
         }
         // Refused before sending, like the reference: error() only.
         let contract_zone = self.shared.reference.time_zone_id(contract.con_id);
-        if let Some((code, message)) = ClientCore::refusal_before_sending(order)
+        if let Some((code, message)) = ClientCore::refusal_before_sending(order, &contract.exchange)
             .or_else(|| ClientCore::algo_definition_refusal(order, &contract.exchange, &self.shared.reference))
             .or_else(|| ClientCore::account_config_refusal(
                 order, self.shared.reference.account_features().as_deref(), &self.account_id))

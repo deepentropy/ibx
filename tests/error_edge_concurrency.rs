@@ -54,8 +54,10 @@ fn test_client_with_engine() -> (EClient, crossbeam_channel::Sender<ControlComma
     (client, tx, engine, shared)
 }
 
+// The API's Contract has no default security type or exchange: the
+// contract names them, as an order needs its exchange.
 fn spy() -> Contract {
-    Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() }
+    Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -124,7 +126,7 @@ fn place_order_unsupported_algo_returns_error() {
 fn place_order_zero_con_id_still_sends() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
-    let contract = Contract { con_id: 0, symbol: "TEST".into(), ..Default::default() };
+    let contract = Contract { con_id: 0, symbol: "TEST".into(), exchange: "SMART".into(), ..Default::default() };
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0,
         order_type: "MKT".into(), ..Default::default()
@@ -630,7 +632,7 @@ fn concurrent_place_order_and_process_msgs() {
                 order_type: "MKT".into(), ..Default::default()
             };
             let id = client_b.next_order_id();
-            let _ = client_b.place_order(id, &Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() }, &order);
+            let _ = client_b.place_order(id, &spy(), &order);
         }
     });
 

@@ -60,9 +60,12 @@ impl EClient {
         mode_9887: i32,
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_mkt_data_ex", &[req_id, contract.con_id]) { return Ok(()); }
+        // A contract with no exchange: 321, the reference's first check.
         // An invalid generic tick list of a request that is no snapshot:
         // 321 (ibx#450).
-        if let Some((code, text)) = self.core.generic_tick_list_refusal(generic_tick_list, snapshot, &contract.sec_type) {
+        if let Some((code, text)) = crate::client_core::ClientCore::market_data_exchange_refusal(&contract.exchange, &contract.sec_type)
+            .or_else(|| self.core.generic_tick_list_refusal(generic_tick_list, snapshot, &contract.sec_type))
+        {
             self.shared.orders.push_order_error(req_id, code, text);
             return Ok(());
         }

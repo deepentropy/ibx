@@ -22,12 +22,14 @@ fn test_client() -> (EClient, crossbeam_channel::Receiver<ControlCommand>, Arc<S
     (client, rx, shared)
 }
 
+// The API's Contract has no default security type or exchange: the
+// contract names them, as an order needs its exchange.
 fn spy() -> Contract {
-    Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() }
+    Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }
 }
 
 fn aapl() -> Contract {
-    Contract { con_id: 265598, symbol: "AAPL".into(), ..Default::default() }
+    Contract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), ..Default::default() }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
