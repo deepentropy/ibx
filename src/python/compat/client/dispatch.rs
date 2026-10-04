@@ -139,11 +139,12 @@ impl EClient {
         let remaining = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
         let view = self.core.order_view(update.order_id, shared, status);
         let (last_fill_price, client_id) = view.as_ref().map(|v| (v.last_fill_price, v.client_id)).unwrap_or((0.0, 0));
+        let why_held = self.core.why_held(status, view.as_ref().map_or("", |v| v.order.order_type.as_str()), update.parent_id);
         let view = view.filter(|_| status != "Cancelled");
         let report = crate::client_core::OrderReport {
             view, status: status.into(), filled, remaining,
             avg_fill_price: update.avg_fill_price as f64 / PRICE_SCALE_F,
-            perm_id: update.perm_id, parent_id: update.parent_id, last_fill_price, client_id,
+            perm_id: update.perm_id, parent_id: update.parent_id, last_fill_price, client_id, why_held,
         };
         self.repeat_order_report(py, update.order_id, &report)?;
         self.core.remember_report(update.order_id, report);
@@ -158,7 +159,7 @@ impl EClient {
             self.send_open_order(py, order_id, v)?;
         }
         call_wrapper!(self.wrapper, py, "order_status", (order_id, r.status.as_str(), r.filled, r.remaining,
-             r.avg_fill_price, r.perm_id, r.parent_id, r.last_fill_price, r.client_id, "", 0.0f64));
+             r.avg_fill_price, r.perm_id, r.parent_id, r.last_fill_price, r.client_id, r.why_held.as_str(), 0.0f64));
         Ok(())
     }
 
@@ -305,11 +306,12 @@ impl EClient {
                 }
                 None => 0,
             };
+            let why_held = self.core.why_held(status, view.as_ref().map_or("", |v| v.order.order_type.as_str()), parent_id);
             call_wrapper!(self.wrapper, py, "order_status", (fill.order_id, status, cum_qty, remaining,
-                 avg_price, perm_id, parent_id, price, client_id, "", 0.0f64));
+                 avg_price, perm_id, parent_id, price, client_id, why_held.as_str(), 0.0f64));
             self.core.remember_report(fill.order_id, crate::client_core::OrderReport {
                 view, status: status.into(), filled: cum_qty, remaining, avg_fill_price: avg_price,
-                perm_id, parent_id, last_fill_price: price, client_id,
+                perm_id, parent_id, last_fill_price: price, client_id, why_held,
             });
             self.core.record_last_fill_price(fill.order_id, price);
 
@@ -590,6 +592,8 @@ impl EClient {
                 // The account and the client id, as the reference's (ibx#486).
                 o.account = if order.account.is_empty() { self.account() } else { order.account };
                 o.client_id = self.core.client_id.load(std::sync::atomic::Ordering::Relaxed) as i32;
+                // The permId of the preview's order (ibx#486).
+                o.perm_id = wi.state.perm_id;
                 (Py::new(py, c)?.into_any(), Py::new(py, o)?.into_any())
             } else {
                 (Py::new(py, Contract::default())?.into_any(),

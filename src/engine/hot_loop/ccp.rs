@@ -1139,6 +1139,9 @@ impl CcpState {
             // A data frame with a reason: the open order, then error 201
             // (captured 02/10/2026: a what-if of 10,000,000 shares).
             reject_reason: if final_reply { text(58) } else { String::new() },
+            // The reference's preview openOrder has the permId of its order
+            // (ibx#486, b1_462_whatif of 02/10/2026).
+            perm_id: parsed.get(&37).map(|s| perm_id_from_fix_order_id(s)).unwrap_or(0),
         };
         let response = crate::types::WhatIfResponse {
             order_id,
@@ -3944,7 +3947,7 @@ mod tests {
     ];
 
     /// The ClOrdID the preview of order 42 was sent under (ibx#462).
-    const WHAT_IF_CLORD: &str = "42.1000000";
+    const WHAT_IF_CLORD: &str = "2147483648.0";
 
     /// A preview of order 42 in flight, and a working order 42 the preview
     /// must not touch (ibx#462).

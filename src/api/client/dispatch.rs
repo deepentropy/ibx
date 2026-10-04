@@ -128,13 +128,14 @@ impl EClient {
                 }
                 None => 0,
             };
+            let why_held = self.core.why_held(status, view.as_ref().map_or("", |v| v.order.order_type.as_str()), parent_id);
             wrapper.order_status(
                 fill.order_id, status, filled_f, remaining_f,
-                avg_f, perm_id, parent_id, price_f, client_id, "", 0.0,
+                avg_f, perm_id, parent_id, price_f, client_id, &why_held, 0.0,
             );
             self.core.remember_report(fill.order_id, crate::client_core::OrderReport {
                 view, status: status.into(), filled: filled_f, remaining: remaining_f, avg_fill_price: avg_f,
-                perm_id, parent_id, last_fill_price: price_f, client_id,
+                perm_id, parent_id, last_fill_price: price_f, client_id, why_held,
             });
             self.core.record_last_fill_price(fill.order_id, price_f);
 
@@ -219,6 +220,7 @@ impl EClient {
             // as the reference's (ibx#486, b1_462_whatif of 02/10/2026).
             if order.account.is_empty() { order.account = self.account_id.clone(); }
             order.client_id = self.core.client_id.load(std::sync::atomic::Ordering::Relaxed) as i32;
+            order.perm_id = wi.state.perm_id;
             wrapper.open_order(wi.order_id, &contract, &order, &state);
             if !wi.state.reject_reason.is_empty() {
                 wrapper.error(wi.order_id, 201, &format!("Order rejected - reason:{}", wi.state.reject_reason), "");
@@ -238,11 +240,12 @@ impl EClient {
         let remaining_f = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
         let view = self.core.order_view(update.order_id, &self.shared, status);
         let (last_fill_price, client_id) = view.as_ref().map(|v| (v.last_fill_price, v.client_id)).unwrap_or((0.0, 0));
+        let why_held = self.core.why_held(status, view.as_ref().map_or("", |v| v.order.order_type.as_str()), update.parent_id);
         let view = view.filter(|_| status != "Cancelled");
         let report = crate::client_core::OrderReport {
             view, status: status.into(), filled: filled_f, remaining: remaining_f,
             avg_fill_price: update.avg_fill_price as f64 / PRICE_SCALE_F,
-            perm_id: update.perm_id, parent_id: update.parent_id, last_fill_price, client_id,
+            perm_id: update.perm_id, parent_id: update.parent_id, last_fill_price, client_id, why_held,
         };
         Self::repeat_order_report(wrapper, update.order_id, &report);
         self.core.remember_report(update.order_id, report);
@@ -256,7 +259,7 @@ impl EClient {
         }
         wrapper.order_status(
             order_id, &r.status, r.filled, r.remaining, r.avg_fill_price,
-            r.perm_id, r.parent_id, r.last_fill_price, r.client_id, "", 0.0,
+            r.perm_id, r.parent_id, r.last_fill_price, r.client_id, &r.why_held, 0.0,
         );
     }
 

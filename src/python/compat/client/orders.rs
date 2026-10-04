@@ -359,10 +359,11 @@ impl EClient {
                 (*order_id, &c_py, &o_py, &state_py),
                 None,
             )?;
+            let why_held = self.core.why_held(&tracked.status, &tracked.order.order_type, tracked.order.parent_id);
             self.wrapper.call_method(
                 py, "order_status",
                 (*order_id, tracked.status.as_str(), tracked.filled, tracked.remaining,
-                 0.0f64, tracked.order.perm_id, tracked.order.parent_id, 0.0f64, 0i64, "", 0.0f64),
+                 0.0f64, tracked.order.perm_id, tracked.order.parent_id, 0.0f64, 0i64, why_held.as_str(), 0.0f64),
                 None,
             )?;
         }

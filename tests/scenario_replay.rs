@@ -22,8 +22,6 @@ use ibx::test_support::Fields;
 ///   (NASDAQ.NMS), which the reference looked up; ibx has no definition of
 ///   a contract placed by conId and names the order's exchange
 ///   (`order_message_names_the_listing_exchange`);
-/// - orderStatus whyHeld "trigger" for a stop not triggered yet
-///   (`why_held_is_trigger_for_a_stop`);
 /// - the first openOrder of a STP order shows a limit price the wire does
 ///   not carry (`stp_first_open_order_limit_price`).
 fn known(line: &str) -> String {
@@ -36,9 +34,6 @@ fn known(line: &str) -> String {
             rows[1] = words.join(" ");
         }
         f[3] = rows.join("\n");
-    }
-    if f[0] == "orderStatus" {
-        f[10] = String::new();
     }
     if f[0] == "openOrder" && f[5].contains("orderType=STP,") {
         f[5] = f[5].split(',').map(|kv| if kv.starts_with("lmtPrice=") { "lmtPrice=-" } else { kv }).collect::<Vec<_>>().join(",");

@@ -197,17 +197,10 @@ struct Known {
     /// (NASDAQ.NMS); ibx has no definition of a contract placed by conId
     /// and names the order's exchange.
     exchange_399: bool,
-    /// orderStatus whyHeld: the reference says "trigger" for a stop or
-    /// trailing order not triggered yet; ibx never fills it.
-    why_held: bool,
     /// openOrder lmtPrice of a STP order: the reference shows a price
     /// (250.03 for a SELL stop at 250) on the first report, none later;
     /// where it comes from is not read yet.
     stp_lmt: bool,
-    /// The ClOrdID version of a what-if preview: the reference's is 0
-    /// (a ClOrdID of its own), ibx's 1000000 (ibx#462); and the preview's
-    /// openOrder permId.
-    preview_clord: bool,
 }
 
 /// The order callbacks of a replay (no session notices), with the known
@@ -224,13 +217,6 @@ fn order_lines(lines: &[String], known: Known) -> Vec<String> {
             }
             f[3] = rows.join("\n");
         }
-        if known.why_held && f[0] == "orderStatus" {
-            f[10] = String::new();
-        }
-        if known.preview_clord && f[0] == "openOrder" && f[5].contains("whatIf=true") {
-            f[5] = f[5].split(',').map(|kv| if kv.starts_with("permId=") { "permId=-" } else { kv })
-                .collect::<Vec<_>>().join(",");
-        }
         if known.stp_lmt && f[0] == "openOrder" && f[5].contains("orderType=STP,") {
             f[5] = f[5].split(',').map(|kv| if kv.starts_with("lmtPrice=") { "lmtPrice=-" } else { kv })
                 .collect::<Vec<_>>().join(",");
@@ -246,16 +232,7 @@ fn order_lines(lines: &[String], known: Known) -> Vec<String> {
 fn replay_and_compare(name: &str, keep_rec: impl Fn(&Rec) -> bool, known: Known, skip_orders: &[i64]) -> OrderReplay {
     let mut fx = load(name);
     fx.recs.retain(|r| keep_rec(r));
-    let mut r = replay_orders(&fx);
-    if known.preview_clord {
-        let mask = |f: &mut Fields| if f.iter().any(|(t, v)| *t == 6091 && v == "1") {
-            for (t, v) in f.iter_mut() { if *t == 11 { *v = "{id}.preview".into(); } }
-        };
-        for (_, mine, theirs) in r.pairs.iter_mut() {
-            if let Some(a) = mine { mask(a); }
-            if let Some((_, b)) = theirs { mask(b); }
-        }
-    }
+    let r = replay_orders(&fx);
     let diffs: Vec<String> = frame_differences(&r).into_iter()
         .filter(|d| !skip_orders.iter().any(|id| d.starts_with(&format!("order {id} "))))
         .collect();
@@ -294,7 +271,7 @@ fn dump_all_order_fixtures() {
     }
 }
 
-const KNOWN: Known = Known { exchange_399: true, why_held: true, stp_lmt: true, preview_clord: false };
+const KNOWN: Known = Known { exchange_399: true, stp_lmt: true };
 
 fn all(_: &Rec) -> bool { true }
 
@@ -376,11 +353,10 @@ fn session_order_types() {
 
 // What-if previews (02/10/2026, b1_462_whatif): LMT, MKT and a margin
 // refusal (openOrder then 201); transmit off refused with 321; a real
-// order after them. The preview's ClOrdID version and the combo preview
-// are in the ignored tests below.
+// order after them. The combo preview is in the ignored test below.
 #[test]
 fn what_if_previews() {
-    replay_and_compare("orders_b1_462_whatif", all, Known { preview_clord: true, ..KNOWN }, &[78]);
+    replay_and_compare("orders_b1_462_whatif", all, KNOWN, &[78]);
 }
 
 // An algo order and the algo refusals (02/10/2026, b1_263_algo_refusals):
@@ -402,11 +378,11 @@ fn order_message_names_the_listing_exchange() {
 }
 
 // orderStatus whyHeld "trigger" for a stop or trailing order before its
-// trigger (jclient.pe.iK(): "child", "locate", "trigger").
+// trigger (jclient.pe.iK(): "child", "locate", "trigger"). Every replay
+// compares whyHeld; this one has STP and TRAIL orders.
 #[test]
-#[ignore = "ibx#486: orderStatus whyHeld is never filled"]
 fn why_held_is_trigger_for_a_stop() {
-    replay_and_compare("orders_premarket_order_types", all, Known { why_held: false, ..KNOWN }, &[]);
+    replay_and_compare("orders_premarket_order_types", all, KNOWN, &[]);
 }
 
 // The first openOrder of a STP order shows lmtPrice 250.03 (SELL stop at
@@ -434,20 +410,22 @@ fn trail_mit_trail_lit_peg_best() {
     replay_and_compare("orders_rth_order_types", all, KNOWN, &[]);
 }
 
-// The reference gives a preview a ClOrdID of its own with version 0; ibx
-// writes the order id with version 1000000 (ibx#462), and the preview's
-// openOrder has no permId.
+// The reference gives a preview a ClOrdID of its own with version 0, and
+// the preview's openOrder the permId of that order (ibx#486).
 #[test]
-#[ignore = "ibx#486: what-if ClOrdID version and permId"]
 fn what_if_clord_id_and_perm_id() {
-    replay_and_compare("orders_b1_462_whatif", all, KNOWN, &[78]);
+    let r = replay_and_compare("orders_b1_462_whatif", all, KNOWN, &[78]);
+    let previews: Vec<&str> = r.pairs.iter().filter_map(|(_, mine, _)| mine.as_ref())
+        .filter(|f| tag(f, 6091) == Some("1")).filter_map(|f| tag(f, 11)).collect();
+    assert_eq!(previews, ["{id}.0"; 3]);
+    assert!(r.cb_ours.iter().filter(|l| l.contains("whatIf=true")).all(|l| l.contains("permId={perm}")));
 }
 
 // A combo preview (QQQ,SPY BAG, conId 0 in the request).
 #[test]
 #[ignore = "ibx#486: the combo what-if of b1_462 is not sent by the replay"]
 fn what_if_of_a_combo() {
-    replay_and_compare("orders_b1_462_whatif", all, Known { preview_clord: true, ..KNOWN }, &[]);
+    replay_and_compare("orders_b1_462_whatif", all, KNOWN, &[]);
 }
 
 // A condition time in Asia/Tokyo on a US stock: the reference refuses it

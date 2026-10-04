@@ -185,10 +185,12 @@ pub(crate) fn drain_and_send_orders(
         }
         // A what-if goes out under a ClOrdID of its own and stays out of
         // the order table: an order with the same id is left as it is
-        // (ibx#462).
+        // (ibx#462). As the reference's preview copy, a new order id with
+        // version 0 (ibx#486, b1_462_whatif of 02/10/2026: 1288736441.0,
+        // 1288736443.0 for the orders 74 and 75).
         let held = what_if.then(|| (context.order(oid).copied(), context.modify_versions.get(&oid).copied()));
         if what_if {
-            let clord = format!("{}.{}", oid, WHAT_IF_CLORD_BASE + context.next_what_if);
+            let clord = format!("{}.0", WHAT_IF_ID_BASE + u64::from(context.next_what_if));
             context.next_what_if = context.next_what_if.wrapping_add(1);
             let instrument = order_req.instrument().unwrap_or(0);
             context.what_ifs.insert(clord.clone(), (oid, instrument));
@@ -1968,9 +1970,10 @@ pub(crate) fn reference_rank(tag: u32) -> u16 {
     }
 }
 
-/// Version part of the what-if ClOrdIDs, far above any replace count, so
-/// a preview never takes an id an order of the same number uses (ibx#462).
-const WHAT_IF_CLORD_BASE: u32 = 1_000_000;
+/// First order id of the what-if ClOrdIDs: above the 32-bit range of the
+/// API order ids (and of the reference's own ids), so a preview never
+/// takes the id of an order (ibx#462, ibx#486).
+const WHAT_IF_ID_BASE: u64 = 1 << 31;
 
 /// The adjustable-stop tags (ib-agent#49), shared by the plain and extended
 /// paths so both emit the same values in the same order.
@@ -3587,7 +3590,7 @@ mod tests {
         let want = captured(reference, &[35, 40, 59, 6091, 100, 6210, 6008]);
         assert_eq!(ours_as(&ours, &want), want);
         assert_eq!(tag(&ours, 44).and_then(|v| v.parse::<f64>().ok()), Some(237.82));
-        assert_eq!(tag(&ours, 11), Some("100.1000000"), "the preview's own ClOrdID");
+        assert_eq!(tag(&ours, 11), Some("2147483648.0"), "the preview's own ClOrdID");
         assert_eq!(pos(&ours, 6091) + 1, pos(&ours, 15));
 
         // A MKT preview is a MKT order (captured in ib-agent#160), not a limit at 0.
@@ -3638,7 +3641,7 @@ mod tests {
         let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
         assert_eq!(frames.len(), 1);
         assert_eq!(tag(&frames[0], 35), Some("D"), "a new preview, never a replace");
-        assert_eq!(tag(&frames[0], 11), Some("105.1000000"));
+        assert_eq!(tag(&frames[0], 11), Some("2147483648.0"));
         assert!(tag(&frames[0], 41).is_none());
         let order = context.order(105).copied().expect("the working order is kept");
         assert_eq!((order.price, order.status), (100 * P, OrderStatus::PendingSubmit));
@@ -3650,7 +3653,7 @@ mod tests {
             order_type: "LMT".into(), lmt_price: 1.0, ..Default::default() }, 106);
         context.pending_orders.push(new_id);
         let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
-        assert_eq!(tag(&frames[0], 11), Some("106.1000001"));
+        assert_eq!(tag(&frames[0], 11), Some("2147483649.0"));
         assert!(context.order(106).is_none());
         assert!(context.modify_versions.get(&106).is_none());
     }

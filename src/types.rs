@@ -360,6 +360,8 @@ pub struct WhatIfState {
     /// The server's reason when it refuses the order (error 201 after the
     /// open order).
     pub reject_reason: String,
+    /// The permId of the preview's order (37 of the reply); 0 without one.
+    pub perm_id: i64,
 }
 
 /// Adjusted order type for adjustable stops (FIX tag 6261).

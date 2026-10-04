@@ -199,7 +199,7 @@ class Driver:
 
 def known(line):
     """The known differences of the Rust order scenarios (tests/scenario_replay.rs
-    `known`): the 399 exchange, whyHeld, the first STP limit price."""
+    `known`): the 399 exchange, the first STP limit price."""
     f = line.split("|")
     if f[0] == "error" and len(f) > 3 and f[2] == "399":
         rows = f[3].split("\n")
@@ -208,8 +208,6 @@ def known(line):
             words[-1] = "{exchange}"
             rows[1] = " ".join(words)
         f[3] = "\n".join(rows)
-    if f[0] == "orderStatus":
-        f[10] = ""
     return "|".join(f)
 
 

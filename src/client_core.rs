@@ -677,6 +677,8 @@ pub struct OrderReport {
     pub parent_id: i64,
     pub last_fill_price: f64,
     pub client_id: i64,
+    /// orderStatus whyHeld ([`ClientCore::why_held`]).
+    pub why_held: String,
 }
 
 /// A locally tracked order for `req_open_orders` / dispatch status updates.
@@ -2861,6 +2863,34 @@ impl ClientCore {
         if code == 2109 {
             self.rth_dropped.lock().unwrap().insert(order_id);
         }
+    }
+
+    /// orderStatus whyHeld, as the reference's `jclient.pe.iK()`: only for
+    /// a PreSubmitted order (states Acked and Pending), the reasons joined
+    /// with commas: "child" for an order whose parent is not done with a
+    /// fill (`pe.ie()`: a parent not Filled or Cancelled with a filled
+    /// quantity, `pe.i5()`), "trigger" for an order type that waits for
+    /// its trigger (`jibtypes.s.q()`: STP, STP LMT, STP PRT, TRAIL, TRAIL
+    /// LIMIT). Captured 26/09/2026 (bracket: "child", "child,trigger") and
+    /// 28/09/2026 (premarket_order_types: "trigger" for STP and TRAIL).
+    /// The third reason, "locate" (a short sale with the server's allowed
+    /// quantity 6365), is not given: no recorded report carries 6365.
+    pub fn why_held(&self, status: &str, order_type: &str, parent_id: i64) -> String {
+        if status != "PreSubmitted" {
+            return String::new();
+        }
+        let mut why: Vec<&str> = Vec::new();
+        if parent_id != 0 {
+            let parent_done = self.last_reports.lock().unwrap().get(&parent_id)
+                .is_some_and(|r| matches!(r.status.as_str(), "Filled" | "Cancelled") && r.filled > 0.0);
+            if !parent_done {
+                why.push("child");
+            }
+        }
+        if ["STP", "STP LMT", "STP PRT", "TRAIL", "TRAIL LIMIT"].iter().any(|t| order_type.eq_ignore_ascii_case(t)) {
+            why.push("trigger");
+        }
+        why.join(",")
     }
 
     /// Keep the openOrder and orderStatus just given for an order.
