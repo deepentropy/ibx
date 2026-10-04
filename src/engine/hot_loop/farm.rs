@@ -968,7 +968,14 @@ impl FarmState {
         let min_tick: f64 = parts[1].parse().unwrap_or(0.01);
         let server_tag: u32 = match parts[2].parse() { Ok(v) => v, Err(_) => return };
 
-        if let Some(instrument) = context.market.instrument_by_con_id(con_id) {
+        // The slot of the contract's market data subscription: a contract
+        // asked without a conId has a slot of its own, apart from the slot
+        // its orders registered before (ibx#487, premarket_order_types of
+        // 28/09/2026: the trade fields went to the orders' slot).
+        let subscribed = context.market.active_instruments()
+            .filter(|&(id, c)| c == con_id && self.has_md_subscription(id))
+            .map(|(id, _)| id).next();
+        if let Some(instrument) = subscribed.or_else(|| context.market.instrument_by_con_id(con_id)) {
             // A trade stream tag, kept apart from the quote tags (#292),
             // with the tick and the size increment (when present, ibx#287)
             // its trades are scaled by.
@@ -2730,6 +2737,21 @@ mod tests {
         let q = shared.market.quote(id);
         assert_eq!(q.last_size, 100 * QTY_SCALE); // 250 x 0.01 x 40
         assert_eq!(q.volume, 50 * QTY_SCALE); // 5000 x 0.01
+    }
+
+    // ibx#487: the trade stream of a contract goes to the slot of its market
+    // data subscription, not to the slot its orders registered before.
+    #[test]
+    fn the_trade_stream_goes_to_the_subscribed_slot() {
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let orders = context.market.register(265598);
+        let md = context.market.try_register_unresolved().unwrap();
+        context.market.resolve_con_id(md, 265598);
+        assert_eq!(context.market.instrument_by_con_id(265598), Some(orders));
+        farm.instrument_md_reqs.push((md, vec![11, 12]));
+        farm.handle_ticker_setup(b"8=O\x0135=L\x01265598,0.01,186,,1", &mut context);
+        assert_eq!(context.market.route_farm_tag(farm.rx_farm, 186).map(|r| r.instrument), Some(md));
     }
 
     // ibx#449: the bid/ask ack gives the request parameters, with the

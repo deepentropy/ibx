@@ -124,13 +124,11 @@ fn premarket_order_types_and_order_events() {
 }
 
 // The market data part of the same scenario: AAPL top of book after the
-// orders on AAPL (BMW and 7203 go to other farms: left out). ibx gives the
-// quote of the first 35=P but not its trade fields (lastTimestamp, last,
-// lastSize, volume, close) when the contract's instrument was registered
-// by the orders before; with the orders left out it gives them
-// (src/golden/l1.rs `aapl_with_delayed_data_asked_before_the_open`).
+// orders on AAPL (BMW and 7203 go to other farms: left out): the first
+// 35=P gives the trade fields (lastTimestamp, last, lastSize, volume,
+// close) to the request, also when the orders registered the contract
+// before (ibx#487: they went to the orders' slot).
 #[test]
-#[ignore = "ibx#487: no trade fields on the first quote frame of a contract that orders registered before"]
 fn top_of_book_after_orders_on_the_contract() {
     check("20260928/premarket_order_types", Options::default().mask(known)
         .skip_seqs(&[21961, 21962, 22575, 22576]).until(22599)
