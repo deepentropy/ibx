@@ -167,7 +167,7 @@ impl EClient {
         if self.core.cancel_regulatory_snapshot(req_id, &self.control_tx) {
             return Ok(());
         }
-        if let Some(cancel) = self.core.unregister_mkt_data(req_id) {
+        if let Some(cancel) = self.core.unregister_mkt_data(&self.shared, req_id) {
             // The subscription ends with the last request of the contract;
             // its news entries go with it (ibx#458, ibx#444).
             if let Some(command) = cancel.command() {

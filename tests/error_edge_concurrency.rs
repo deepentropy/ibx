@@ -191,7 +191,7 @@ fn disconnect_during_active_subscription() {
     // Push quote after disconnect — process_msgs should still work (no panic)
     let mut q = Quote::default();
     q.bid = 150 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -304,7 +304,7 @@ fn zero_price_quote_dispatches_correctly() {
     let q = Quote { bid: 0, ask: 0, last: 0, bid_size: 0, ask_size: 0,
         last_size: 0, high: 0, low: 0, volume: 0, close: 0, open: 0, timestamp_ns: 0,
         bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0 };
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -324,7 +324,7 @@ fn crossed_market_quote_dispatches() {
         high: 0, low: 0, volume: 0, close: 0, open: 0, timestamp_ns: 0,
         bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0,
     };
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -345,7 +345,7 @@ fn negative_price_quote_dispatches() {
         high: 0, low: 0, volume: 0, close: 0, open: 0, timestamp_ns: 0,
         bid_exch_mask: 0, ask_exch_mask: 0, last_exch_mask: 0,
     };
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
@@ -581,7 +581,7 @@ fn rapid_subscribe_unsubscribe_no_stale_state() {
     let mut w = RecordingWrapper::default();
     let mut q = Quote::default();
     q.bid = 999 * PRICE_SCALE;
-    shared.market.push_quote(0, &q);
+    shared.market.push_test_message(0, &q, &Default::default());
     client.process_msgs(&mut w);
     // No ticks should arrive since all subscriptions were cancelled
     let ticks: Vec<_> = w.events.iter().filter(|e| e.starts_with("tick_price:1:")).collect();

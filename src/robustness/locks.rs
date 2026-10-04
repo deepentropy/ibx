@@ -101,7 +101,7 @@ fn session(disconnect_on: &'static str) -> Vec<&'static str> {
     client.req_mkt_data(1, &stock(), "", false, false).expect("subscribed");
     let instrument = *client.core.req_to_instrument.lock().unwrap().get(&1).expect("an instrument");
     client.place_order(100, &stock(), &limit_order()).expect("placed");
-    shared.market.push_quote(instrument, &Quote { bid: 99 * PRICE_SCALE, ask: 101 * PRICE_SCALE, bid_size: 5 * QTY_SCALE, ..Default::default() });
+    shared.market.push_test_message(instrument, &Quote { bid: 99 * PRICE_SCALE, ask: 101 * PRICE_SCALE, bid_size: 5 * QTY_SCALE, ..Default::default() }, &Default::default());
     shared.orders.push_order_update(OrderUpdate {
         order_id: 100, instrument, status: OrderStatus::Submitted, filled_qty_fixed: 0, remaining_qty_fixed: QTY_SCALE,
         avg_fill_price: 0, perm_id: 7, parent_id: 0, timestamp_ns: 1,

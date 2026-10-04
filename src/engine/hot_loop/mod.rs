@@ -1033,7 +1033,6 @@ impl HotLoop {
             // Zero the shared-side quote so a reused slot cannot serve the
             // previous contract's prices before its first tick.
             self.shared.market.push_quote(instrument, &crate::types::Quote::default());
-            self.shared.market.push_marks(instrument, crate::types::QuoteMarks::default());
             log::info!("Reclaimed instrument slot {}", instrument);
         }
     }
@@ -2444,10 +2443,11 @@ impl HotLoop {
         self.shared.market.push_tbt_quote(quote.clone());
     }
 
-    /// Inject a simulated tick for testing.
+    /// Inject a simulated tick for testing: the instrument's quote, as one
+    /// farm message for the API client (`md_events::TestMessage`).
     #[cfg(any(test, feature = "test-support"))]
     pub fn inject_tick(&mut self, instrument: InstrumentId) {
-        self.shared.market.push_quote(instrument, self.context.quote(instrument));
+        self.shared.market.push_test_message(instrument, self.context.quote(instrument), &Default::default());
         emit(&self.event_tx, Event::Tick(instrument));
     }
 
@@ -4967,7 +4967,7 @@ mod sharing_tests {
         engine.context = context;
         engine.send_md_resolved();
         assert!(sent(&mut farm_side).is_empty(), "nothing new on the farm");
-        assert_eq!(shared.market.drain_md_merges(), [(second, first)]);
+        assert_eq!(shared.market.drain_md_merges(), [(second, first, 0)]);
         assert_eq!(engine.farm.news.len(), 1);
         assert_eq!(engine.farm.news[0].refs, 2);
         // The client frees the slot it no longer uses.

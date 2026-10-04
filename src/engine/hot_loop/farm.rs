@@ -9,6 +9,7 @@ use crate::protocol::fixcomp;
 use crate::protocol::tick_decoder;
 use crate::engine::depth_book::{Change, DeepBook, Scale, SingleView, SmartMerge, SmartStatus, TopQuote, RESET_TEXT, SMART_STATUS_WAIT};
 use crate::protocol::depth_decoder;
+use crate::md_events::MdEvent;
 use crate::types::{DepthUpdate, InstrumentId, ReqId};
 use std::sync::Arc;
 use crossbeam_channel::Sender;
@@ -382,6 +383,61 @@ pub(crate) fn depth_component_reply(context: &mut Context, req_id: &str, msg: &[
 /// reference (#451).
 pub(crate) const DEPTH_RESUBSCRIBE_DELAY: std::time::Duration = std::time::Duration::from_millis(3000);
 
+/// What a block of a 35=P message is, for the market data queue (ibx#446):
+/// on a trade stream tag a trade, or daily figures when the block is a
+/// daily-stats one; on a quote tag a book update (a daily-stats block on a
+/// quote tag is dropped by the reference).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockKind { Quote, Trade, Daily }
+
+/// A block being read: what it set.
+#[derive(Debug, Clone, Copy)]
+struct MdBlock {
+    instrument: InstrumentId,
+    kind: BlockKind,
+    fields: u16,
+    /// A trade gives its time, its exchange.
+    time: bool,
+    exchange: bool,
+    /// The trade's status.
+    halted: Option<u8>,
+}
+
+impl MdBlock {
+    /// A block of an instrument an API request listens to; None otherwise.
+    #[inline(always)]
+    fn start(instrument: InstrumentId, trade: bool, stats: bool, queue: &crate::md_events::MdQueue) -> Option<Self> {
+        let kind = match (trade, stats) {
+            (true, true) => BlockKind::Daily,
+            (true, false) => BlockKind::Trade,
+            (false, false) => BlockKind::Quote,
+            (false, true) => return None,
+        };
+        if !queue.listened(instrument) || queue.needs_catch_up(instrument) {
+            return None;
+        }
+        Some(Self { instrument, kind, fields: 0, time: false, exchange: false, halted: None })
+    }
+
+    /// A tick of the block, as `MarketState::apply_tick` applies it.
+    #[inline(always)]
+    fn note(&mut self, tick: &tick_decoder::RawTick) {
+        use tick_decoder as td;
+        let m = tick.magnitude;
+        if let Some(f) = crate::md_events::wire_field(tick.tick_type, m, tick.stats_block) {
+            self.fields |= 1 << f;
+        }
+        if self.kind == BlockKind::Trade {
+            match tick.tick_type {
+                td::O_TIMESTAMP_BASE | td::O_TIMESTAMP_DELTA if m > 0 => self.time = true,
+                td::O_LAST_EXCH if m >= 0 => self.exchange = true,
+                td::O_ATTRIBUTES if m != -1 => self.halted = Some((m & 3) as u8),
+                _ => {}
+            }
+        }
+    }
+}
+
 pub(crate) struct FarmState {
     pub(crate) next_md_req_id: u32,
     pub(crate) md_req_to_instrument: Vec<(u32, InstrumentId)>,
@@ -463,6 +519,11 @@ impl FarmState {
         event_tx: &Option<Sender<Event>>,
         hb: &mut HeartbeatState,
     ) {
+        // Catch-ups of the market data queue, once it has room (ibx#446).
+        let queue = &shared.market.md_events;
+        if queue.catch_up_wanted() {
+            queue.write_catch_ups(|id| MdEvent::catch_up(id, context.quote(id), context.market.marks(id)));
+        }
         if self.disconnected {
             return;
         }
@@ -628,41 +689,38 @@ impl FarmState {
             self.depth_tops(&ticks, shared);
         }
         let mut notified = [0u64; crate::types::MAX_INSTRUMENTS / 64];
-        // Instruments whose trade stream ticked in this message: the first
-        // such tick tells whether the daily figures came before the trade
-        // (ibx#446).
-        let mut traded = [0u64; crate::types::MAX_INSTRUMENTS / 64];
+        let queue = &shared.market.md_events;
+        if queue.catch_up_wanted() {
+            queue.write_catch_ups(|id| MdEvent::catch_up(id, context.quote(id), context.market.marks(id)));
+        }
+        // The block being read, for the market data queue (ibx#446).
+        let mut block: Option<MdBlock> = None;
 
         // Phase 1: Apply all ticks to internal quotes before publishing.
         for tick in &ticks {
-            let route = match context.market.route_farm_tag(self.rx_farm, tick.server_tag) {
-                Some(r) => r,
-                None => continue,
-            };
-            let instrument = route.instrument;
-            let (word, bit) = ((instrument >> 6) as usize, 1u64 << (instrument & 63));
-            // The updates of the message, in its order (ibx#446).
-            if notified[word] & bit == 0 {
-                context.market.marks_mut(instrument).begin_message();
-            }
-            if route.trade && traded[word] & bit == 0 {
-                traded[word] |= bit;
-                context.market.set_daily_first(instrument, tick.stats_block);
-            }
+            let route = context.market.route_farm_tag(self.rx_farm, tick.server_tag);
             if tick.first {
-                let marks = context.market.marks_mut(instrument);
-                match (route.trade, tick.stats_block) {
-                    (true, true) => marks.begin_daily(),
-                    (true, false) => marks.begin_trade(),
-                    (false, false) => marks.note_quote_update(),
-                    (false, true) => {}
+                if let Some(b) = block.take() {
+                    self.end_md_block(&b, context, queue);
                 }
+                block = route.as_ref().and_then(|r| MdBlock::start(r.instrument, r.trade, tick.stats_block, queue));
+            }
+            let Some(route) = route else { continue };
+            let instrument = route.instrument;
+            if let Some(b) = block.as_mut() {
+                b.note(tick);
             }
 
             context.market.apply_tick_sized(instrument, route.price_tick, route.size_tick, route.trade, tick);
 
-            notified[word] |= bit;
+            notified[(instrument >> 6) as usize] |= 1u64 << (instrument & 63);
         }
+        if let Some(b) = block.take() {
+            self.end_md_block(&b, context, queue);
+        }
+        // The message's steps go together (the reader takes its book
+        // updates after its other steps).
+        queue.publish();
 
         // Phase 2: Publish complete quotes after all ticks in the batch are applied.
         for (word_idx, &word) in notified.iter().enumerate() {
@@ -671,11 +729,40 @@ impl FarmState {
                 let instrument = (word_idx as u32) * 64 + remaining.trailing_zeros();
                 remaining &= remaining - 1;
                 shared.market.push_quote(instrument, context.quote(instrument));
-                shared.market.push_marks(instrument, context.market.marks(instrument));
                 emit(event_tx, Event::Tick(instrument));
             }
         }
         self.tick_buf = ticks;
+    }
+
+    /// The steps of a block that ended (ibx#446): a trade gives its time
+    /// and its exchange when it has them, then its price and size; daily
+    /// figures and a book update give one step. Each with its values at
+    /// the end of the block.
+    fn end_md_block(&self, b: &MdBlock, context: &Context, queue: &crate::md_events::MdQueue) {
+        use crate::md_events::{field, MdStep};
+        let q = context.quote(b.instrument);
+        match b.kind {
+            BlockKind::Daily => {
+                queue.offer_quote(b.instrument, MdStep::Daily, b.fields, q, None, 0);
+            }
+            BlockKind::Trade => {
+                let mut rest = b.fields;
+                if b.time {
+                    queue.offer_quote(b.instrument, MdStep::Time, 1 << field::TIME, q, None, 0);
+                    rest &= !(1 << field::TIME);
+                }
+                if b.exchange {
+                    queue.offer_quote(b.instrument, MdStep::Exchange, 1 << field::LAST_EXCH, q, None, 0);
+                    rest &= !(1 << field::LAST_EXCH);
+                }
+                queue.offer_quote(b.instrument, MdStep::Last, rest, q, b.halted, 0);
+            }
+            BlockKind::Quote => {
+                let auto = context.market.marks(b.instrument).auto_word();
+                queue.offer_quote(b.instrument, MdStep::Quote, b.fields, q, None, auto);
+            }
+        }
     }
 
     fn handle_subscription_ack(
@@ -798,7 +885,7 @@ impl FarmState {
         }
         let (sec_type, exchange) = context.market.order_routing(instrument);
         let Some(sec_type_id) = crate::types::sec_type_id(&sec_type) else { return };
-        shared.reference.observe_exchange_map(instrument, code, sec_type_id);
+        shared.reference.observe_exchange_map_at(instrument, code, sec_type_id, shared.market.md_events.position());
         // Asked once per key; again only when the farm that was asked it
         // was lost before the map came.
         let waiting = matches!(shared.reference.exchange_map(code, Some(sec_type_id)), crate::bridge::ExchangeMapState::Waiting);
@@ -863,7 +950,7 @@ impl FarmState {
         let text = body.get(6).and_then(|&len| body.get(7..7 + len as usize)).map(exchange_map_text).unwrap_or_default();
         let map = parse_exchange_map(&text);
         log::info!("Exchange map {}:{}: {} exchanges", sub.code, sub.sec_type_id, map.len());
-        shared.reference.set_exchange_map(&sub.code, sub.sec_type_id, map);
+        shared.reference.set_exchange_map_at(&sub.code, sub.sec_type_id, map, shared.market.md_events.position());
         self.send_exchange_map_request(&sub, "2", sink, hb);
         true
     }
@@ -2270,9 +2357,10 @@ mod tests {
         }
     }
 
-    /// EUR.USD acked and set up as captured 02/10/2026, then the given
-    /// tick messages; the marks the client sees.
-    fn eur_usd_marks(messages: &[Vec<u8>]) -> crate::types::QuoteMarks {
+    /// EUR.USD acked and set up as captured 02/10/2026, with an API request
+    /// listening, then the given tick messages; what the farm told of the
+    /// quote, and the steps queued for the client (ibx#446).
+    fn eur_usd_steps(messages: &[Vec<u8>]) -> (crate::types::QuoteMarks, Vec<MdEvent>) {
         let shared = SharedState::new();
         let mut farm = FarmState::new();
         let mut context = Context::new();
@@ -2282,93 +2370,170 @@ mod tests {
         farm.send_mktdata_subscribe(12087792, "EUR", "IDEALPRO", "CASH", "", 0.0, "", "", id, 0, &mut None, &mut hb);
         let bid_ask = farm.next_md_req_id - 2;
         for ack in [
-            format!("8=O35=Q8,{bid_ask},1e-05,0,3,ffffffff,,1,1"),
-            format!("8=O35=Q6,{},5e-05,0,1,ffffffff,,1,1", bid_ask + 1),
+            format!("8=O\x0135=Q\x018,{bid_ask},1e-05,0,3,ffffffff,,1,1"),
+            format!("8=O\x0135=Q\x016,{},5e-05,0,1,ffffffff,,1,1", bid_ask + 1),
         ] {
             farm.handle_subscription_ack(ack.as_bytes(), &mut None::<Connection>, &mut context, &shared, &mut HeartbeatState::new());
         }
-        farm.handle_ticker_setup(b"8=O35=L12087792,5e-05,7,,1", &mut context);
+        farm.handle_ticker_setup(b"8=O\x0135=L\x0112087792,5e-05,7,,1", &mut context);
+        shared.market.md_events.listen(id, true);
         for msg in messages {
             farm.handle_tick_data(msg, &mut context, &shared, &None);
         }
-        shared.market.marks(id)
+        let queue = &shared.market.md_events;
+        let steps = (queue.tail()..queue.head()).map(|seq| queue.read(seq)).collect();
+        (context.market.marks(id), steps)
     }
 
     const EUR_USD_QUOTE: Block<'static> = (false, 8, &[(0, 112_547), (4, 4_000_000), (1, 112_549), (5, 12_000_000), (11, 0)]);
     const EUR_USD_TRADE: Block<'static> = (false, 7, &[(2, 22_510), (6, 0), (13, 0), (20, 1_790_921_652), (21, 126)]);
     const EUR_USD_DAILY: Block<'static> = (true, 7, &[(3, 22_486), (20, 20_261_001), (8, 22_517), (9, 22_464), (10, 0), (12, 0)]);
 
-    // ibx#446: the captured first EUR.USD message (quote, trade, daily
-    // figures): the trade came with status 0, before the daily figures; no
+    /// The steps as (step, fields set).
+    fn shape(steps: &[MdEvent]) -> Vec<(crate::md_events::MdStep, u16)> {
+        steps.iter().map(|e| (e.step, e.fields)).collect()
+    }
+
+    // ibx#446: the captured first EUR.USD message (book, trade, daily
+    // figures) gives the book, the trade's time, its price and size with
+    // status 0, the daily figures; each step with its values. No
     // auto-execution flag.
     #[test]
-    fn eur_usd_snapshot_message_gives_status_and_block_order() {
-        let marks = eur_usd_marks(&[tick_message(&[EUR_USD_QUOTE, EUR_USD_TRADE, EUR_USD_DAILY])]);
-        assert_eq!(marks.halted(), Some(0));
-        assert!(!marks.daily_first());
-        assert_eq!((marks.bid_auto(), marks.ask_auto()), (None, None));
-        // The daily figures first in another message.
-        let marks = eur_usd_marks(&[
-            tick_message(&[EUR_USD_QUOTE, EUR_USD_TRADE, EUR_USD_DAILY]),
-            tick_message(&[EUR_USD_DAILY, EUR_USD_TRADE]),
+    fn eur_usd_message_gives_its_steps_in_order() {
+        use crate::md_events::{field::*, MdStep};
+        let (marks, steps) = eur_usd_steps(&[tick_message(&[EUR_USD_QUOTE, EUR_USD_TRADE, EUR_USD_DAILY])]);
+        // In block order, the first marked: the reader takes the book after
+        // the other steps.
+        assert_eq!(shape(&steps), [
+            (MdStep::Quote, 1 << BID | 1 << BID_SIZE | 1 << ASK | 1 << ASK_SIZE),
+            (MdStep::Time, 1 << TIME),
+            (MdStep::Last, 1 << LAST | 1 << LAST_SIZE),
+            (MdStep::Daily, 1 << CLOSE | 1 << HIGH | 1 << LOW | 1 << VOLUME),
         ]);
-        assert!(marks.daily_first());
-        // A trade with no status keeps the last one.
-        let marks = eur_usd_marks(&[
+        assert_eq!(steps.iter().map(|e| e.first).collect::<Vec<_>>(), [true, false, false, false]);
+        let px = |raw: i64, step: i64| raw * step;
+        assert_eq!(steps[1].values[TIME], 1_790_921_778 * 1_000_000_000);
+        assert_eq!((steps[2].values[LAST], steps[2].values[LAST_SIZE], steps[2].halted), (px(22_510, 5_000), 0, Some(0)));
+        assert_eq!(steps[3].values[HIGH], px(22_517, 5_000));
+        assert_eq!((steps[0].values[BID], steps[0].values[ASK], steps[0].auto), (px(112_547, 1_000), px(112_549, 1_000), 0));
+        assert_eq!(marks.halted(), Some(0));
+        // The daily figures first in another message: their step first.
+        let (_, steps) = eur_usd_steps(&[tick_message(&[EUR_USD_DAILY, EUR_USD_TRADE])]);
+        assert_eq!(steps.iter().map(|e| e.step).collect::<Vec<_>>(), [MdStep::Daily, MdStep::Time, MdStep::Last]);
+        // A trade with no status gives none; the quote keeps the last one.
+        let (marks, steps) = eur_usd_steps(&[
             tick_message(&[EUR_USD_TRADE]),
             tick_message(&[(false, 7, &[(2, 22_511)])]),
         ]);
+        assert_eq!(steps.last().map(|e| (e.step, e.halted)), Some((MdStep::Last, None)));
         assert_eq!(marks.halted(), Some(0));
-        let marks = eur_usd_marks(&[tick_message(&[(false, 7, &[(2, 22_511), (13, 3)])])]);
+        let (marks, steps) = eur_usd_steps(&[tick_message(&[(false, 7, &[(2, 22_511), (13, 3)])])]);
+        assert_eq!(steps[0].halted, Some(3));
         assert_eq!(marks.halted(), Some(3));
     }
 
-    // ibx#446: the updates of a message, in its order, for the stream: the
-    // captured first EUR.USD message (book, trade with its time, daily
-    // figures), then a book-only message; each message counts.
+    // ibx#446: each message gives its own steps, never merged: two
+    // messages, two book updates with their own values. Daily figures
+    // first, then a trade with its exchange only (an exchange step, then
+    // its price step with nothing set), then one with its time (a delta)
+    // and its exchange; no book update.
     #[test]
-    fn message_updates_in_their_order() {
-        use crate::types::{Pass, SizeKind};
-        let marks = eur_usd_marks(&[tick_message(&[EUR_USD_QUOTE, EUR_USD_TRADE, EUR_USD_DAILY])]);
-        assert_eq!(marks.passes().collect::<Vec<_>>(), [Pass::Trade { time: true, exchange: false }, Pass::Daily]);
-        assert!(marks.quote_update());
-        assert_eq!(marks.message_seq(), 1);
+    fn each_message_gives_its_own_steps() {
+        use crate::md_events::{field::*, MdStep};
+        use crate::types::SizeKind;
+        let (marks, steps) = eur_usd_steps(&[
+            tick_message(&[EUR_USD_QUOTE, EUR_USD_TRADE, EUR_USD_DAILY]),
+            tick_message(&[(false, 8, &[(5, 6_000_000)])]),
+            tick_message(&[(false, 8, &[(5, 3_000_000)])]),
+        ]);
+        let books: Vec<(u16, i64)> = steps.iter().filter(|e| e.step == MdStep::Quote).map(|e| (e.fields, e.values[ASK_SIZE])).collect();
+        assert_eq!(books, [
+            (1 << BID | 1 << BID_SIZE | 1 << ASK | 1 << ASK_SIZE, 12_000_000 * QTY_SCALE),
+            (1 << ASK_SIZE, 6_000_000 * QTY_SCALE),
+            (1 << ASK_SIZE, 3_000_000 * QTY_SCALE),
+        ]);
         for kind in [SizeKind::Bid, SizeKind::Ask, SizeKind::Last, SizeKind::Volume] {
             assert!(marks.seen(kind), "{kind:?}");
         }
-        let marks = eur_usd_marks(&[
-            tick_message(&[EUR_USD_QUOTE, EUR_USD_TRADE, EUR_USD_DAILY]),
-            tick_message(&[(false, 8, &[(5, 6_000_000)])]),
-        ]);
-        assert_eq!(marks.passes().count(), 0);
-        assert!(marks.quote_update());
-        assert_eq!(marks.message_seq(), 2);
-        // Daily figures first, then a trade with its exchange only, then
-        // one with its time (a delta) and its exchange; no book update.
-        let marks = eur_usd_marks(&[tick_message(&[
+        let (_, steps) = eur_usd_steps(&[tick_message(&[
             (true, 7, &[(10, 5)]), (false, 7, &[(27, 8)]), (false, 7, &[(6, 2), (21, 92), (27, 1024)]),
         ])]);
-        assert_eq!(marks.passes().collect::<Vec<_>>(), [
-            Pass::Daily, Pass::Trade { time: false, exchange: true }, Pass::Trade { time: true, exchange: true },
+        assert_eq!(shape(&steps), [
+            (MdStep::Daily, 1 << VOLUME),
+            (MdStep::Exchange, 1 << LAST_EXCH),
+            (MdStep::Last, 0),
+            (MdStep::Time, 1 << TIME),
+            (MdStep::Exchange, 1 << LAST_EXCH),
+            (MdStep::Last, 1 << LAST_SIZE),
         ]);
-        assert!(!marks.quote_update());
+        assert_eq!((steps[1].values[LAST_EXCH], steps[4].values[LAST_EXCH]), (8, 1024));
+    }
+
+    // ibx#446: only the instruments an API request listens to have steps;
+    // a daily-stats block on a quote tag gives none (the reference drops
+    // it).
+    #[test]
+    fn steps_only_for_listened_instruments() {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let id = context.market.register(756733);
+        context.market.register_server_tag(41, id, 0.01);
+        farm.handle_tick_data(&tick_message(&[(false, 41, &[(0, 66_000)])]), &mut context, &shared, &None);
+        assert_eq!(shared.market.md_events.head(), 0);
+        assert_eq!(shared.market.quote(id).bid, 660 * PRICE_SCALE, "the engine's quote is kept as before");
+        shared.market.md_events.listen(id, true);
+        farm.handle_tick_data(&tick_message(&[(true, 41, &[(3, 66_000)])]), &mut context, &shared, &None);
+        assert_eq!(shared.market.md_events.head(), 0);
+        farm.handle_tick_data(&tick_message(&[(false, 41, &[(0, 66_001)])]), &mut context, &shared, &None);
+        assert_eq!(shared.market.md_events.head(), 1);
+    }
+
+    // ibx#446: a full queue drops the instrument's steps; once the client
+    // read, the engine writes one catch-up with the whole quote before the
+    // instrument's next steps.
+    #[test]
+    fn a_full_queue_gives_a_catch_up() {
+        use crate::md_events::{field, MdStep, MD_QUEUE_CAPACITY};
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let id = context.market.register(756733);
+        context.market.register_server_tag(41, id, 0.01);
+        let queue = &shared.market.md_events;
+        queue.listen(id, true);
+        for n in 0..MD_QUEUE_CAPACITY as i64 + 3 {
+            farm.handle_tick_data(&tick_message(&[(false, 41, &[(0, 60_000 + n)])]), &mut context, &shared, &None);
+        }
+        assert_eq!(queue.head(), MD_QUEUE_CAPACITY);
+        assert!(queue.needs_catch_up(id));
+        queue.release(MD_QUEUE_CAPACITY);
+        farm.handle_tick_data(&tick_message(&[(false, 41, &[(1, 70_000)])]), &mut context, &shared, &None);
+        let steps: Vec<MdEvent> = (MD_QUEUE_CAPACITY..queue.head()).map(|seq| queue.read(seq)).collect();
+        assert_eq!(steps.iter().map(|e| e.step).collect::<Vec<_>>(), [MdStep::CatchUp, MdStep::Quote]);
+        let last_bid = (60_000 + MD_QUEUE_CAPACITY as i64 + 2) * PRICE_SCALE / 100;
+        assert_eq!((steps[0].fields, steps[0].values[field::BID]), (field::ALL, last_bid));
+        assert_eq!(steps[1].values[field::ASK], 700 * PRICE_SCALE);
     }
 
     // ibx#446: the auto-execution bits of a quote (both set on the
-    // captured SPY quote of 02/10/2026), from either attribute type; a
-    // trade's attribute is its status, not these bits.
+    // captured SPY quote of 02/10/2026), from either attribute type, go
+    // with its book update; a trade's attribute is its status, not these
+    // bits.
     #[test]
     fn quote_auto_execution_bits() {
-        let marks = eur_usd_marks(&[tick_message(&[(false, 8, &[(0, 112_547), (7, 12)])])]);
+        use crate::types::QuoteMarks;
+        let (marks, steps) = eur_usd_steps(&[tick_message(&[(false, 8, &[(0, 112_547), (7, 12)])])]);
         assert_eq!((marks.bid_auto(), marks.ask_auto()), (Some(true), Some(true)));
-        let marks = eur_usd_marks(&[tick_message(&[(false, 8, &[(0, 112_547), (13, 4)])])]);
+        assert_eq!(QuoteMarks::from_auto_word(steps[0].auto), QuoteMarks::from_auto_word(marks.auto_word()));
+        let (marks, _) = eur_usd_steps(&[tick_message(&[(false, 8, &[(0, 112_547), (13, 4)])])]);
         assert_eq!((marks.bid_auto(), marks.ask_auto()), (Some(true), Some(false)));
-        let marks = eur_usd_marks(&[
+        let (marks, _) = eur_usd_steps(&[
             tick_message(&[(false, 8, &[(7, 12)])]),
             tick_message(&[(false, 8, &[(7, 0)])]),
         ]);
         assert_eq!((marks.bid_auto(), marks.ask_auto()), (Some(false), Some(false)));
-        let marks = eur_usd_marks(&[tick_message(&[(false, 7, &[(2, 22_511), (13, 12)])])]);
+        let (marks, _) = eur_usd_steps(&[tick_message(&[(false, 7, &[(2, 22_511), (13, 12)])])]);
         assert_eq!((marks.bid_auto(), marks.ask_auto(), marks.halted()), (None, None, Some(0)));
     }
 

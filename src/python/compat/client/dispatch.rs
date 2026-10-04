@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use pyo3::prelude::*;
 
 use crate::bridge::{Event, SharedState};
-use crate::client_core::{order_status_str, MdTick};
+use crate::client_core::{order_status_str, MdOut, MdTick};
 use crate::types::*;
 
 use crate::api::types::{
@@ -488,40 +488,46 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "tick_req_params", (req_id, min_tick, bbo_exchange.as_str(), permissions));
         }
 
-        // Poll quotes for changes -> tickPrice/tickSize
-        // Poll quotes via shared ClientCore (same logic as Rust dispatch)
-        let instruments = self.core.snapshot_instruments();
+        // The market data steps queued by the engine -> tick callbacks, in
+        // their order (via ClientCore, as the Rust dispatch; ibx#446).
+        let mut out = std::mem::take(&mut *self.core.md_out.lock().unwrap());
+        self.core.poll_market_data(shared, None, &mut out);
         let mut snapshot_done: Vec<i64> = Vec::new();
-        for (iid, req_id) in instruments {
-            let (result, snapshot_end) = self.core.poll_market_ticks(shared, iid, req_id);
-
-            // Fire market_data_type once per subscription on first tick delivery
-            if let Some(mdt) = self.core.check_mdt_needed(req_id, result.delivered) {
-                call_wrapper!(self.wrapper, py, "market_data_type", (req_id, mdt));
-            }
-
-            for tick in &result.ticks {
-                match tick {
+        let mut text = [0u8; 24];
+        for item in out.drain(..) {
+            match item {
+                MdOut::Tick(req_id, tick) => match tick {
                     MdTick::Price { tick_type, value, can_auto_execute } => {
-                        let attrib = TickAttrib { can_auto_execute: *can_auto_execute, past_limit: false, pre_open: false };
+                        let attrib = TickAttrib { can_auto_execute, past_limit: false, pre_open: false };
                         let attrib_obj = Py::new(py, attrib)?.into_any();
-                        call_wrapper!(self.wrapper, py, "tick_price", (req_id, *tick_type, *value, &attrib_obj));
+                        call_wrapper!(self.wrapper, py, "tick_price", (req_id, tick_type, value, &attrib_obj));
                     }
                     MdTick::Size { tick_type, value } =>
-                        call_wrapper!(self.wrapper, py, "tick_size", (req_id, *tick_type, *value)),
+                        call_wrapper!(self.wrapper, py, "tick_size", (req_id, tick_type, value)),
                     MdTick::Text { tick_type, value } =>
-                        call_wrapper!(self.wrapper, py, "tick_string", (req_id, *tick_type, value.as_str())),
+                        call_wrapper!(self.wrapper, py, "tick_string", (req_id, tick_type, value.as_str())),
+                    MdTick::Time { tick_type, secs } => {
+                        let value = crate::client_core::epoch_text(secs, &mut text);
+                        call_wrapper!(self.wrapper, py, "tick_string", (req_id, tick_type, value));
+                    }
                     MdTick::Generic { tick_type, value } =>
-                        call_wrapper!(self.wrapper, py, "tick_generic", (req_id, *tick_type, *value)),
+                        call_wrapper!(self.wrapper, py, "tick_generic", (req_id, tick_type, value)),
+                },
+                MdOut::MarketDataType(req_id, mdt) =>
+                    call_wrapper!(self.wrapper, py, "market_data_type", (req_id, mdt)),
+                MdOut::SnapshotEnd(req_id) => {
+                    call_wrapper!(self.wrapper, py, "tick_snapshot_end", (req_id,));
+                    snapshot_done.push(req_id);
                 }
             }
-            if snapshot_end {
-                call_wrapper!(self.wrapper, py, "tick_snapshot_end", (req_id,));
-                snapshot_done.push(req_id);
-            }
         }
+        *self.core.md_out.lock().unwrap() = out;
+        // A snapshot cancelled by the client before its end was read is
+        // gone already.
         for req_id in snapshot_done {
-            self.cancel_mkt_data(py, req_id)?;
+            if self.core.req_to_instrument.lock().unwrap().contains_key(&req_id) {
+                self.cancel_mkt_data(py, req_id)?;
+            }
         }
 
         // Tick-by-tick requests that ended with an error (10189, 10190):

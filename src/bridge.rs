@@ -241,9 +241,9 @@ struct BulletinStore {
 /// Lock-free quotes, TBT streams, real-time bars, depth updates, and news ticks.
 pub struct MarketDataState {
     quotes: Box<[SeqQuote; MAX_INSTRUMENTS]>,
-    /// What the farm told about each quote beside its fields, as
-    /// `QuoteMarks` words (ibx#446). Written only when they change.
-    marks: Box<[AtomicU64; MAX_INSTRUMENTS]>,
+    /// The steps of each farm message for the API client's market data
+    /// requests, in their order (ibx#446).
+    pub md_events: crate::md_events::MdQueue,
     /// InstrumentId counter — set by hot loop on RegisterInstrument.
     instrument_count: AtomicU64,
     tbt_trades: Mutex<Vec<TbtTrade>>,
@@ -257,7 +257,7 @@ pub struct MarketDataState {
     md_rejects: Mutex<Vec<MdReject>>,
     /// Requests given without a conId whose contract another request had
     /// subscribed: (their own slot, the slot they joined) (ibx#444).
-    md_merges: Mutex<Vec<(InstrumentId, InstrumentId)>>,
+    md_merges: Mutex<Vec<(InstrumentId, InstrumentId, u64)>>,
     /// The request parameters of acked subscriptions (ibx#449).
     tick_req_params: Mutex<Vec<TickReqParams>>,
     snapshot_acks: Mutex<Vec<TickReqParams>>,
@@ -314,7 +314,7 @@ impl MarketDataState {
     fn new() -> Self {
         Self {
             quotes: Box::new(std::array::from_fn(|_| SeqQuote::new())),
-            marks: Box::new(std::array::from_fn(|_| AtomicU64::new(0))),
+            md_events: crate::md_events::MdQueue::new(),
             instrument_count: AtomicU64::new(0),
             tbt_trades: Mutex::new(Vec::with_capacity(256)),
             tbt_quotes: Mutex::new(Vec::with_capacity(256)),
@@ -366,12 +366,13 @@ impl MarketDataState {
     }
 
     /// A request on slot `from` joined the subscription of slot `into`
-    /// (ibx#444).
+    /// (ibx#444), at this point of the market data queue (ibx#446).
     #[doc(hidden)] pub fn push_md_merge(&self, from: InstrumentId, into: InstrumentId) {
-        self.md_merges.lock().unwrap().push((from, into));
+        let at = self.md_events.position();
+        self.md_merges.lock().unwrap().push((from, into, at));
     }
 
-    pub fn drain_md_merges(&self) -> Vec<(InstrumentId, InstrumentId)> {
+    pub fn drain_md_merges(&self) -> Vec<(InstrumentId, InstrumentId, u64)> {
         let mut merges = self.md_merges.lock().unwrap();
         if merges.is_empty() { return Vec::new(); }
         merges.drain(..).collect()
@@ -446,21 +447,13 @@ impl MarketDataState {
         self.quotes[id as usize].write(quote);
     }
 
-    /// Publish the marks of a quote (hot loop side); a store only when
-    /// they changed.
-    #[inline]
-    pub fn push_marks(&self, id: InstrumentId, marks: crate::types::QuoteMarks) {
-        let slot = &self.marks[id as usize];
-        if slot.load(Ordering::Relaxed) != marks.0 {
-            slot.store(marks.0, Ordering::Release);
-        }
-    }
-
-    /// The marks of a quote (ibx#446). Unchecked: `id` must be below
-    /// MAX_INSTRUMENTS.
-    #[inline]
-    pub fn marks(&self, id: InstrumentId) -> crate::types::QuoteMarks {
-        crate::types::QuoteMarks(self.marks[id as usize].load(Ordering::Acquire))
+    /// A farm message for a quote, as a test gives it (ibx#446): the quote
+    /// is published, and its steps (`md_events::TestMessage`) are handed to
+    /// the API client.
+    #[doc(hidden)]
+    pub fn push_test_message(&self, id: InstrumentId, quote: &Quote, message: &crate::md_events::TestMessage) {
+        self.push_quote(id, quote);
+        self.md_events.push_message(&message.events(id, quote));
     }
 
     #[doc(hidden)] pub fn push_tbt_trade(&self, trade: TbtTrade) {
@@ -778,8 +771,14 @@ pub struct ReferenceState {
     /// and security type id, in the order they were first seen: `None`
     /// while the map is asked.
     exchange_maps: Mutex<Vec<(ExchangeMapKey, Option<Vec<crate::types::SmartComponent>>)>>,
-    /// The exchange map key of each contract with market data (ibx#441).
-    instrument_exchange_maps: Mutex<HashMap<InstrumentId, ExchangeMapKey>>,
+    /// The exchange map key of each contract with market data (ibx#441),
+    /// with where it was set in the market data queue: a reused slot has
+    /// the key of its earlier contract for the steps queued before
+    /// (ibx#446). The last few, oldest first.
+    instrument_exchange_maps: Mutex<HashMap<InstrumentId, Vec<(u64, ExchangeMapKey)>>>,
+    /// Where each exchange map came in the market data queue: the steps
+    /// written before it had no letters (ibx#446).
+    exchange_maps_at: Mutex<HashMap<ExchangeMapKey, u64>>,
     /// Gateway-local init data (populated during connection, read-only after).
     news_providers: Mutex<Vec<crate::types::NewsProvider>>,
     /// Subscribed API news source codes of the logon, in logon order
@@ -866,6 +865,7 @@ impl ReferenceState {
             time_zone_ids: Mutex::new(HashMap::new()),
             exchange_maps: Mutex::new(Vec::new()),
             instrument_exchange_maps: Mutex::new(HashMap::new()),
+            exchange_maps_at: Mutex::new(HashMap::new()),
             news_providers: Mutex::new(Vec::new()),
             news_sources: Mutex::new(Vec::new()),
             soft_dollar_tiers: Mutex::new(Vec::new()),
@@ -1150,7 +1150,21 @@ impl ReferenceState {
     /// The exchange map of a contract's BBO exchange, once received
     /// (ibx#441).
     pub fn instrument_exchange_map(&self, instrument: InstrumentId) -> Option<Vec<crate::types::SmartComponent>> {
-        let key = self.instrument_exchange_maps.lock().unwrap().get(&instrument).cloned()?;
+        self.instrument_exchange_map_at(instrument, u64::MAX)
+    }
+
+    /// The exchange map of a contract's BBO exchange as known at a step of
+    /// the market data queue: None for a step written before it came
+    /// (ibx#446).
+    pub fn instrument_exchange_map_at(&self, instrument: InstrumentId, seq: u64) -> Option<Vec<crate::types::SmartComponent>> {
+        let key = {
+            let keys = self.instrument_exchange_maps.lock().unwrap();
+            let keys = keys.get(&instrument)?;
+            keys.iter().rev().find(|(at, _)| *at <= seq).or(keys.first()).map(|(_, k)| k.clone())?
+        };
+        if self.exchange_maps_at.lock().unwrap().get(&key).is_some_and(|&at| at > seq) {
+            return None;
+        }
         match self.exchange_map(&key.0, Some(key.1)) {
             ExchangeMapState::Ready(map) => Some(map),
             _ => None,
@@ -1205,8 +1219,24 @@ impl ReferenceState {
     /// contract, and the key is known from now on. True when the key is
     /// new (its map is then to be asked).
     #[doc(hidden)] pub fn observe_exchange_map(&self, instrument: InstrumentId, code: &str, sec_type_id: u8) -> bool {
+        self.observe_exchange_map_at(instrument, code, sec_type_id, 0)
+    }
+
+    /// [`Self::observe_exchange_map`] when the engine was to write the step
+    /// `at` of the market data queue (ibx#446).
+    #[doc(hidden)] pub fn observe_exchange_map_at(&self, instrument: InstrumentId, code: &str, sec_type_id: u8, at: u64) -> bool {
+        const KEPT: usize = 4;
         let key: ExchangeMapKey = (code.to_string(), sec_type_id);
-        self.instrument_exchange_maps.lock().unwrap().insert(instrument, key.clone());
+        {
+            let mut keys = self.instrument_exchange_maps.lock().unwrap();
+            let keys = keys.entry(instrument).or_default();
+            if keys.last().is_none_or(|(_, k)| *k != key) {
+                if keys.len() >= KEPT {
+                    keys.remove(0);
+                }
+                keys.push((at, key.clone()));
+            }
+        }
         let mut maps = self.exchange_maps.lock().unwrap();
         if maps.iter().any(|(k, _)| *k == key) {
             return false;
@@ -1217,7 +1247,15 @@ impl ReferenceState {
 
     /// The exchange map of a BBO exchange arrived (ibx#441).
     #[doc(hidden)] pub fn set_exchange_map(&self, code: &str, sec_type_id: u8, map: Vec<crate::types::SmartComponent>) {
+        self.set_exchange_map_at(code, sec_type_id, map, 0);
+    }
+
+    /// The exchange map of a BBO exchange arrived when the engine was to
+    /// write the step `at` of the market data queue (ibx#446).
+    #[doc(hidden)] pub fn set_exchange_map_at(&self, code: &str, sec_type_id: u8, map: Vec<crate::types::SmartComponent>, at: u64) {
         let key: ExchangeMapKey = (code.to_string(), sec_type_id);
+        // The first one counts: a map asked again is the same map.
+        self.exchange_maps_at.lock().unwrap().entry(key.clone()).or_insert(at);
         let mut maps = self.exchange_maps.lock().unwrap();
         match maps.iter_mut().find(|(k, _)| *k == key) {
             Some((_, slot)) => *slot = Some(map),
