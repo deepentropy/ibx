@@ -124,6 +124,13 @@ pub(crate) fn drain_and_send_orders(
             Some(true) => continue,
             None => {}
         }
+        // All-or-none where the contract's list does not allow it on the
+        // order's exchange (ibx#263).
+        match all_or_none_refusal(&order_req, context, conn, hb, shared) {
+            Some(false) => { context.rth_parked.push(rewrap(order_req)); continue; }
+            Some(true) => continue,
+            None => {}
+        }
         // Outside RTH: kept only where the reference keeps it, from the
         // contract definition of the order's exchange (ibx#465).
         if !apply_outside_rth(&mut order_req, context, conn, hb, shared) {
@@ -2369,6 +2376,33 @@ fn pegged_type_refusal(
     }
 }
 
+/// An order with all-or-none whose contract's order-type list for its
+/// exchange has no AON key: the reference refuses it with 10257 and sends
+/// nothing (ibx#263). `Some(false)` while the list is asked for,
+/// `Some(true)` when refused, `None` to go on. A definition without a
+/// list, or none in time, is not checked, as the reference with no list.
+fn all_or_none_refusal(
+    req: &OrderRequest,
+    context: &mut Context,
+    conn: &mut Connection,
+    hb: &mut HeartbeatState,
+    shared: &Arc<SharedState>,
+) -> Option<bool> {
+    let oid = req.order_id();
+    let instrument = crate::engine::outside_rth::all_or_none_check(req)?
+        .or_else(|| context.order(oid).map(|o| o.instrument))?;
+    match definition(context, conn, hb, instrument) {
+        Definition::NoContract => None,
+        Definition::Waiting => Some(false),
+        Definition::Known(types, _) if types.types_known && !types.aon => {
+            log::warn!("Order {} refused: all-or-none is not in the list of this exchange", oid);
+            shared.orders.push_order_error(oid, 10257, crate::engine::outside_rth::ALL_OR_NONE_NOT_ALLOWED.to_string());
+            Some(true)
+        }
+        Definition::Known(..) => None,
+    }
+}
+
 /// Outside RTH on a request (ibx#465). A request of an order that already
 /// waits, or with outside-RTH whose contract definition is not known yet,
 /// waits (false): the definition is asked once. Otherwise outside-RTH is
@@ -4497,6 +4531,45 @@ mod tests {
         let (frames, errors) = run("SMART", &with_prot, mkt_prt(97));
         assert_eq!((frames.len(), tag(&frames[0], 40)), (1, Some("U")));
         assert!(errors.is_empty());
+    }
+
+    // ibx#263: all-or-none is refused with 10257 and nothing is sent when
+    // the contract's order-type list for the order's exchange has no AON
+    // key, or has it in state 4 (`AllOrNone.h(pe)`, `jibtypes.i`); with
+    // the key (the captured AAPL lists of 28/09/2026: AON/1 on BEST,
+    // AON/3 on ISLAND) the order goes out with its all-or-none flag.
+    #[test]
+    fn all_or_none_not_in_the_list_is_refused_with_10257() {
+        let run = |exchange: &str, list: &str, req: OrderRequest| {
+            let (client, mut server) = crate::protocol::connection::mem_pair();
+            let mut conn = Some(Connection::new_mem(client));
+            let shared = Arc::new(SharedState::new());
+            let mut context = Context::new();
+            context.market.register(265598);
+            context.set_symbol(0, "AAPL".to_string());
+            context.market.set_routing(0, "STK", exchange);
+            context.pending_orders.push(req);
+            let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+            assert_eq!(frames.len(), 1, "only the definition is asked: {frames:?}");
+            let id = tag(&frames[0], 320).unwrap().to_string();
+            assert!(rth_definition_reply(&mut context, &id, &definition_reply(&id, tag(&frames[0], 6004).unwrap(), list)));
+            let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+            (frames, shared.orders.drain_order_errors())
+        };
+        let aon = |id| OrderRequest::SubmitLimitEx { order_id: id, instrument: 0, side: Side::Buy, qty: 1, price: 100 * P,
+            tif: b'0', attrs: crate::types::OrderAttrs { all_or_none: true, ..Default::default() } };
+        let refused = (80, 10257, "The 'All or None' order attribute may not be specified for this order.".to_string());
+        for list in ["ACTIVETIM/1,AD/5,LMT/3,RTH/1", "ACTIVETIM/1,AON/4,LMT/3,RTH/1"] {
+            let (frames, errors) = run("SMART", list, aon(80));
+            assert!(frames.is_empty(), "nothing sent: {frames:?}");
+            assert_eq!(errors, [refused.clone()]);
+        }
+        for (exchange, list) in [("SMART", "ACTIVETIM/1,AON/1,LMT/3,RTH/1"), ("ISLAND", "ACTIVETIM/1,AON/3,LMT/3,RTH/1")] {
+            let (frames, errors) = run(exchange, list, aon(81));
+            assert_eq!(frames.len(), 1, "{exchange}");
+            assert_eq!((tag(&frames[0], 35), tag(&frames[0], 18)), (Some("D"), Some("G")));
+            assert!(errors.is_empty());
+        }
     }
 
     // A definition with no order-type list, or none in time: the type is

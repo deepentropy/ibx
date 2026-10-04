@@ -164,7 +164,11 @@ pub const ALGO_NOT_ALLOWED: &str = "Specified algorithm is not allowed for this 
 /// - an overnight order (`overnight`: the OVERNIGHT or IBEOS exchange, or
 ///   includeOvernight) needs an algorithm allowed overnight (442);
 /// - then each parameter in the caller's order: a name the algorithm does
-///   not have (443), a number the reference cannot read (441
+///   not have (443); a time (value type Time, Date or DateTime) the
+///   reference cannot read (10314 with the parameter's name; read as the
+///   reference reads dates, a time with no zone gets the warning 2174 on
+///   the way, `jextend.algo.a.a(AlgoExchanges, AlgoAttributeMap,
+///   OrderCreator, dy)@477-610`); a number the reference cannot read (441
 ///   `name=value`);
 /// - then each value with a legal value list must be in it (145), each
 ///   number within its bounds (441);
@@ -173,6 +177,14 @@ pub const ALGO_NOT_ALLOWED: &str = "Specified algorithm is not allowed for this 
 ///
 /// None when the order passes, or when no definition came yet.
 pub fn refusal(definitions: &AlgoDefinitions, algorithm: &str, values: &[(&str, &str)], overnight: bool) -> Option<(i64, String)> {
+    check(definitions, algorithm, values, overnight, &mut Vec::new())
+}
+
+/// [`refusal`], with the warnings 2174 of the time parameters the check
+/// reached, given with no zone, in `warnings`.
+pub fn check(definitions: &AlgoDefinitions, algorithm: &str, values: &[(&str, &str)], overnight: bool,
+    warnings: &mut Vec<(i64, String)>) -> Option<(i64, String)>
+{
     if definitions.algorithms.is_empty() {
         return None;
     }
@@ -190,6 +202,19 @@ pub fn refusal(definitions: &AlgoDefinitions, algorithm: &str, values: &[(&str, 
         let Some(param) = find(name) else {
             return Some((443, format!("Order processing failed. Unknown algo attribute:{}", name)));
         };
+        // A time parameter (`AlgoAttribute.c(Class)`: the value types the
+        // reference reads as dates, `jattrib.algo.i`).
+        if matches!(param.value_class.as_str(), "Time" | "Date" | "DateTime") && !value.is_empty() {
+            match crate::client_core::parse_condition_time(value, &crate::gateway::machine_time_zone()) {
+                Some(t) => {
+                    if t.implied_zone {
+                        warnings.push((2174, crate::client_core::IMPLIED_TIME_ZONE.to_string()));
+                    }
+                }
+                None => return Some((10314, crate::client_core::INVALID_DATE_TIME.replace("%s", name))),
+            }
+            continue;
+        }
         let readable = match param.value_class.as_str() {
             "Double" => java_double(value).is_some(),
             "Integer" => value.trim().parse::<i32>().is_ok(),
@@ -466,6 +491,26 @@ mod tests {
         // Adaptive on a STP order is accepted; its priority has a default.
         assert_eq!(refusal(&d, "Adaptive", &[("adaptivePriority", "Normal")], false), None);
         assert_eq!(refusal(&d, "Adaptive", &[], false), None, "the required priority has a default");
+    }
+
+    // ibx#263: a time parameter (Vwap startTime and endTime are of type
+    // Time in the definitions of 02/10/2026) the reference cannot read is
+    // refused with 10314 and the parameter's name, in the caller's order
+    // of the parameters; one read with no zone gets the warning 2174, as
+    // the time conditions (`jextend.algo.a.a(...)@477-610`).
+    #[test]
+    fn time_parameters_are_read_as_dates() {
+        let d = definitions_of_20261002();
+        let mut warnings = Vec::new();
+        assert_eq!(check(&d, "Vwap", &[("startTime", "09:00:00 US/Eastern"), ("endTime", "20261002-20:00:00")], false, &mut warnings), None);
+        assert!(warnings.is_empty());
+        assert_eq!(check(&d, "Vwap", &[("startTime", "09:00:00")], false, &mut warnings), None);
+        assert_eq!(warnings, [(2174, crate::client_core::IMPLIED_TIME_ZONE.to_string())]);
+        let (code, text) = refusal(&d, "Vwap", &[("startTime", "9am"), ("maxPctVol", "abc")], false).unwrap();
+        assert_eq!(code, 10314);
+        assert!(text.starts_with("startTime: The date, time, or time-zone entered is invalid.\nThe correct format"), "{text}");
+        assert_eq!(refusal(&d, "Vwap", &[("maxPctVol", "abc"), ("startTime", "9am")], false).map(|r| r.0), Some(441));
+        assert_eq!(refusal(&d, "Vwap", &[("startTime", "")], false), None, "an empty value is not read");
     }
 
     // ibx#263 (`jextend.algo.a`): an overnight order needs an algorithm

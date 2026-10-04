@@ -1433,8 +1433,12 @@ impl ReferenceState {
 
     /// The refusal of an algo order by the algo definitions the server
     /// sent (ibx#263); None when it passes or no definition came yet.
-    pub fn algo_refusal(&self, algorithm: &str, values: &[(&str, &str)], overnight: bool) -> Option<(i64, String)> {
-        crate::control::algo::refusal(&self.algo_definitions.lock().unwrap(), algorithm, values, overnight)
+    /// The warnings 2174 of the time parameters with no zone go to
+    /// `warnings`.
+    pub fn algo_refusal(&self, algorithm: &str, values: &[(&str, &str)], overnight: bool,
+        warnings: &mut Vec<(i64, String)>) -> Option<(i64, String)>
+    {
+        crate::control::algo::check(&self.algo_definitions.lock().unwrap(), algorithm, values, overnight, warnings)
     }
 
     /// Keep one algo definition answer (ibx#263).

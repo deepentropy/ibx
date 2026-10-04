@@ -1067,7 +1067,7 @@ const ORDER_TYPE_ALIASES: [(&str, &str); 15] = [
 
 /// The reference's text for an invalid date or time (errors 337 and 343);
 /// %s is the field's label.
-const INVALID_DATE_TIME: &str = "%s: The date, time, or time-zone entered is invalid.\n\
+pub(crate) const INVALID_DATE_TIME: &str = "%s: The date, time, or time-zone entered is invalid.\n\
 The correct format is yyyymmdd hh:mm:ss xx/xxxx\n\
 where yyyymmdd and xx/xxxx are optional.\n\
 E.g.: 20031126 15:59:00 US/Eastern\n\
@@ -4400,11 +4400,16 @@ impl ClientCore {
     /// against the algo definitions the server sent (ibx#263): 439 for an
     /// algorithm they do not have, 442 for one not allowed overnight on an
     /// overnight order, 443 for a parameter the algorithm does not have,
-    /// 441 for a number it cannot read, 145 for a value not in the
-    /// parameter's legal values, 441 for a number out of its bounds or a
-    /// required parameter with no value (`crate::control::algo::refusal`).
-    /// Nothing is checked before the first definitions came.
-    pub fn algo_definition_refusal(order: &ApiOrder, exchange: &str, reference: &crate::bridge::ReferenceState) -> Option<(i64, String)> {
+    /// 441 for a number it cannot read, 10314 for a time it cannot read,
+    /// 145 for a value not in the parameter's legal values, 441 for a
+    /// number out of its bounds or a required parameter with no value
+    /// (`crate::control::algo::refusal`). Nothing is checked before the
+    /// first definitions came.
+    /// The warnings 2174 of the time parameters the check reached, given
+    /// with no zone, go to `warnings`, in order (ibx#263).
+    pub fn algo_definition_refusal(order: &ApiOrder, exchange: &str, reference: &crate::bridge::ReferenceState,
+        warnings: &mut Vec<(i64, String)>) -> Option<(i64, String)>
+    {
         if order.algo_strategy.is_empty() {
             return None;
         }
@@ -4413,7 +4418,7 @@ impl ClientCore {
         // An overnight order: the overnight exchanges, or includeOvernight
         // (`jfix.R.C`, `jattrib.Attributes.bl`).
         let overnight = matches!(exchange, "OVERNIGHT" | "IBEOS") || order.include_overnight;
-        reference.algo_refusal(&order.algo_strategy, &values, overnight)
+        reference.algo_refusal(&order.algo_strategy, &values, overnight, warnings)
     }
 
     /// A limit price that is not a number is off the contract's price

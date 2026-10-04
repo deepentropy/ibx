@@ -6820,3 +6820,30 @@ fn pending_accounts_refuse_orders_and_positions() {
     client.req_account_updates(true, "DU123");
     assert_eq!(shared.orders.drain_order_errors()[0], (-1, 10275, text("DU123")));
 }
+
+// ibx#263: an algo time parameter the reference cannot read is refused
+// with 10314 and nothing is sent; one with no zone gets the warning 2174
+// and the order goes out.
+#[test]
+fn algo_time_parameters_10314_and_2174() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    shared.reference.add_algo_definitions(include_str!("../../../tests/fixtures/algo/IBALGO-AE-20261002.xml"));
+    shared.reference.add_algo_definitions(include_str!("../../../tests/fixtures/algo/IBALGO-AL-STK-20261002.xml"));
+    let vwap = |start: &str| Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 100.0,
+        algo_strategy: "Vwap".into(),
+        algo_params: vec![TagValue { tag: "startTime".into(), value: start.into() }],
+        ..Default::default()
+    };
+    client.place_order(40, &spy(), &vwap("9am")).unwrap();
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    let errors = shared.orders.drain_order_errors();
+    assert_eq!((errors.len(), errors[0].0, errors[0].1), (1, 40, 10314));
+    assert!(errors[0].2.starts_with("startTime: The date, time, or time-zone entered is invalid."), "{}", errors[0].2);
+
+    client.place_order(41, &spy(), &vwap("09:00:00")).unwrap();
+    assert!(rx.try_recv().is_ok(), "sent");
+    let errors = shared.orders.drain_order_errors();
+    assert_eq!(errors.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(41, 2174)]);
+}

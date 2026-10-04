@@ -55,16 +55,21 @@ impl EClient {
         let session_account = self.account_id.lock().unwrap().clone().unwrap_or_default();
         let contract_zone = shared.reference.time_zone_id(contract.con_id);
         let account_pending = ClientCore::order_account_pending(&api_order, &shared.reference, &session_account);
-        if let Some((code, message)) = ClientCore::refusal_before_sending_for(&api_order, &contract.exchange, account_pending)
-            .or_else(|| ClientCore::algo_definition_refusal(&api_order, &contract.exchange, &shared.reference))
+        // The algo check's warnings come before its refusal (ibx#263).
+        let mut algo_warnings = Vec::new();
+        let refusal = ClientCore::refusal_before_sending_for(&api_order, &contract.exchange, account_pending)
+            .or_else(|| ClientCore::algo_definition_refusal(&api_order, &contract.exchange, &shared.reference, &mut algo_warnings))
             .or_else(|| ClientCore::account_config_refusal(
                 &api_order, shared.reference.account_features().as_deref(), &session_account))
             .or_else(|| ClientCore::good_till_date_refusal(&api_order, contract_zone.as_deref()))
             .or_else(|| ClientCore::condition_time_zone_refusal(&api_order, contract_zone.as_deref()))
             .or_else(|| ClientCore::price_refusal(&api_order))
             .or_else(|| ClientCore::order_id_refusal(oid))
-            .or_else(|| self.core.refusal_for_order_id(oid, &api_order, &shared))
-        {
+            .or_else(|| self.core.refusal_for_order_id(oid, &api_order, &shared));
+        for (code, message) in algo_warnings {
+            shared.orders.push_order_error(oid, code, message);
+        }
+        if let Some((code, message)) = refusal {
             shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }
