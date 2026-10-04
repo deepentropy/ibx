@@ -3047,6 +3047,14 @@ impl ClientCore {
         why.join(",")
     }
 
+    /// An order cancelled in the reference's API pending map (ibx#487): its
+    /// quantity (the status's remaining) and this client's id; the client
+    /// no longer tracks it.
+    pub fn api_cancelled(&self, order_id: OrderId) -> (f64, i64) {
+        let remaining = self.open_orders.lock().unwrap().remove(&order_id).map_or(0.0, |t| t.order.total_quantity);
+        (remaining, self.client_id.load(Ordering::Relaxed))
+    }
+
     /// Keep the openOrder and orderStatus just given for an order.
     pub fn remember_report(&self, order_id: OrderId, report: OrderReport) {
         self.last_reports.lock().unwrap().insert(order_id, report);

@@ -531,6 +531,9 @@ pub struct OrderState {
     /// Notices of a server report given after the status of that report:
     /// the reject 201 and the cancel 202 (ibx#486).
     order_notices: Mutex<Vec<(i64, i64, String)>>,
+    /// Orders whose cancel the reference answers from its API pending map
+    /// with the ApiCancelled status (ibx#487).
+    api_cancelled: Mutex<Vec<OrderId>>,
     what_if_responses: Mutex<Vec<WhatIfResponse>>,
     completed_orders: Mutex<Vec<CompletedOrder>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
@@ -556,6 +559,7 @@ impl OrderState {
             cancel_rejects: Mutex::new(Vec::with_capacity(16)),
             order_errors: Mutex::new(Vec::new()),
             order_notices: Mutex::new(Vec::new()),
+            api_cancelled: Mutex::new(Vec::new()),
             what_if_responses: Mutex::new(Vec::with_capacity(8)),
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             order_cache: Mutex::new(HashMap::new()),
@@ -612,6 +616,11 @@ impl OrderState {
     /// The notices to give after the order statuses (ibx#486).
     pub fn drain_order_notices(&self) -> Vec<(i64, i64, String)> {
         self.order_notices.lock().unwrap().drain(..).collect()
+    }
+
+    /// The orders cancelled while in the API pending map (ibx#487).
+    pub fn drain_api_cancelled(&self) -> Vec<OrderId> {
+        self.api_cancelled.lock().unwrap().drain(..).collect()
     }
 
     pub fn drain_what_if_responses(&self) -> Vec<WhatIfResponse> {
@@ -706,6 +715,11 @@ impl OrderState {
     /// same report gives, as the reference writes them (ibx#486).
     #[doc(hidden)] pub fn push_order_notice(&self, order_id: i64, code: i64, message: String) {
         self.order_notices.lock().unwrap().push((order_id, code, message));
+    }
+
+    /// A cancel of an order still in the API pending map (ibx#487).
+    #[doc(hidden)] pub fn push_api_cancelled(&self, order_id: OrderId) {
+        self.api_cancelled.lock().unwrap().push(order_id);
     }
 
     #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {

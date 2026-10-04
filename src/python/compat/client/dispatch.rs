@@ -354,6 +354,14 @@ impl EClient {
             call_wrapper!(self.wrapper, py, "error", (order_id, code, msg.as_str(), ""));
         }
 
+        // The cancel of an order in the reference's API pending map: the
+        // ApiCancelled status (ibx#487).
+        for order_id in shared.orders.drain_api_cancelled() {
+            let (remaining, client_id) = self.core.api_cancelled(order_id);
+            call_wrapper!(self.wrapper, py, "order_status", (order_id, "ApiCancelled", 0.0f64, remaining,
+                 f64::MAX, 0i64, 0i64, f64::MAX, client_id, "", f64::MAX));
+        }
+
         // Drain order updates -> orderStatus
         let mut reported = std::collections::HashMap::new();
         for update in shared.orders.drain_order_updates() {

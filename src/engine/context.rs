@@ -103,6 +103,10 @@ pub struct Context {
     pub(crate) what_ifs: HashMap<String, (OrderId, InstrumentId)>,
     /// Set while a what-if is encoded: the ClOrdID it goes out under.
     pub(crate) what_if_send: Option<String>,
+    /// Orders refused because their contract was not found (200): the
+    /// reference keeps their id in its API pending map, and a cancel gets
+    /// the ApiCancelled status (ibx#487).
+    pub(crate) api_pending: std::collections::HashSet<OrderId>,
     /// Set while a short-side order is encoded: its short-sale fields
     /// (ibx#417).
     pub(crate) short_sale_send: Option<crate::types::ShortSale>,
@@ -204,6 +208,7 @@ impl Context {
             next_rth_lookup: 0,
             what_ifs: HashMap::new(),
             what_if_send: None,
+            api_pending: std::collections::HashSet::new(),
             short_sale_send: None,
             combos: Default::default(),
             combo_send: None,

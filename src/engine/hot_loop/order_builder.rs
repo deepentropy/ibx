@@ -103,6 +103,11 @@ pub(crate) fn drain_and_send_orders(
                 }
                 Ready::Refused(code, message) => {
                     log::warn!("Combo order {} refused: {} {}", oid, code, message);
+                    // A contract not found leaves the order in the
+                    // reference's API pending map (ibx#487).
+                    if code == crate::engine::combo::NO_DEFINITION.0 {
+                        context.api_pending.insert(oid);
+                    }
                     shared.orders.push_order_error(oid, code, message);
                     continue;
                 }
@@ -159,6 +164,14 @@ pub(crate) fn drain_and_send_orders(
         // know, 10148 with the state for one that is finished or has a
         // cancel pending.
         if let OrderRequest::Cancel { order_id } = &order_req {
+            // An order the reference still holds in its API pending map:
+            // the ApiCancelled status, nothing on the wire (ORDER-CANCEL 1,
+            // `jextend.bw.a(pe)@162`; i105_combo_directed of 26/09/2026:
+            // a combo refused with 200, then its cancel).
+            if context.order(*order_id).is_none() && context.api_pending.remove(order_id) {
+                shared.orders.push_api_cancelled(*order_id);
+                continue;
+            }
             if let Some((code, message)) = cancel_refusal(context, *order_id) {
                 log::warn!("Cancel of order {} refused: {}", order_id, message);
                 shared.orders.push_order_error(*order_id, code, message);
@@ -3846,6 +3859,24 @@ mod tests {
         let (sent, errors) = cancel_of(|_| {});
         assert_eq!(sent, 0);
         assert_eq!(errors, [(5, 10147, "OrderId 5 that needs to be cancelled is not found.".to_string())]);
+    }
+
+    // ibx#487: an order refused because its contract was not found stays
+    // in the reference's API pending map; its cancel gets ApiCancelled and
+    // sends nothing, once.
+    #[test]
+    fn cancel_of_an_order_refused_for_its_contract_is_api_cancelled() {
+        let mut context = Context::new();
+        context.api_pending.insert(5);
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 5 });
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 5 });
+        let shared = Arc::new(SharedState::new());
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert!(frames.is_empty(), "{frames:?}");
+        assert_eq!(shared.orders.drain_api_cancelled(), [5]);
+        assert_eq!(shared.orders.drain_order_errors(), [(5, 10147, "OrderId 5 that needs to be cancelled is not found.".to_string())]);
     }
 
     // A second cancel while the first is pending: 10148 with the state

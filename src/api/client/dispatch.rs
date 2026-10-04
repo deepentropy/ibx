@@ -177,6 +177,14 @@ impl EClient {
             wrapper.error(order_id, code, &msg, "");
         }
 
+        // The cancel of an order in the reference's API pending map: the
+        // ApiCancelled status, permId 0, nothing filled, the prices unset
+        // (ibx#487).
+        for order_id in self.shared.orders.drain_api_cancelled() {
+            let (remaining, client_id) = self.core.api_cancelled(order_id);
+            wrapper.order_status(order_id, "ApiCancelled", 0.0, remaining, f64::MAX, 0, 0, f64::MAX, client_id, "", f64::MAX);
+        }
+
         // Order updates → open_order + order_status for every report of a
         // known order; a cancel gives order_status only (ibx#473).
         let mut reported = std::collections::HashMap::new();

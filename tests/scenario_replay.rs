@@ -212,13 +212,13 @@ fn combo_per_leg_prices() {
 }
 
 // A combo directed to ARCA (26/09/2026): no definition, 200. The cancel
-// that follows gives orderStatus ApiCancelled in the reference (the order
-// id stays in its API pending map, ORDER-CANCEL 1: permId 0, remaining
-// 1, the prices unset); ibx answers 10147.
+// that follows gives orderStatus ApiCancelled (the order id stays in the
+// reference's API pending map, ORDER-CANCEL 1: permId 0, remaining 1, the
+// prices unset), nothing on the wire.
 #[test]
-#[ignore = "ibx#487: the cancel of a combo refused with 200 gives ApiCancelled in the reference, 10147 in ibx"]
 fn directed_combo_without_definition_then_cancel() {
-    check("20260926b/i105_combo_directed", Options::default());
+    let o = check("20260926b/i105_combo_directed", Options::default());
+    assert!(o.theirs.iter().any(|(_, l)| l.starts_with("orderStatus|31|ApiCancelled|")));
 }
 
 // A bracket in the client library's form (26/09/2026): parent and
