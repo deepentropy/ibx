@@ -69,6 +69,78 @@ pub fn fmt_pipe(bytes: &[u8]) -> String {
     s
 }
 
+/// An XML payload (tag 6118) in the layout of the reference's XML writer
+/// (`jxmlable.XmlGenerator`): the declaration and each element on a line
+/// of its own, a new line after each, a tab per level before each
+/// element; an element with text only stays on one line (every 35=W,
+/// 35=Z and 35=U the reference sent to the historical farm, captured
+/// 26/09 to 02/10/2026, ibx#486). The input may be on one line or laid
+/// out already; text that is only blanks between elements is dropped.
+pub fn xml_layout(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len() + xml.len() / 4);
+    let mut rest = xml.trim_start();
+    if rest.starts_with("<?")
+        && let Some(end) = rest.find("?>")
+    {
+        out.push_str(&rest[..end + 2]);
+        out.push('\n');
+        rest = &rest[end + 2..];
+    }
+    // The parts: tags and texts, blanks between tags dropped.
+    let mut parts: Vec<&str> = Vec::new();
+    while !rest.is_empty() {
+        if rest.starts_with('<') {
+            let end = rest.find('>').map_or(rest.len(), |k| k + 1);
+            parts.push(&rest[..end]);
+            rest = &rest[end..];
+        } else {
+            let end = rest.find('<').unwrap_or(rest.len());
+            let text = &rest[..end];
+            if !text.trim().is_empty() {
+                parts.push(text);
+            }
+            rest = &rest[end..];
+        }
+    }
+    let indent = |out: &mut String, d: usize| out.extend(std::iter::repeat_n('\t', d));
+    let mut depth = 0usize;
+    let mut k = 0;
+    while k < parts.len() {
+        let p = parts[k];
+        if p.starts_with("</") {
+            depth = depth.saturating_sub(1);
+            indent(&mut out, depth);
+            out.push_str(p);
+            k += 1;
+        } else if p.starts_with('<') && !p.ends_with("/>") {
+            indent(&mut out, depth);
+            out.push_str(p);
+            // An element with text only, or with nothing: one line.
+            match (parts.get(k + 1), parts.get(k + 2)) {
+                (Some(text), Some(close)) if !text.starts_with('<') && close.starts_with("</") => {
+                    out.push_str(text);
+                    out.push_str(close);
+                    k += 3;
+                }
+                (Some(close), _) if close.starts_with("</") => {
+                    out.push_str(close);
+                    k += 2;
+                }
+                _ => {
+                    depth += 1;
+                    k += 1;
+                }
+            }
+        } else {
+            indent(&mut out, depth);
+            out.push_str(p);
+            k += 1;
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Sum of all bytes mod 256, zero-padded to 3 digits.
 pub fn fix_checksum(data: &[u8]) -> String {
     let sum: u32 = data.iter().map(|&b| b as u32).sum();
@@ -463,6 +535,28 @@ pub fn fix_read_deadline<R: Read>(reader: &mut R, deadline: std::time::Instant) 
 
 #[cfg(test)]
 mod tests {
+
+    // ibx#486: the layout of the reference's historical queries, cancels
+    // and scanner messages (captured 26/09 and 02/10/2026).
+    #[test]
+    fn xml_layout_as_the_reference() {
+        let flat = concat!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListOfQueries><Query>",
+            "<id>cf28;;AAPL@SMART Bid_ask;;0;;true;;0;;U</id><timeLength>100 t</timeLength>",
+            "<Filter varName=\"filter\"><ignoreSize>true</ignoreSize></Filter></Query></ListOfQueries>");
+        let want = concat!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListOfQueries>\n\t<Query>\n",
+            "\t\t<id>cf28;;AAPL@SMART Bid_ask;;0;;true;;0;;U</id>\n\t\t<timeLength>100 t</timeLength>\n",
+            "\t\t<Filter varName=\"filter\">\n\t\t\t<ignoreSize>true</ignoreSize>\n\t\t</Filter>\n",
+            "\t</Query>\n</ListOfQueries>\n");
+        assert_eq!(xml_layout(flat), want);
+        // Laid out already: the same.
+        assert_eq!(xml_layout(want), want);
+        let cancel = concat!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListOfCancelQueries><CancelQuery>",
+            "<id>ticker:1</id></CancelQuery></ListOfCancelQueries>");
+        assert_eq!(xml_layout(cancel), concat!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListOfCancelQueries>\n",
+            "\t<CancelQuery>\n\t\t<id>ticker:1</id>\n\t</CancelQuery>\n</ListOfCancelQueries>\n"));
+        assert_eq!(xml_layout("<A><b></b><c/></A>"), "<A>\n\t<b></b>\n\t<c/>\n</A>\n");
+    }
+
     use super::*;
 
     // A reader that returns WouldBlock a fixed number of times before yielding

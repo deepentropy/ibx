@@ -187,9 +187,7 @@ fn query_id(f: &Fields) -> Option<String> {
 }
 
 /// A frame of a kind as compared, one line. The ids each side numbers its
-/// own way are masked; the layout of a historical query (the reference
-/// writes a new line after each element, ibx one line: hmds.rs,
-/// `query_layout_as_the_reference`) is left out.
+/// own way are masked.
 pub fn normalised(kind: &str, f: &Fields, mask_end: bool) -> String {
     let mask = |ids: &[u32]| -> String {
         let out: Fields = Normaliser::framing().apply(f).into_iter()
@@ -201,7 +199,7 @@ pub fn normalised(kind: &str, f: &Fields, mask_end: bool) -> String {
         LOOKUP => mask(&[320]),
         MARKET_DATA => mask(&[262]),
         SUBSCRIPTION => mask(&[6529]),
-        HISTORICAL => hmds_query(f, mask_end).replace(['\n', '\t'], ""),
+        HISTORICAL => hmds_query(f, mask_end),
         _ => mask(&[]),
     }
 }

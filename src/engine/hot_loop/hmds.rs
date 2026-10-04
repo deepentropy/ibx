@@ -1693,7 +1693,7 @@ impl HmdsState {
         let xml = crate::control::historical::build_head_timestamp_xml(&req);
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
+            let _ = super::pool::send_plain_on(conn, &[
                 (fix::TAG_MSG_TYPE, "W"),
                 (fix::TAG_SENDING_TIME, &ts),
                 (6118, &xml),
@@ -1708,7 +1708,7 @@ impl HmdsState {
     pub(crate) fn send_scanner_params_request(&mut self, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
+            let _ = super::pool::send_plain_on(conn, &[
                 (fix::TAG_MSG_TYPE, "U"),
                 (fix::TAG_SENDING_TIME, &ts),
                 (crate::control::scanner::TAG_SUB_PROTOCOL, "10001"),
@@ -1817,7 +1817,7 @@ impl HmdsState {
     fn send_scanner_xml(xml: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) -> bool {
         let Some(conn) = hmds_conn.as_mut() else { return false };
         let ts = chrono_free_timestamp();
-        let _ = conn.send_fix(&[
+        let _ = super::pool::send_plain_on(conn, &[
             (fix::TAG_MSG_TYPE, "U"),
             (fix::TAG_SENDING_TIME, &ts),
             (6040, "10003"),
@@ -1843,7 +1843,7 @@ impl HmdsState {
         let xml = crate::control::scanner::build_scanner_cancel_xml(scan_id);
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
+            let _ = super::pool::send_plain_on(conn, &[
                 (fix::TAG_MSG_TYPE, "U"),
                 (fix::TAG_SENDING_TIME, &ts),
                 (6040, "10004"),
@@ -1962,7 +1962,7 @@ impl HmdsState {
         }
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
+            let _ = super::pool::send_plain_on(conn, &[
                 (fix::TAG_MSG_TYPE, "U"),
                 (fix::TAG_SENDING_TIME, &ts),
                 (6040, "10030"),
@@ -2138,7 +2138,7 @@ impl HmdsState {
         let xml = crate::control::histogram::build_histogram_request_xml(&req);
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
+            let _ = super::pool::send_plain_on(conn, &[
                 (fix::TAG_MSG_TYPE, "W"),
                 (fix::TAG_SENDING_TIME, &ts),
                 (6118, &xml),
@@ -2267,7 +2267,7 @@ impl HmdsState {
         let xml = crate::control::historical::build_realtime_bar_xml(&query_id, con_id, sec_type, exchange, what_to_show, use_rth);
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
-            let _ = conn.send_fix(&[
+            let _ = super::pool::send_plain_on(conn, &[
                 (fix::TAG_MSG_TYPE, "W"),
                 (fix::TAG_SENDING_TIME, &ts),
                 (6118, &xml),

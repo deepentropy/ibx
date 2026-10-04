@@ -29,6 +29,8 @@ struct HmdsReplayed {
     theirs: Vec<String>,
     queries_ours: Vec<String>,
     queries_theirs: Vec<String>,
+    /// The 34 of ibx's queries.
+    seq_ours: Vec<String>,
 }
 
 /// Replay the historical requests of a fixture: the queries ibx writes
@@ -119,6 +121,7 @@ fn replay_hmds(fx: &Fixture) -> HmdsReplayed {
         ours: s.callbacks.iter().filter(|l| wanted(l)).map(mask_end).collect(),
         theirs: theirs.iter().filter(|l| wanted(l)).map(mask_end).collect(),
         queries_ours: ours_q,
+        seq_ours: s.hmds_out.iter().filter(|o| tag(o, 35) == Some("W")).filter_map(|o| tag(o, 34).map(str::to_string)).collect(),
         queries_theirs: queries_theirs.iter().map(|(f, mask)| hmds_query(f, *mask)).collect(),
     }
 }
@@ -166,12 +169,12 @@ fn second_head_timestamp_from_the_cache() {
 }
 
 // The query layout: a new line after the header and each element, tabs
-// before the elements, as every captured 35=W and 35=Z; ibx writes one
-// line (and counts 34= where the reference always writes 000000).
+// before the elements, as every captured 35=W and 35=Z; and 34=000000.
 #[test]
-#[ignore = "ibx#486: historical query XML layout and 34=000000"]
 fn query_layout_as_the_reference() {
     let r = replay_hmds(&load("hmds_bars_and_head_timestamp"));
+    assert!(!r.queries_theirs.is_empty());
+    assert!(r.seq_ours.len() >= r.queries_theirs.len() && r.seq_ours.iter().all(|s| s == "000000"), "{:?}", r.seq_ours);
     for (a, b) in r.queries_ours.iter().zip(&r.queries_theirs) {
         assert_eq!(a, b);
     }

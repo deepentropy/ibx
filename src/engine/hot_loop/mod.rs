@@ -3664,7 +3664,9 @@ mod tests {
             if n == 0 { break; }
             buf.extend_from_slice(&chunk[..n]);
         }
-        String::from_utf8_lossy(&buf).replace('\x01', "|")
+        // The XML on one line: its layout has its own test
+        // (`fix::xml_layout`).
+        String::from_utf8_lossy(&buf).replace('\x01', "|").replace(['\n', '\t'], "")
             .split("8=FIX").filter(|m| !m.is_empty()).map(|m| format!("8=FIX{m}")).collect()
     }
 
@@ -5001,7 +5003,9 @@ mod tbt_tests {
             if n == 0 { break; }
             buf.extend_from_slice(&chunk[..n]);
         }
-        String::from_utf8_lossy(&buf).replace('\x01', "|")
+        // The XML on one line: its layout has its own test
+        // (`fix::xml_layout`).
+        String::from_utf8_lossy(&buf).replace('\x01', "|").replace(['\n', '\t'], "")
             .split("8=FIX").filter(|m| !m.is_empty()).map(|m| format!("8=FIX{m}")).collect()
     }
 

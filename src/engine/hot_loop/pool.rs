@@ -49,15 +49,27 @@ pub(crate) enum FarmKind {
 /// Where a request's messages go: a live connection, or the queue of a
 /// farm that is still logging on.
 pub(crate) trait FixSink {
-    /// A plain message; false when it was neither sent nor queued.
+    /// A plain message (an XML request of the historical farm); false
+    /// when it was neither sent nor queued.
     fn send_plain(&mut self, fields: &[(u32, &str)]) -> bool;
     /// A compressed message; false when it was neither sent nor queued.
     fn send_comp(&mut self, fields: &[(u32, &str)]) -> bool;
 }
 
+/// Send a plain message as the reference writes its requests to the
+/// historical farm: the XML in its writer's layout and the sequence
+/// number 000000 (every 35=W, 35=Z and 35=U of the four-leg recordings of
+/// 26/09 to 02/10/2026, ibx#486; the heartbeats keep their count).
+pub(crate) fn send_plain_on(conn: &mut Connection, fields: &[(u32, &str)]) -> io::Result<()> {
+    let laid_out: Vec<(u32, String)> = fields.iter().map(|(t, v)| {
+        (*t, if *t == 6118 { crate::protocol::fix::xml_layout(v) } else { v.to_string() })
+    }).collect();
+    conn.send_fix_unsequenced(&borrowed(&laid_out))
+}
+
 impl FixSink for Option<Connection> {
     fn send_plain(&mut self, fields: &[(u32, &str)]) -> bool {
-        self.as_mut().is_some_and(|c| c.send_fix(fields).is_ok())
+        self.as_mut().is_some_and(|c| send_plain_on(c, fields).is_ok())
     }
     fn send_comp(&mut self, fields: &[(u32, &str)]) -> bool {
         self.as_mut().is_some_and(|c| c.send_fixcomp(fields).is_ok())
@@ -160,7 +172,7 @@ impl FixSink for OnDemandFarm {
     fn send_plain(&mut self, fields: &[(u32, &str)]) -> bool {
         self.last_send = Instant::now();
         match self.conn.as_mut() {
-            Some(c) => c.send_fix(fields).is_ok(),
+            Some(c) => send_plain_on(c, fields).is_ok(),
             None => self.enqueue(Queued::Plain(owned(fields))),
         }
     }
@@ -354,7 +366,7 @@ impl FarmPool {
             let conn = f.conn.as_mut().expect("just set");
             for msg in waiting {
                 let sent = match &msg {
-                    Queued::Plain(fields) => conn.send_fix(&borrowed(fields)),
+                    Queued::Plain(fields) => send_plain_on(conn, &borrowed(fields)),
                     Queued::Comp(fields) => conn.send_fixcomp(&borrowed(fields)),
                 };
                 if let Err(e) = sent {
