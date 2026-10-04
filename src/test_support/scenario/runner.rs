@@ -966,9 +966,14 @@ impl Run<'_> {
                 }
             }
             Link::Ccp => {
-                // A binary frame: the subscription id is a text field.
+                // A binary frame: the subscription id is a text field, the
+                // last one of an end marker (35=EB|6529={id}).
                 let body = self.ids.subscription.iter().fold(binary_body(&r.raw), |b, (gw, ours)| {
-                    b.replace(&format!("6529={gw}\x01"), &format!("6529={ours}\x01"))
+                    let b = b.replace(&format!("6529={gw}\x01"), &format!("6529={ours}\x01"));
+                    match b.strip_suffix(&format!("6529={gw}")) {
+                        Some(head) => format!("{head}6529={ours}"),
+                        None => b,
+                    }
                 });
                 self.send(link, &rebuild_binary(&r.raw, &body));
             }

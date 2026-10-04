@@ -667,8 +667,9 @@ impl EClient {
         // Account summary rows as the server sends them; the end at each of
         // its end markers (ibx#479).
         for batch in self.core.prepare_account_summary(&self.shared) {
+            let account = batch.account.as_deref().unwrap_or(&self.account_id);
             for row in &batch.rows {
-                wrapper.account_summary(batch.req_id, &self.account_id, &row.key, &row.value, &row.currency);
+                wrapper.account_summary(batch.req_id, account, &row.key, &row.value, &row.currency);
             }
             if batch.end {
                 wrapper.account_summary_end(batch.req_id);

@@ -3275,14 +3275,22 @@ pub(crate) fn handle_account_update(msg: &[u8], context: &mut Context, shared: &
     // Rows of an account summary subscription go to that request only, not
     // to the account state (ibx#479).
     if let Some(sr_id) = summary_id(text) {
-        let (rows, _) = parse_account_rows(text);
+        let ledger = text.split(SOH_CHAR).any(|p| p == "35=RL");
+        // A ledger frame's rows as numbers: the client builds the
+        // reference's rows from them (ibx#486).
+        let (rows, ledgers) = if ledger {
+            (Vec::new(), parse_ledger_rows(text))
+        } else {
+            (parse_account_rows(text).0, Vec::new())
+        };
         shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
             sr_id: sr_id.to_string(),
             rows: rows.into_iter()
                 .map(|(key, currency, value)| crate::bridge::AccountRow { key, value, currency, ledger: false })
                 .collect(),
-            ledger: text.split(SOH_CHAR).any(|p| p == "35=RL"),
+            ledger,
             end: false,
+            ledgers,
         });
         return;
     }
@@ -3355,7 +3363,7 @@ fn handle_account_end(msg: &[u8], shared: &SharedState) {
     // The end of an account summary batch (ibx#479).
     if let Some(sr_id) = summary_id(text) {
         shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
-            sr_id: sr_id.to_string(), rows: Vec::new(), ledger: false, end: true,
+            sr_id: sr_id.to_string(), rows: Vec::new(), ledger: false, end: true, ledgers: Vec::new(),
         });
         return;
     }
@@ -3462,6 +3470,43 @@ pub(crate) fn parse_account_rows(text: &str) -> (Vec<(String, String, String)>, 
     }
     flush(key, currency, value, &mut ledger_values, &mut rows, &mut seen_account_type);
     (rows, time)
+}
+
+/// The rows of a ledger frame (`35=RL`) of an account summary, as the
+/// reference reads them (`jfix.aL.<init>(String)`, ibx#486): the account
+/// of the frame (`8001=AccountCode` then 8004), and per `LedgerList` row its
+/// currency (8002), tag 15, and its numeric tags. A value Java does not
+/// read as a number (`nan`) stays unset.
+pub(crate) fn parse_ledger_rows(text: &str) -> Vec<crate::bridge::LedgerRow> {
+    let mut rows: Vec<crate::bridge::LedgerRow> = Vec::new();
+    let mut account = String::new();
+    let mut key = "";
+    let mut in_row = false;
+    for part in text.split(SOH_CHAR) {
+        let Some((tag, val)) = part.split_once('=') else { continue };
+        match tag {
+            "8001" => {
+                key = val;
+                in_row = val == "LedgerList";
+                if in_row {
+                    rows.push(crate::bridge::LedgerRow { account: account.clone(), ..Default::default() });
+                }
+            }
+            "8004" if key == "AccountCode" => account = val.to_string(),
+            "8002" if in_row => { if let Some(r) = rows.last_mut() { r.currency = val.to_string(); } }
+            "15" if in_row => { if let Some(r) = rows.last_mut() { r.real_currency = val.to_string(); } }
+            _ if in_row => {
+                if let (Ok(t), Ok(v)) = (tag.parse::<u32>(), val.parse::<f64>())
+                    && v.is_finite()
+                    && let Some(r) = rows.last_mut()
+                {
+                    r.values.push((t, v));
+                }
+            }
+            _ => {}
+        }
+    }
+    rows
 }
 
 /// Handle 6040=143 P&L midnight seed response.
@@ -6291,7 +6336,19 @@ mod tests {
         assert!(events.iter().all(|e| e.sr_id == "SR.Socket.7"));
         assert_eq!(events[0].rows.len(), 4);
         assert!(!events[0].ledger && events[1].ledger && events[2].end);
-        assert!(events[1].rows.iter().any(|r| r.key == "CashBalance" && r.currency == "USD"));
+        // The ledger rows as numbers, by currency (ibx#486).
+        let usd = events[1].ledgers.iter().find(|r| r.currency == "USD").expect("the USD row");
+        assert_eq!((usd.real_currency.as_str(), usd.value(9806), usd.value(9820)), ("USD", Some(899133.4993), Some(1.0)));
+        assert_eq!(events[1].ledgers.iter().map(|r| r.currency.as_str()).collect::<Vec<_>>(), ["BASE", "USD"]);
+    }
+
+    // ibx#486: a ledger frame of a summary keeps the frame's account and
+    // leaves a value Java does not read as a number unset.
+    #[test]
+    fn ledger_rows_of_a_summary_frame() {
+        let rows = parse_ledger_rows(&soh("8=O|35=RL|6529=SR.Socket.39|8001=AccountCode|8004=DU1|8001=LedgerList|8002=BASE|15=BASE|9806=933115.0500|8174=nan|"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].account.as_str(), rows[0].value(9806), rows[0].value(8174)), ("DU1", Some(933115.05), None));
     }
 
     // ibx#478: the realized P&L of a fill of this session (6099 of its

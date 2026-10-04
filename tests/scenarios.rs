@@ -1103,7 +1103,7 @@ fn account_summary_delivers_each_server_batch() {
     assert_eq!(tags, "NetLiquidation,BuyingPower,AvailableFunds");
 
     shared.portfolio.push_account_summary_event(ibx::bridge::AccountSummaryEvent {
-        sr_id: sr_id.clone(), ledger: false, end: false,
+        sr_id: sr_id.clone(), ledger: false, end: false, ledgers: vec![],
         rows: vec![
             summary_row("NetLiquidation", "100000.00", "USD"),
             summary_row("BuyingPower", "400000.00", "USD"),
@@ -1111,16 +1111,17 @@ fn account_summary_delivers_each_server_batch() {
         ],
     });
     shared.portfolio.push_account_summary_event(ibx::bridge::AccountSummaryEvent {
-        sr_id, ledger: false, end: true, rows: vec![],
+        sr_id, ledger: false, end: true, rows: vec![], ledgers: vec![],
     });
 
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
 
-    // Should have exactly 3 account_summary events + 1 end
+    // The 3 rows and the end, each frame twice as the reference gives them
+    // (ibx#486: its listener is registered twice).
     let summaries: Vec<_> = w.events.iter().filter(|e| e.starts_with("account_summary:5:")).collect();
-    assert_eq!(summaries.len(), 3, "Expected 3 summary tags, got {:?}", summaries);
-    assert!(w.events.iter().any(|e| e == "account_summary_end:5"));
+    assert_eq!(summaries.len(), 6, "Expected the 3 summary tags twice, got {:?}", summaries);
+    assert_eq!(w.events.iter().filter(|e| *e == "account_summary_end:5").count(), 2);
 
     // Verify specific tags
     assert!(summaries.iter().any(|e| e.contains(":NetLiquidation:")));

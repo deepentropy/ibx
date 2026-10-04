@@ -4879,51 +4879,57 @@ fn summary_row(key: &str, value: &str, currency: &str) -> crate::bridge::Account
     crate::bridge::AccountRow { key: key.into(), value: value.into(), currency: currency.into(), ledger: false }
 }
 
+fn ledger_row(account: &str, currency: &str, cash: f64, nlv: f64) -> crate::bridge::LedgerRow {
+    crate::bridge::LedgerRow {
+        account: account.into(), currency: currency.into(), real_currency: currency.into(),
+        values: vec![(9806, cash), (9819, nlv), (9820, 1.0)],
+    }
+}
+
+fn summary_event(rows: Vec<crate::bridge::AccountRow>, ledgers: Vec<crate::bridge::LedgerRow>, end: bool) -> crate::bridge::AccountSummaryEvent {
+    crate::bridge::AccountSummaryEvent { sr_id: "SR.Socket.1".into(), ledger: !ledgers.is_empty(), end, rows, ledgers }
+}
+
 #[test]
 fn account_summary_is_a_server_subscription() {
     let (client, rx, shared) = test_client();
     client.req_account_summary(1, "All", "AccountType,NetLiquidation,$LEDGER:USD");
     assert_eq!(summary_sent(&rx), ["sub:SR.Socket.1:AccountType,NetLiquidation,$LEDGER:All"]);
 
-    // Rows as sent; ledger rows of the chosen currency only; the end.
-    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
-        sr_id: "SR.Socket.1".into(), ledger: false, end: false,
-        rows: vec![summary_row("AccountType", "INDIVIDUAL", ""), summary_row("NetLiquidation", "953633.06", "USD")],
-    });
-    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
-        sr_id: "SR.Socket.1".into(), ledger: true, end: false,
-        rows: vec![summary_row("CashBalance", "899133.4993", "BASE"), summary_row("CashBalance", "899133.4993", "USD")],
-    });
-    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
-        sr_id: "SR.Socket.1".into(), ledger: false, end: true, rows: vec![],
-    });
+    // Rows as sent; ledger rows of the chosen currency only, written as the
+    // reference writes account values; the end. Each frame twice, as the
+    // reference (ibx#486: its listener is registered twice).
+    shared.portfolio.push_account_summary_event(summary_event(
+        vec![summary_row("AccountType", "INDIVIDUAL", ""), summary_row("NetLiquidation", "953633.06", "USD")], vec![], false));
+    shared.portfolio.push_account_summary_event(summary_event(vec![],
+        vec![ledger_row("DU1", "BASE", 899133.4993, 1.0), ledger_row("DU1", "USD", 899133.4993, 953925.6599)], false));
+    shared.portfolio.push_account_summary_event(summary_event(vec![], vec![], true));
     let mut w = SummaryRec::default();
     client.process_msgs(&mut w);
-    assert_eq!(w.events, [
-        "row:1:AccountType:INDIVIDUAL:",
-        "row:1:NetLiquidation:953633.06:USD",
-        "row:1:CashBalance:899133.4993:USD",
-        "end:1",
-    ]);
+    let usd: Vec<String> = [
+        "Currency:USD", "CashBalance:899133.4993", "TotalCashBalance:", "AccruedCash:", "StockMarketValue:",
+        "OptionMarketValue:", "FutureOptionValue:", "FuturesPNL:", "NetLiquidationByCurrency:953925.6599",
+        "UnrealizedPnL:", "RealizedPnL:", "ExchangeRate:1.00", "FundValue:", "NetDividend:", "MutualFundValue:",
+        "MoneyMarketFundValue:", "CorporateBondValue:", "TBondValue:", "TBillValue:", "WarrantValue:",
+        "FxCashBalance:", "AccountOrGroup:DU1", "RealCurrency:USD", "IssuerOptionValue:", "Cryptocurrency:",
+    ].iter().map(|r| format!("row:1:{r}:USD")).collect();
+    let mut want: Vec<String> = Vec::new();
+    for _ in 0..2 { want.extend(["row:1:AccountType:INDIVIDUAL:".to_string(), "row:1:NetLiquidation:953633.06:USD".to_string()]); }
+    for _ in 0..2 { want.extend(usd.iter().cloned()); }
+    for _ in 0..2 { want.push("end:1".to_string()); }
+    assert_eq!(w.events, want);
 
     // A later batch keeps coming, with its own end.
-    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
-        sr_id: "SR.Socket.1".into(), ledger: false, end: false,
-        rows: vec![summary_row("NetLiquidation", "953642.02", "USD")],
-    });
-    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
-        sr_id: "SR.Socket.1".into(), ledger: false, end: true, rows: vec![],
-    });
+    shared.portfolio.push_account_summary_event(summary_event(vec![summary_row("NetLiquidation", "953642.02", "USD")], vec![], false));
+    shared.portfolio.push_account_summary_event(summary_event(vec![], vec![], true));
     let mut w = SummaryRec::default();
     client.process_msgs(&mut w);
-    assert_eq!(w.events, ["row:1:NetLiquidation:953642.02:USD", "end:1"]);
+    assert_eq!(w.events, ["row:1:NetLiquidation:953642.02:USD", "row:1:NetLiquidation:953642.02:USD", "end:1", "end:1"]);
 
     // Cancel: the server subscription is cancelled; later rows are dropped.
     client.cancel_account_summary(1);
     assert_eq!(summary_sent(&rx), ["cancel:SR.Socket.1"]);
-    shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
-        sr_id: "SR.Socket.1".into(), ledger: false, end: true, rows: vec![],
-    });
+    shared.portfolio.push_account_summary_event(summary_event(vec![], vec![], true));
     let mut w = SummaryRec::default();
     client.process_msgs(&mut w);
     assert!(w.events.is_empty(), "{:?}", w.events);

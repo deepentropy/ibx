@@ -1497,6 +1497,28 @@ pub struct AccountSummaryEvent {
     pub ledger: bool,
     /// The server's end marker of a batch.
     pub end: bool,
+    /// The rows of a ledger frame, as numbers (ibx#486); empty for the
+    /// other frames.
+    pub ledgers: Vec<LedgerRow>,
+}
+
+/// One row of a ledger frame (`35=RL`, a `LedgerList` row) as the
+/// reference reads it into its ledger record (`jfix.aL`, ibx#486): the
+/// account of the frame, the row currency (8002), the currency of tag 15,
+/// and each numeric tag with its value. A value that is not a number
+/// (`8174=nan`) is not set.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LedgerRow {
+    pub account: String,
+    pub currency: String,
+    pub real_currency: String,
+    pub values: Vec<(u32, f64)>,
+}
+
+impl LedgerRow {
+    pub fn value(&self, tag: u32) -> Option<f64> {
+        self.values.iter().find(|(t, _)| *t == tag).map(|(_, v)| *v)
+    }
 }
 
 pub struct PortfolioState {

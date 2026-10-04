@@ -923,8 +923,9 @@ impl EClient {
         {
             let acct_name = self.account();
             for batch in self.core.prepare_account_summary(shared) {
+                let account = batch.account.as_deref().unwrap_or(acct_name.as_str());
                 for row in &batch.rows {
-                    call_wrapper!(self.wrapper, py, "account_summary", (batch.req_id, acct_name.as_str(), row.key.as_str(), row.value.as_str(), row.currency.as_str()));
+                    call_wrapper!(self.wrapper, py, "account_summary", (batch.req_id, account, row.key.as_str(), row.value.as_str(), row.currency.as_str()));
                 }
                 if batch.end {
                     call_wrapper!(self.wrapper, py, "account_summary_end", (batch.req_id,));

@@ -600,6 +600,7 @@ impl EClient {
             rows: rows.into_iter().map(|(key, value, currency)| crate::bridge::AccountRow { key, value, currency, ledger: false }).collect(),
             ledger: false,
             end,
+            ledgers: Vec::new(),
         });
         Ok(())
     }

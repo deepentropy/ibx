@@ -415,27 +415,176 @@ pub fn format_account_time(unix_secs: i64) -> String {
     ts.to_zoned(tz).strftime("%H:%M").to_string()
 }
 
+/// The keys of a ledger row in an account summary and the tag of each
+/// value, in the reference's order (`jaccount.X.i()`, `X.a(int, aN, ...)`;
+/// ACCOUNT-SUMMARY 1.3). `Currency`, `AccountOrGroup` and `RealCurrency`
+/// are texts; InsuredDeposit is a key only with an API setting off by
+/// default, so 8174 is added to CashBalance.
+const LEDGER_SUMMARY_KEYS: &[(&str, u32)] = &[
+    ("Currency", 15), ("CashBalance", 9806), ("TotalCashBalance", 9818), ("AccruedCash", 6242),
+    ("StockMarketValue", 9807), ("OptionMarketValue", 9808), ("FutureOptionValue", 9809), ("FuturesPNL", 9810),
+    ("NetLiquidationByCurrency", 9819), ("UnrealizedPnL", 6100), ("RealizedPnL", 6099), ("ExchangeRate", 9820),
+    ("FundValue", 6483), ("NetDividend", 6681), ("MutualFundValue", 6682), ("MoneyMarketFundValue", 6683),
+    ("CorporateBondValue", 6684), ("TBondValue", 6685), ("TBillValue", 6686), ("WarrantValue", 6687),
+    ("FxCashBalance", 6711), ("AccountOrGroup", 0), ("RealCurrency", 0), ("IssuerOptionValue", 6924),
+    ("Cryptocurrency", 8406),
+];
+
+/// The numeric tags of a ledger row the sums add up (`jextend.ef.a()`).
+const LEDGER_SUM_TAGS: &[u32] = &[9806, 9818, 6242, 9807, 9808, 9809, 9810, 9819, 6100, 6099, 9820, 6483, 6681,
+    6682, 6683, 6684, 6685, 6686, 6687, 6711, 6924, 8406, 8174, 6925, 6926, 8007, 8398];
+
+/// The account summary rows of a ledger row, for `account`.
+fn ledger_summary_rows(r: &crate::bridge::LedgerRow, account: &str) -> Vec<crate::bridge::AccountRow> {
+    let currency = if r.real_currency.is_empty() { r.currency.clone() } else { r.real_currency.clone() };
+    LEDGER_SUMMARY_KEYS.iter().map(|&(key, tag)| {
+        let value = match key {
+            "Currency" | "RealCurrency" => currency.clone(),
+            "AccountOrGroup" => account.to_string(),
+            "CashBalance" => {
+                let cash = r.value(9806).map(|c| c + r.value(8174).unwrap_or(0.0));
+                cash.map(java_account_value).unwrap_or_default()
+            }
+            _ => r.value(tag).map(java_account_value).unwrap_or_default(),
+        };
+        crate::bridge::AccountRow { key: key.to_string(), value, currency: r.currency.clone(), ledger: true }
+    }).collect()
+}
+
+/// The accounts of the kept ledger rows, in the order first seen.
+fn accounts_of(rows: &[crate::bridge::LedgerRow]) -> Vec<String> {
+    let mut accounts: Vec<String> = Vec::new();
+    for r in rows {
+        if !accounts.contains(&r.account) {
+            accounts.push(r.account.clone());
+        }
+    }
+    accounts
+}
+
+/// One ledger row per currency summed over the accounts, in the order of
+/// the reference's map (`jextend.ef.a()`): accounts and currencies are
+/// visited in their hash map order; a value missing in one row counts as
+/// missing (`ef.a(double, double)`).
+fn ledger_sums(rows: &[crate::bridge::LedgerRow]) -> Vec<crate::bridge::LedgerRow> {
+    let mut sums: Vec<crate::bridge::LedgerRow> = Vec::new();
+    for account in java_hash_order(&accounts_of(rows)) {
+        let currencies: Vec<String> = rows.iter().filter(|r| r.account == account).map(|r| r.currency.clone()).collect();
+        for currency in java_hash_order(&currencies) {
+            let Some(row) = rows.iter().find(|r| r.account == account && r.currency == currency) else { continue };
+            let k = match sums.iter().position(|s| s.currency == currency) {
+                Some(k) => k,
+                None => {
+                    sums.push(crate::bridge::LedgerRow {
+                        account: "All".into(), currency: currency.clone(), real_currency: row.real_currency.clone(),
+                        values: Vec::new(),
+                    });
+                    sums.len() - 1
+                }
+            };
+            for &tag in LEDGER_SUM_TAGS {
+                if let Some(v) = row.value(tag) {
+                    match sums[k].values.iter_mut().find(|(t, _)| *t == tag) {
+                        Some((_, s)) => *s += v,
+                        None => sums[k].values.push((tag, v)),
+                    }
+                }
+            }
+        }
+    }
+    let order = java_hash_order(&sums.iter().map(|s| s.currency.clone()).collect::<Vec<_>>());
+    order.iter().filter_map(|c| sums.iter().find(|s| &s.currency == c).cloned()).collect()
+}
+
+/// Java's `String.hashCode()`.
+fn java_string_hash(s: &str) -> i32 {
+    s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
+}
+
+/// The iteration order of a Java `HashMap` / `HashSet` that got `keys` in
+/// this order (the reference keeps the ledger currencies and accounts in
+/// such maps): buckets by the spread hash, 16 to start, doubled past three
+/// quarters full, a bucket in insertion order.
+pub(crate) fn java_hash_order(keys: &[String]) -> Vec<String> {
+    let spread = |k: &str| { let h = java_string_hash(k) as u32; h ^ (h >> 16) };
+    let mut cap = 16usize;
+    let mut table: Vec<Vec<(u32, String)>> = vec![Vec::new(); cap];
+    let mut size = 0usize;
+    for k in keys {
+        if table.iter().flatten().any(|(_, e)| e == k) {
+            continue;
+        }
+        let h = spread(k);
+        table[h as usize & (cap - 1)].push((h, k.clone()));
+        size += 1;
+        if size > cap * 3 / 4 {
+            let mut grown: Vec<Vec<(u32, String)>> = vec![Vec::new(); cap * 2];
+            for bucket in table {
+                for (h, e) in bucket {
+                    grown[h as usize & (cap * 2 - 1)].push((h, e));
+                }
+            }
+            table = grown;
+            cap *= 2;
+        }
+    }
+    table.into_iter().flatten().map(|(_, k)| k).collect()
+}
+
+/// An account value as the reference writes it (`jaccount.X.l`: a
+/// `DecimalFormat` with two to seven decimals, half-even, no grouping):
+/// 933115.0500 gives 933115.05, 953925.6599 stays, 1 gives 1.00.
+pub(crate) fn java_account_value(v: f64) -> String {
+    let text = format!("{}", v);
+    let (sign, digits) = match text.strip_prefix('-') {
+        Some(d) => ("-", d),
+        None => ("", text.as_str()),
+    };
+    let (int, frac) = digits.split_once('.').unwrap_or((digits, ""));
+    let mut int: Vec<u8> = int.bytes().collect();
+    let mut frac: Vec<u8> = frac.bytes().collect();
+    if frac.len() > 7 {
+        let rest = frac.split_off(7);
+        let up = rest[0] > b'5' || (rest[0] == b'5' && (rest[1..].iter().any(|&d| d != b'0')
+            || frac.last().is_some_and(|d| (d - b'0') % 2 == 1)));
+        if up {
+            // One more in the last place, carried into the integer part.
+            let mut carry = true;
+            for d in frac.iter_mut().rev().chain(int.iter_mut().rev()) {
+                if !carry { break; }
+                if *d == b'9' { *d = b'0'; } else { *d += 1; carry = false; }
+            }
+            if carry { int.insert(0, b'1'); }
+        }
+    }
+    while frac.len() > 2 && frac.last() == Some(&b'0') {
+        frac.pop();
+    }
+    while frac.len() < 2 {
+        frac.push(b'0');
+    }
+    format!("{}{}.{}", sign, String::from_utf8(int).unwrap_or_default(), String::from_utf8(frac).unwrap_or_default())
+}
+
 /// Account summary rows to send for one request (ibx#479).
+#[derive(Clone, Debug)]
 pub struct AccountSummaryBatch {
     pub req_id: i64,
+    /// The account the rows name: None for this client's account, else
+    /// the account of a ledger row, or `All` for the sums of `$LEDGER:ALL`
+    /// (ibx#486).
+    pub account: Option<String>,
     pub rows: Vec<crate::bridge::AccountRow>,
     /// The server's batch ended: account_summary_end follows the rows.
     pub end: bool,
 }
 
-/// Which ledger rows a summary request asked for (ibx#479). `$LEDGER`,
-/// `$LEDGER:{CCY}` and `$LEDGER:ALL` are one `$LEDGER` item on the wire;
-/// the currency choice stays in the client.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LedgerChoice {
-    None,
-    /// `$LEDGER`: the base currency.
-    Base,
-    /// `$LEDGER:{CCY}`.
-    Currency(String),
-    /// `$LEDGER:ALL`.
-    All,
-}
+/// The currency of `$LEDGER:ALL` in the set of ledger currencies (ibx#479,
+/// ibx#486), as the reference keeps it (`jextend.b2.o()@202-285`):
+/// `$LEDGER` adds `BASE`, `$LEDGER:{CCY}` adds `{CCY}`, `$LEDGER:ALL` adds
+/// `ALL`. They are one `$LEDGER` item on the wire; the choice stays in the
+/// client.
+pub const LEDGER_ALL: &str = "ALL";
 
 /// A running account summary request (ibx#479).
 #[derive(Clone, Debug)]
@@ -443,7 +592,10 @@ pub struct AccountSummaryRequest {
     pub req_id: i64,
     /// Subscription id the server echoes on the rows.
     pub sr_id: String,
-    pub ledger: LedgerChoice,
+    /// The ledger currencies asked (see [`LEDGER_ALL`]), in request order.
+    pub ledger: Vec<String>,
+    /// The latest ledger row of each account and currency (`jextend.ef`).
+    pub ledger_rows: Vec<crate::bridge::LedgerRow>,
 }
 
 /// What `req_account_summary` sends: the subscription, and the one it
@@ -2250,15 +2402,17 @@ impl ClientCore {
         if group != "All" && group != "AllNonProp" {
             return Err(summary_refusal("Group name is invalid"));
         }
-        let mut ledger = LedgerChoice::None;
+        let mut ledger: Vec<String> = Vec::new();
         let mut wire: Vec<&str> = Vec::new();
         for item in tags.split(',').map(str::trim).filter(|t| !t.is_empty()) {
             if let Some(rest) = item.strip_prefix("$LEDGER") {
-                ledger = match rest.strip_prefix(':') {
-                    None => LedgerChoice::Base,
-                    Some("ALL") => LedgerChoice::All,
-                    Some(ccy) => LedgerChoice::Currency(ccy.to_string()),
+                let ccy = match rest.find(':') {
+                    None => "BASE",
+                    Some(k) => &rest[k + 1..],
                 };
+                if !ledger.iter().any(|c| c == ccy) {
+                    ledger.push(ccy.to_string());
+                }
                 if !wire.contains(&"$LEDGER") {
                     wire.push("$LEDGER");
                 }
@@ -2274,7 +2428,7 @@ impl ClientCore {
                 exceeded; desubscribe to previous request first".into()));
         }
         let sr_id = format!("SR.Socket.{}", self.next_account_summary.fetch_add(1, Ordering::Relaxed));
-        reqs.push(AccountSummaryRequest { req_id, sr_id: sr_id.clone(), ledger });
+        reqs.push(AccountSummaryRequest { req_id, sr_id: sr_id.clone(), ledger, ledger_rows: Vec::new() });
         Ok(AccountSummaryPlan { cancel_sr_id, sr_id, wire_tags: wire.join(","), group: group.to_string() })
     }
 
@@ -3455,28 +3609,61 @@ impl ClientCore {
 
     /// Account summary rows and ends the server sent, by request (ibx#479):
     /// every row of the request's subscription, with its text and currency;
-    /// ledger rows only for the currency the request chose; the end at each
-    /// end marker. Rows of a cancelled subscription are dropped.
+    /// the end at each end marker. Rows of a cancelled subscription are
+    /// dropped. As the reference (ibx#486, `jextend.l`, `jextend.ef`):
+    /// - a ledger frame gives the rows of each account for the currencies
+    ///   asked (not `ALL`), in the order of the reference's currency set;
+    /// - with `$LEDGER:ALL`, the end marker gives first one row per
+    ///   currency summed over the accounts, for the account `All`;
+    /// - ledger values are written as the reference's account values
+    ///   (`jaccount.X`: two to seven decimals, no grouping);
+    /// - the reference registers the request's listener twice
+    ///   (`jextend.b2.o()@62`, `@75`: `trader.cm.j.a(aU)` and `c(aU)`), so
+    ///   each frame's rows and end are given twice (account_summary of
+    ///   26/09/2026: the four tag rows twice; the ledger sums and the end
+    ///   twice).
     pub fn prepare_account_summary(&self, shared: &SharedState) -> Vec<AccountSummaryBatch> {
         let events = shared.portfolio.drain_account_summary_events();
         if events.is_empty() {
             return Vec::new();
         }
-        let reqs = self.account_summaries.lock().unwrap();
+        let mut reqs = self.account_summaries.lock().unwrap();
         let mut out = Vec::new();
         for event in events {
-            let Some(req) = reqs.iter().find(|r| r.sr_id == event.sr_id) else { continue };
-            let rows = if event.ledger {
-                event.rows.into_iter().filter(|row| match &req.ledger {
-                    LedgerChoice::None => false,
-                    LedgerChoice::Base => row.currency == "BASE",
-                    LedgerChoice::Currency(ccy) => &row.currency == ccy,
-                    LedgerChoice::All => true,
-                }).collect()
-            } else {
-                event.rows
-            };
-            out.push(AccountSummaryBatch { req_id: req.req_id, rows, end: event.end });
+            let Some(req) = reqs.iter_mut().find(|r| r.sr_id == event.sr_id) else { continue };
+            let mut batches: Vec<AccountSummaryBatch> = Vec::new();
+            if event.ledger {
+                for row in event.ledgers {
+                    match req.ledger_rows.iter_mut().find(|r| r.account == row.account && r.currency == row.currency) {
+                        Some(kept) => *kept = row,
+                        None => req.ledger_rows.push(row),
+                    }
+                }
+                let currencies = java_hash_order(&req.ledger);
+                for account in java_hash_order(&accounts_of(&req.ledger_rows)) {
+                    let rows: Vec<crate::bridge::AccountRow> = currencies.iter().filter(|c| *c != LEDGER_ALL)
+                        .filter_map(|c| req.ledger_rows.iter().find(|r| r.account == account && &r.currency == c))
+                        .flat_map(|r| ledger_summary_rows(r, &account))
+                        .collect();
+                    if !rows.is_empty() {
+                        batches.push(AccountSummaryBatch { req_id: req.req_id, account: Some(account.clone()), rows, end: false });
+                    }
+                }
+            } else if !event.rows.is_empty() {
+                batches.push(AccountSummaryBatch { req_id: req.req_id, account: None, rows: event.rows, end: false });
+            }
+            if event.end {
+                if req.ledger.iter().any(|c| c == LEDGER_ALL) {
+                    let rows: Vec<crate::bridge::AccountRow> = ledger_sums(&req.ledger_rows).iter()
+                        .flat_map(|r| ledger_summary_rows(r, "All")).collect();
+                    if !rows.is_empty() {
+                        batches.push(AccountSummaryBatch { req_id: req.req_id, account: Some("All".into()), rows, end: false });
+                    }
+                }
+                batches.push(AccountSummaryBatch { req_id: req.req_id, account: None, rows: Vec::new(), end: true });
+            }
+            out.extend(batches.iter().cloned());
+            out.extend(batches);
         }
         out
     }
@@ -4942,6 +5129,62 @@ impl ClientCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ibx#486: the reference's hash map order (BASE after USD, the order of
+    // the account_summary capture of 26/09/2026) and its account values.
+    #[test]
+    fn java_map_order_and_account_values() {
+        let keys = |k: &[&str]| k.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(java_hash_order(&keys(&["BASE", "USD"])), ["USD", "BASE"]);
+        assert_eq!(java_hash_order(&keys(&["USD", "BASE", "USD"])), ["USD", "BASE"]);
+        // Past twelve keys the table doubles; every key stays once.
+        let many: Vec<String> = (0..20).map(|k| format!("C{k}")).collect();
+        let mut got = java_hash_order(&many);
+        got.sort();
+        let mut want = many.clone();
+        want.sort();
+        assert_eq!(got, want);
+        assert_eq!(java_account_value(933115.05), "933115.05");
+        assert_eq!(java_account_value(953925.6599), "953925.6599");
+        assert_eq!(java_account_value(1.0), "1.00");
+        assert_eq!(java_account_value(-1128.69), "-1128.69");
+        assert_eq!(java_account_value(0.123456789), "0.1234568");
+        assert_eq!(java_account_value(9.99999999), "10.00");
+    }
+
+    // ibx#486: $LEDGER:ALL gives, at the end marker, one row per currency
+    // summed over the accounts, for the account All; nothing at the ledger
+    // frame; a value missing in one account counts as missing.
+    #[test]
+    fn ledger_all_sums_per_currency_at_the_end() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        let plan = core.subscribe_account_summary(7, "All", "$LEDGER:ALL").unwrap();
+        assert_eq!(plan.wire_tags, "$LEDGER");
+        let row = |account: &str, currency: &str, values: Vec<(u32, f64)>| crate::bridge::LedgerRow {
+            account: account.into(), currency: currency.into(), real_currency: currency.into(), values,
+        };
+        shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
+            sr_id: plan.sr_id.clone(), rows: vec![], ledger: true, end: false,
+            ledgers: vec![row("DU1", "BASE", vec![(9806, 10.5), (6242, 1.0)]), row("DU1", "USD", vec![(9806, 10.5)]),
+                row("DU2", "USD", vec![(9806, 0.25), (6242, 2.0)])],
+        });
+        assert!(core.prepare_account_summary(&shared).is_empty(), "no rows at the ledger frame");
+        shared.portfolio.push_account_summary_event(crate::bridge::AccountSummaryEvent {
+            sr_id: plan.sr_id.clone(), rows: vec![], ledger: false, end: true, ledgers: vec![],
+        });
+        let out = core.prepare_account_summary(&shared);
+        let lines: Vec<String> = out.iter().flat_map(|b| {
+            let account = b.account.clone().unwrap_or_default();
+            let mut l: Vec<String> = b.rows.iter().filter(|r| matches!(r.key.as_str(), "Currency" | "CashBalance" | "AccruedCash"))
+                .map(|r| format!("{account}|{}|{}|{}", r.key, r.value, r.currency)).collect();
+            if b.end { l.push("end".into()); }
+            l
+        }).collect();
+        let once = ["All|Currency|USD|USD", "All|CashBalance|10.75|USD", "All|AccruedCash|2.00|USD",
+            "All|Currency|BASE|BASE", "All|CashBalance|10.50|BASE", "All|AccruedCash|1.00|BASE", "end"];
+        assert_eq!(lines, [once, once].concat());
+    }
 
     // ibx#251: a request is held only while the order replay is pending,
     // once per kind, and released in the order it was made.

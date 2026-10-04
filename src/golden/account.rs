@@ -92,11 +92,10 @@ fn account_summary_request_and_tag_rows() {
 
 // The rest of the answer: the reference gives the tag rows twice, and the
 // $LEDGER:ALL rows per currency (USD, then BASE) for the account "All"
-// with two decimals, then the end, twice; ibx gives the BASE ledger row
-// once, for the account, with the wire's four decimals (ACCOUNT-SUMMARY
-// 1.3 and 1.5: the ALL sum of ef.a()).
+// written as its account values (933115.0500 gives 933115.05), then the
+// end, twice (ACCOUNT-SUMMARY 1.3 and 1.5: the ALL sum of ef.a(); the
+// listener registered twice by b2.o()).
 #[test]
-#[ignore = "ibx#486: account summary $LEDGER:ALL rows and the repeated batch"]
 fn account_summary_ledger_all_rows() {
     let r = replay_account_summary(&load("account_summary"));
     assert!(r.theirs.len() > 100, "{}", r.theirs.len());

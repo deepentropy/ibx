@@ -234,8 +234,8 @@ fn bracket() {
 
 // reqAccountSummary of four tags and $LEDGER:ALL, then its cancel
 // (26/09/2026, ibx#479): the subscription and its cancel as the
-// reference's, the four tag rows. The rest of the answer is
-// src/golden/account.rs `account_summary_ledger_all_rows` (ibx#486).
+// reference's, the four tag rows. The whole answer: the test below
+// (ibx#486).
 #[test]
 fn account_summary_subscription_and_tag_rows() {
     let o = replay(&load_scenario("20260926/account_summary"), &Options::default().compare(&[SUBSCRIPTION]));
@@ -245,7 +245,6 @@ fn account_summary_subscription_and_tag_rows() {
 }
 
 #[test]
-#[ignore = "ibx#486: account summary $LEDGER:ALL rows and the repeated batch"]
 fn account_summary_whole_answer() {
     check("20260926/account_summary", Options::default());
 }
