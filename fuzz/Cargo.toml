@@ -1,0 +1,159 @@
+# Fuzz targets of the network decoders (ibx#488), run by hand, not in CI.
+#
+# Each target takes one group of decoders of `ibx::test_support::decoders`
+# (the groups the property tests of src/robustness/ use); `engine` gives
+# the input to the three message handlers of a hot loop.
+#
+#   cargo install cargo-fuzz                      # once; needs a nightly toolchain
+#   python fuzz/seed_corpus.py                    # corpus from tests/fixtures/gw1040
+#   cargo +nightly fuzz run ticks -- -max_total_time=60
+#   cargo +nightly fuzz list
+#
+# On Windows (MSVC) the address sanitizer is needed (`-s none` does not
+# link there): put its runtime on PATH and let it go on past the hooks it
+# cannot set, for example in Git Bash:
+#
+#   export PATH="/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/<version>/bin/Hostx64/x64:$PATH"
+#   export ASAN_WIN_CONTINUE_ON_INTERCEPTION_FAILURE=1
+#
+# The targets link the library of ibx-rlib/ (the same sources as an rlib):
+# the crate's cdylib does not link with the fuzzer instrumentation.
+
+[package]
+name = "ibx-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ibx = { package = "ibx-rlib", path = "ibx-rlib", features = ["test-support"] }
+
+# Not a member of the crate's build.
+[workspace]
+members = [".", "ibx-rlib"]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "ns"
+path = "fuzz_targets/ns.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xyz"
+path = "fuzz_targets/xyz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fix"
+path = "fuzz_targets/fix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fixcomp"
+path = "fuzz_targets/fixcomp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connection"
+path = "fuzz_targets/connection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ticks"
+path = "fuzz_targets/ticks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "depth"
+path = "fuzz_targets/depth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "generic"
+path = "fuzz_targets/generic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tick_by_tick"
+path = "fuzz_targets/tick_by_tick.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "farm_text"
+path = "fuzz_targets/farm_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hmds_xml"
+path = "fuzz_targets/hmds_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hmds_binary"
+path = "fuzz_targets/hmds_binary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "contracts"
+path = "fuzz_targets/contracts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "logon"
+path = "fuzz_targets/logon.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth"
+path = "fuzz_targets/auth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "key_exchange"
+path = "fuzz_targets/key_exchange.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine"
+path = "fuzz_targets/engine.rs"
+test = false
+doc = false
+bench = false
