@@ -6,6 +6,7 @@ callbacks fire with correctly converted types across the PyO3 boundary.
 """
 
 import sys
+from decimal import Decimal
 import pytest
 import threading
 from ibx import (
@@ -126,7 +127,8 @@ class RecordingWrapper(EWrapper):
             "init_margin_after_outside_rth": s.init_margin_after_outside_rth,
             "suggested_size": s.suggested_size,
             "reject_reason": s.reject_reason,
-            "order_allocations": list(s.order_allocations),
+            # None when there is none, as the official API's.
+            "order_allocations": list(s.order_allocations or []),
         }))
 
     def open_order_end(self):
@@ -272,22 +274,23 @@ class TestOrderConversion:
 
     def test_condition_types(self):
         """Verify all condition types are constructible via PyO3."""
-        pc = PriceCondition(con_id=265598, price=200.0, is_more=True, trigger_method=1)
+        # The official API's constructor arguments.
+        pc = PriceCondition(conId=265598, price=200.0, isMore=True, triggerMethod=1)
         assert pc.price == 200.0
 
-        tc = TimeCondition(time="20260313-09:30:00", is_more=True)
+        tc = TimeCondition(time="20260313-09:30:00", isMore=True)
         assert tc.time == "20260313-09:30:00"
 
-        mc = MarginCondition(percent=30, is_more=False)
+        mc = MarginCondition(percent=30, isMore=False)
         assert mc.percent == 30
 
-        vc = VolumeCondition(con_id=265598, volume=1_000_000, is_more=True)
+        vc = VolumeCondition(conId=265598, volume=1_000_000, isMore=True)
         assert vc.volume == 1_000_000
 
-        pcc = PercentChangeCondition(con_id=265598, change_percent=5.0, is_more=True)
+        pcc = PercentChangeCondition(conId=265598, changePercent=5.0, isMore=True)
         assert pcc.change_percent == 5.0
 
-        ec = ExecutionCondition(symbol="AAPL", exchange="SMART", sec_type="STK")
+        ec = ExecutionCondition(symbol="AAPL", exch="SMART", secType="STK")
         assert ec.symbol == "AAPL"
 
     def test_large_quantity(self):
@@ -608,7 +611,8 @@ class TestReqOpenOrdersOrderState:
         assert state["status"] == "PendingSubmit"
         # Newly tracked orders have empty margin fields — populated only for what-if.
         assert state["init_margin_after"] == ""
-        assert state["commission_and_fees"] == 0.0
+        # Unset, as the reference's openOrder and the official API's default.
+        assert state["commission_and_fees"] == sys.float_info.max
 
 
 class TestReqCompletedOrdersOrderState:
@@ -658,7 +662,8 @@ class TestOrderAllocation:
         a.allowed_alloc_qty = "50"
         a.is_monetary = True
         assert a.account == "DU123"
-        assert a.position == "100"
+        # The official API's Decimal.
+        assert a.position == Decimal("100") and a.positionDesired == Decimal("150")
         assert a.is_monetary is True
 
     def test_order_state_allocations_roundtrip(self):
@@ -709,7 +714,8 @@ class TestWhatIfDispatch:
         # values unset (the maximum double), as the reference (ibx#462).
         assert state["margin_currency"] == ""
         assert state["init_margin_after_outside_rth"] == sys.float_info.max
-        assert state["suggested_size"] == ""
+        # The official API's unset Decimal.
+        assert state["suggested_size"] == Decimal("170141183460469231731687303715884105727")
         assert state["reject_reason"] == ""
         assert state["order_allocations"] == []
 

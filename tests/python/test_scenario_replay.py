@@ -193,7 +193,8 @@ class Driver:
     def dispatch(self):
         self.client._test_dispatch_once()
         calls, self.wrapper.calls = self.wrapper.calls, []
-        return json.dumps(calls)
+        # Decimals as their text, as the recorded callbacks have them.
+        return json.dumps(calls, default=str)
 
 
 def known(line):
@@ -297,4 +298,5 @@ def test_callback_objects_have_the_official_attribute_names():
     assert BarData(bar_count=3).barCount == 3
     r = CommissionAndFeesReport()
     r.realizedPNL, r.yield_ = 1.5, 0.25
-    assert (r.realized_pnl, r.yield_amount, r.execId, r.commissionAndFees, r.yieldRedemptionDate) == (1.5, 0.25, "", 0.0, "")
+    # yieldRedemptionDate is an int (YYYYMMDD), 0 when none, as the official API's.
+    assert (r.realized_pnl, r.yield_amount, r.execId, r.commissionAndFees, r.yieldRedemptionDate) == (1.5, 0.25, "", 0.0, 0)

@@ -3,6 +3,7 @@
 pub mod client;
 pub mod contract;
 pub mod tick_types;
+pub mod values;
 pub mod wrapper;
 
 use pyo3::prelude::*;

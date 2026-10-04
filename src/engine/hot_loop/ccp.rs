@@ -2515,7 +2515,7 @@ impl CcpState {
     }
 
     pub(crate) fn send_secdef_request_by_symbol(&mut self, req_id: ReqId, symbol: &str, sec_type: &str, exchange: &str, currency: &str, filters: &crate::types::SecDefFilters, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
-        let strike = if filters.strike > 0.0 { format!("{}", filters.strike) } else { String::new() };
+        let strike = filters.strike_text();
         let (sec_type, continuous, with_futures) = lookup_sec_type(sec_type, filters);
         if continuous {
             log::info!("Requested continuous futures contract details: req_id={}", req_id);
@@ -2836,11 +2836,7 @@ impl CcpState {
             filters: lookup.filters,
             continuous: false,
         };
-        let strike = if symbol_lookup.filters.strike > 0.0 {
-            format!("{}", symbol_lookup.filters.strike)
-        } else {
-            String::new()
-        };
+        let strike = symbol_lookup.filters.strike_text();
         if let Some(conn) = ccp_conn.as_mut().filter(|_| !self.disconnected) {
             send_symbol_lookup_on(conn, ReqId::from(lookup_id), &symbol_lookup, &strike);
             hb.last_ccp_sent = Instant::now();
@@ -4778,7 +4774,7 @@ mod tests {
     }
 
     fn lookup_frame(lookup: &SymbolLookup) -> String {
-        let strike = if lookup.filters.strike > 0.0 { format!("{}", lookup.filters.strike) } else { String::new() };
+        let strike = lookup.filters.strike_text();
         frame_text(&secdef_by_symbol_fields(7, lookup, &strike))
     }
 

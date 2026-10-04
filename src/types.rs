@@ -1866,6 +1866,14 @@ pub struct SecDefFilters {
     pub issuer_id: String,
 }
 
+impl SecDefFilters {
+    /// The strike of a lookup, empty when unset: 0 (the Rust API's unset
+    /// strike) or the maximum double (the official API's).
+    pub fn strike_text(&self) -> String {
+        if self.strike > 0.0 && self.strike != f64::MAX { format!("{}", self.strike) } else { String::new() }
+    }
+}
+
 /// A contract as the API gave it, for a lookup by symbol (ibx#427).
 #[derive(Debug, Clone, Default)]
 pub struct ContractLookup {

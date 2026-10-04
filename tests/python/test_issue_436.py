@@ -7,12 +7,14 @@ against the rows the official client received from the gateway (paper,
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from ibx import EClient, EWrapper
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "contract_details" / "golden_rows.json"
 UNSET = 1.7976931348623157e308
+UNSET_DECIMAL = Decimal("170141183460469231731687303715884105727")
 # Paris time of both capture days (summer time).
 PARIS = timezone(timedelta(hours=2))
 
@@ -73,10 +75,11 @@ def compare(expected, d):
     for name in flags:
         out.append((name, expected.get(name, False), getattr(d, snake(name))))
     for name in ("minSize", "sizeIncrement", "suggestedSizeIncrement"):
-        out.append((name, float(expected[name]) if name in expected else UNSET, getattr(d, snake(name))))
-    out.append(("secIdList", expected.get("secIdList", []), [{"tag": t.tag, "value": t.value} for t in d.sec_id_list]))
+        # The official API's Decimals.
+        out.append((name, Decimal(str(expected[name])) if name in expected else UNSET_DECIMAL, getattr(d, snake(name))))
+    out.append(("secIdList", expected.get("secIdList", []), [{"tag": t.tag, "value": t.value} for t in d.sec_id_list or []]))
     out.append(("ineligibilityReasonList", expected.get("ineligibilityReasonList", []),
-                [{"id_": r.id_, "description": r.description} for r in d.ineligibility_reason_list]))
+                [{"id_": r.id_, "description": r.description} for r in d.ineligibility_reason_list or []]))
     out.append(("fundDistributionPolicyIndicator", expected.get("fundDistributionPolicyIndicator", "None"),
                 d.fund_distribution_policy_indicator or "None"))
     out.append(("fundAssetType", expected.get("fundAssetType", "None"), d.fund_asset_type or "None"))

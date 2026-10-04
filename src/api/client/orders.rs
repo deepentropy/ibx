@@ -204,7 +204,10 @@ impl EClient {
                 } else {
                     info.contract
                 };
-                wrapper.completed_order(&contract, &info.order, &state);
+                // The order as the reference shows it (its unset values).
+                let mut order = info.order;
+                crate::client_core::reported_unset_values(&mut order);
+                wrapper.completed_order(&contract, &order, &state);
             } else {
                 let contract = Contract::default();
                 let api_order = Order { order_id: order.order_id, ..Default::default() };

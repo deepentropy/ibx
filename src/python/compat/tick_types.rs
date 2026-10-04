@@ -2,6 +2,8 @@
 
 use pyo3::prelude::*;
 
+use super::values::{decimal_from_py, decimal_to_py, official_names};
+
 // ── Tick type constants matching ibapi's TickTypeEnum ──
 
 pub const TICK_BID_SIZE: i32 = 0;
@@ -84,6 +86,8 @@ impl TickAttribLast {
     }
 }
 
+official_names!(TickAttribLast, [("pastLimit", "past_limit")]);
+
 /// ibapi-compatible TickAttribBidAsk for tick-by-tick bid/ask callbacks.
 #[pyclass(from_py_object)]
 #[derive(Clone, Default)]
@@ -107,26 +111,33 @@ impl TickAttribBidAsk {
     }
 }
 
+official_names!(TickAttribBidAsk, [("bidPastLow", "bid_past_low"), ("askPastHigh", "ask_past_high")]);
+
 /// ibapi-compatible HistoricalTick (a midpoint) for historicalTicks
-/// (ibx#432): time in Unix seconds.
+/// (ibx#432): time in Unix seconds. The size is the official API's Decimal
+/// (`decimal.Decimal`, unset `UNSET_DECIMAL`; `f64::MAX` here).
 #[pyclass(from_py_object)]
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct HistoricalTick {
     #[pyo3(get, set)]
     pub time: i64,
     #[pyo3(get, set)]
     pub price: f64,
-    #[pyo3(get, set)]
     pub size: f64,
 }
 
 #[pymethods]
 impl HistoricalTick {
     #[new]
-    #[pyo3(signature = (time=0, price=0.0, size=0.0))]
-    fn new(time: i64, price: f64, size: f64) -> Self {
-        Self { time, price, size }
+    #[pyo3(signature = (time=0, price=0.0, size=None))]
+    fn new(time: i64, price: f64, size: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        Ok(Self { time, price, size: size.map(decimal_from_py).transpose()?.unwrap_or(f64::MAX) })
     }
+
+    #[getter(size)]
+    fn get_size(&self, py: Python<'_>) -> PyResult<Py<PyAny>> { decimal_to_py(py, self.size) }
+    #[setter(size)]
+    fn set_size(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> { self.size = decimal_from_py(v)?; Ok(()) }
 
     fn __repr__(&self) -> String {
         format!("HistoricalTick(time={}, price={}, size={})", self.time, self.price, self.size)
@@ -134,6 +145,7 @@ impl HistoricalTick {
 }
 
 /// ibapi-compatible HistoricalTickLast for historicalTicksLast (ibx#432).
+/// The size is the official API's Decimal, as `HistoricalTick`'s.
 #[pyclass]
 pub struct HistoricalTickLast {
     #[pyo3(get, set)]
@@ -142,7 +154,6 @@ pub struct HistoricalTickLast {
     pub tick_attrib_last: Py<TickAttribLast>,
     #[pyo3(get, set)]
     pub price: f64,
-    #[pyo3(get, set)]
     pub size: f64,
     #[pyo3(get, set)]
     pub exchange: String,
@@ -152,6 +163,20 @@ pub struct HistoricalTickLast {
 
 #[pymethods]
 impl HistoricalTickLast {
+    /// The official API's defaults.
+    #[new]
+    fn new(py: Python<'_>) -> PyResult<Self> {
+        Ok(Self {
+            time: 0, tick_attrib_last: Py::new(py, TickAttribLast::default())?, price: 0.0, size: f64::MAX,
+            exchange: String::new(), special_conditions: String::new(),
+        })
+    }
+
+    #[getter(size)]
+    fn get_size(&self, py: Python<'_>) -> PyResult<Py<PyAny>> { decimal_to_py(py, self.size) }
+    #[setter(size)]
+    fn set_size(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> { self.size = decimal_from_py(v)?; Ok(()) }
+
     fn __repr__(&self, py: Python<'_>) -> String {
         let a = self.tick_attrib_last.borrow(py);
         format!("HistoricalTickLast(time={}, pastLimit={}, unreported={}, price={}, size={}, exchange={}, specialConditions={:?})",
@@ -159,8 +184,11 @@ impl HistoricalTickLast {
     }
 }
 
+official_names!(HistoricalTickLast, [("tickAttribLast", "tick_attrib_last"), ("specialConditions", "special_conditions")]);
+
 /// ibapi-compatible HistoricalTickBidAsk for historicalTicksBidAsk
-/// (ibx#432).
+/// (ibx#432). The sizes are the official API's Decimals, as
+/// `HistoricalTick`'s.
 #[pyclass]
 pub struct HistoricalTickBidAsk {
     #[pyo3(get, set)]
@@ -171,20 +199,41 @@ pub struct HistoricalTickBidAsk {
     pub price_bid: f64,
     #[pyo3(get, set)]
     pub price_ask: f64,
-    #[pyo3(get, set)]
     pub size_bid: f64,
-    #[pyo3(get, set)]
     pub size_ask: f64,
 }
 
 #[pymethods]
 impl HistoricalTickBidAsk {
+    /// The official API's defaults.
+    #[new]
+    fn new(py: Python<'_>) -> PyResult<Self> {
+        Ok(Self {
+            time: 0, tick_attrib_bid_ask: Py::new(py, TickAttribBidAsk::default())?, price_bid: 0.0, price_ask: 0.0,
+            size_bid: f64::MAX, size_ask: f64::MAX,
+        })
+    }
+
+    #[getter(size_bid)]
+    fn get_size_bid(&self, py: Python<'_>) -> PyResult<Py<PyAny>> { decimal_to_py(py, self.size_bid) }
+    #[setter(size_bid)]
+    fn set_size_bid(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> { self.size_bid = decimal_from_py(v)?; Ok(()) }
+    #[getter(size_ask)]
+    fn get_size_ask(&self, py: Python<'_>) -> PyResult<Py<PyAny>> { decimal_to_py(py, self.size_ask) }
+    #[setter(size_ask)]
+    fn set_size_ask(&mut self, v: &Bound<'_, PyAny>) -> PyResult<()> { self.size_ask = decimal_from_py(v)?; Ok(()) }
+
     fn __repr__(&self, py: Python<'_>) -> String {
         let a = self.tick_attrib_bid_ask.borrow(py);
         format!("HistoricalTickBidAsk(time={}, bidPastLow={}, askPastHigh={}, priceBid={}, priceAsk={}, sizeBid={}, sizeAsk={})",
             self.time, a.bid_past_low, a.ask_past_high, self.price_bid, self.price_ask, self.size_bid, self.size_ask)
     }
 }
+
+official_names!(HistoricalTickBidAsk, [
+    ("tickAttribBidAsk", "tick_attrib_bid_ask"), ("priceBid", "price_bid"), ("priceAsk", "price_ask"),
+    ("sizeBid", "size_bid"), ("sizeAsk", "size_ask"),
+]);
 
 /// Module-level TickTypeEnum class for accessing tick type constants.
 #[pyclass]

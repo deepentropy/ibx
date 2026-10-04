@@ -3,6 +3,8 @@ the local answers of a ticks request, keepUpToDate updates and the
 historicalDataEnd strings, as the reference gives them (capture of
 02/10/2026)."""
 
+from decimal import Decimal
+
 from ibx import Contract, EClient, EWrapper
 
 T15 = 1790881200  # 20261001 15:00:00 US/Eastern
@@ -96,7 +98,8 @@ def test_historical_data_end_strings_and_updates():
     c._test_push_historical_update(5, "20261002 04:00:00 US/Eastern", 331.05, 331.59, 330.55, 331.45, 49528, 331.285, 522)
     c._test_dispatch_once()
     assert ("end", 5, "20261001 04:56:41 US/Eastern", "20261002 04:56:41 US/Eastern") in w.events
-    assert w.events[-1] == ("update", 5, "20261002 04:00:00 US/Eastern", 331.45, 49528, 331.285, 522)
+    # The volume and the WAP are the official API's Decimals.
+    assert w.events[-1] == ("update", 5, "20261002 04:00:00 US/Eastern", 331.45, Decimal("49528"), Decimal("331.285"), 522)
 
 
 def test_keep_up_to_date_refusals():

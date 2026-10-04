@@ -124,7 +124,7 @@ class TestAuxPriceValidation:
         order.total_quantity = 1
         order.order_type = "STP"
         order.lmt_price = 145.0  # common mistake
-        # aux_price deliberately not set (defaults to 0.0)
+        order.aux_price = 0.0  # unset (the API's default) gets the reference's 321 instead
         with pytest.raises(RuntimeError, match="aux_price"):
             client.place_order(1, make_spy(), order)
 
@@ -136,7 +136,7 @@ class TestAuxPriceValidation:
         order.total_quantity = 1
         order.order_type = "STP LMT"
         order.lmt_price = 144.0
-        # aux_price deliberately not set
+        order.aux_price = 0.0  # unset (the API's default) gets the reference's 321 instead
         with pytest.raises(RuntimeError, match="aux_price"):
             client.place_order(2, make_spy(), order)
 
@@ -169,6 +169,7 @@ class TestAuxPriceValidation:
         order.action = "BUY"
         order.total_quantity = 1
         order.order_type = "MIT"
+        order.aux_price = 0.0  # unset (the API's default) gets the reference's 321 instead
         with pytest.raises(RuntimeError, match="aux_price"):
             client.place_order(5, make_spy(), order)
 
@@ -180,6 +181,7 @@ class TestAuxPriceValidation:
         order.total_quantity = 1
         order.order_type = "LIT"
         order.lmt_price = 150.0
+        order.aux_price = 0.0  # unset (the API's default) gets the reference's 321 instead
         with pytest.raises(RuntimeError, match="aux_price"):
             client.place_order(6, make_spy(), order)
 
@@ -190,6 +192,7 @@ class TestAuxPriceValidation:
         order.action = "SELL"
         order.total_quantity = 1
         order.order_type = "STP PRT"
+        order.aux_price = 0.0  # unset (the API's default) gets the reference's 321 instead
         with pytest.raises(RuntimeError, match="aux_price"):
             client.place_order(7, make_spy(), order)
 

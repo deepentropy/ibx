@@ -56,7 +56,10 @@ pub struct DeltaNeutralContract {
 
 // ── Contract ──
 
-/// ibapi-compatible Contract. Matches C++ `Contract` struct fields.
+/// ibapi-compatible Contract. Matches C++ `Contract` struct fields. Its
+/// defaults are the official API's: no security type, exchange or currency
+/// (empty), which the requests and orders that need them refuse as the
+/// reference does.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Contract {
     pub con_id: i64,
@@ -65,6 +68,8 @@ pub struct Contract {
     pub exchange: String,
     pub currency: String,
     pub last_trade_date_or_contract_month: String,
+    /// 0 when unset, as the C++ API's default; the maximum double (the
+    /// Python API's unset value) is read as unset too.
     pub strike: f64,
     pub right: String,
     pub multiplier: String,
@@ -243,28 +248,31 @@ pub struct Order {
     pub what_if_type: i32,
 }
 
+/// The official API's defaults (ibapi 10.46 `Order()`): an unset double is
+/// `f64::MAX`, an unset int `i32::MAX`, an unset quantity (the API's
+/// Decimal) `f64::MAX`, empty texts.
 impl Default for Order {
     fn default() -> Self {
         Self {
             order_id: 0,
             action: String::new(),
-            total_quantity: 0.0,
+            total_quantity: f64::MAX,
             order_type: String::new(),
-            lmt_price: 0.0,
-            aux_price: 0.0,
-            tif: "DAY".into(),
+            lmt_price: f64::MAX,
+            aux_price: f64::MAX,
+            tif: String::new(),
             outside_rth: false,
             display_size: 0,
-            min_qty: 0,
+            min_qty: i32::MAX,
             hidden: false,
             good_after_time: String::new(),
             good_till_date: String::new(),
             oca_group: String::new(),
-            trailing_percent: 0.0,
+            trailing_percent: f64::MAX,
             algo_strategy: String::new(),
             algo_params: Vec::new(),
             what_if: false,
-            cash_qty: 0.0,
+            cash_qty: f64::MAX,
             parent_id: 0,
             transmit: true,
             discretionary_amt: 0.0,
@@ -272,9 +280,9 @@ impl Default for Order {
             all_or_none: false,
             trigger_method: 0,
             adjusted_order_type: String::new(),
-            trigger_price: 0.0,
-            adjusted_stop_price: 0.0,
-            adjusted_stop_limit_price: 0.0,
+            trigger_price: f64::MAX,
+            adjusted_stop_price: f64::MAX,
+            adjusted_stop_limit_price: f64::MAX,
             conditions: Vec::new(),
             conditions_ignore_rth: false,
             conditions_cancel_order: false,
@@ -314,14 +322,14 @@ impl Default for Order {
             delta_neutral_short_sale_slot: 0,
             designated_location: String::new(),
             discretionary_up_to_limit_price: false,
-            dont_use_auto_price_for_hedge: true,
+            dont_use_auto_price_for_hedge: false,
             duration: i32::MAX,
             exempt_code: -1,
             ext_operator: String::new(),
             fa_group: String::new(),
             fa_method: String::new(),
             fa_percentage: String::new(),
-            filled_quantity: 0.0,
+            filled_quantity: f64::MAX,
             hedge_param: String::new(),
             hedge_type: String::new(),
             ignore_open_auction: false,
@@ -365,7 +373,7 @@ impl Default for Order {
             reference_change_amount: 0.0,
             reference_contract_id: 0,
             reference_exchange_id: String::new(),
-            reference_price_type: 0,
+            reference_price_type: i32::MAX,
             route_marketable_to_bbo: false,
             rule80a: String::new(),
             scale_auto_reset: false,
@@ -399,7 +407,7 @@ impl Default for Order {
             // Unset, as the API (ibx#492).
             use_price_mgmt_algo: i32::MAX,
             volatility: f64::MAX,
-            volatility_type: 0,
+            volatility_type: i32::MAX,
             what_if_type: i32::MAX,
         }
     }
@@ -458,7 +466,8 @@ impl Order {
         OrderAttrs {
             order_ref: self.order_ref.clone(),
             display_size: self.display_size.max(0) as u32,
-            min_qty: self.min_qty.max(0) as u32,
+            // Unset (`i32::MAX`) is no minimum quantity.
+            min_qty: if self.min_qty == i32::MAX { 0 } else { self.min_qty.max(0) as u32 },
             hidden: self.hidden,
             outside_rth: self.outside_rth,
             // A goodAfterTime that is not a date and time is refused before
@@ -488,7 +497,8 @@ impl Order {
                 0..=4 | 7 | 8 => self.trigger_method as u8,
                 _ => 0,
             },
-            cash_qty: price_from_f64(self.cash_qty),
+            // Unset (`f64::MAX`) is no cash quantity.
+            cash_qty: if self.cash_qty == f64::MAX { 0 } else { price_from_f64(self.cash_qty) },
             conditions: self.conditions.clone(),
             conditions_cancel_order: self.conditions_cancel_order,
             conditions_ignore_rth: self.conditions_ignore_rth,
@@ -527,7 +537,7 @@ impl Order {
         // An orderRef rides the extended encoders, which send it (ibx#466).
         !self.order_ref.is_empty()
             || self.display_size > 0
-            || self.min_qty > 0
+            || (self.min_qty > 0 && self.min_qty != i32::MAX)
             || self.hidden
             || self.outside_rth
             || !self.good_after_time.is_empty()
@@ -540,7 +550,7 @@ impl Order {
             || self.sweep_to_fill
             || self.all_or_none
             || self.trigger_method > 0
-            || self.cash_qty > 0.0
+            || (self.cash_qty > 0.0 && self.cash_qty != f64::MAX)
             // An order whose only extra is conditions went down a path that
             // sends none, and was routed at once (ibx#325).
             || !self.conditions.is_empty()
@@ -638,8 +648,10 @@ pub struct OrderAllocation {
     pub is_monetary: bool,
 }
 
-/// ibapi-compatible OrderState (used in openOrder callback).
-#[derive(Clone, Debug, Default)]
+/// ibapi-compatible OrderState (used in openOrder callback). Unset numbers
+/// are `f64::MAX`, as the official API's and as the reference's openOrder
+/// reports them.
+#[derive(Clone, Debug)]
 pub struct OrderState {
     pub status: String,
     pub init_margin_before: String,
@@ -672,6 +684,43 @@ pub struct OrderState {
     pub suggested_size: String,
     pub reject_reason: String,
     pub order_allocations: Vec<OrderAllocation>,
+}
+
+impl Default for OrderState {
+    fn default() -> Self {
+        Self {
+            status: String::new(),
+            init_margin_before: String::new(),
+            maint_margin_before: String::new(),
+            equity_with_loan_before: String::new(),
+            init_margin_change: String::new(),
+            maint_margin_change: String::new(),
+            equity_with_loan_change: String::new(),
+            init_margin_after: String::new(),
+            maint_margin_after: String::new(),
+            equity_with_loan_after: String::new(),
+            commission_and_fees: f64::MAX,
+            min_commission_and_fees: f64::MAX,
+            max_commission_and_fees: f64::MAX,
+            commission_and_fees_currency: String::new(),
+            warning_text: String::new(),
+            completed_time: String::new(),
+            completed_status: String::new(),
+            margin_currency: String::new(),
+            init_margin_before_outside_rth: f64::MAX,
+            maint_margin_before_outside_rth: f64::MAX,
+            equity_with_loan_before_outside_rth: f64::MAX,
+            init_margin_change_outside_rth: f64::MAX,
+            maint_margin_change_outside_rth: f64::MAX,
+            equity_with_loan_change_outside_rth: f64::MAX,
+            init_margin_after_outside_rth: f64::MAX,
+            maint_margin_after_outside_rth: f64::MAX,
+            equity_with_loan_after_outside_rth: f64::MAX,
+            suggested_size: String::new(),
+            reject_reason: String::new(),
+            order_allocations: Vec::new(),
+        }
+    }
 }
 
 // ── Execution ──
@@ -1167,17 +1216,36 @@ mod tests {
 
     // ── Order ──
 
+    // The official API's defaults (ibapi 10.46 `Order()`): unset values,
+    // empty texts.
     #[test]
     fn order_default_values() {
         let o = Order::default();
         assert_eq!(o.order_id, 0);
         assert_eq!(o.action, "");
-        assert_eq!(o.total_quantity, 0.0);
+        assert_eq!(o.total_quantity, f64::MAX);
+        assert_eq!(o.filled_quantity, f64::MAX);
         assert_eq!(o.order_type, "");
-        assert_eq!(o.tif, "DAY");
+        assert_eq!((o.lmt_price, o.aux_price, o.trailing_percent, o.cash_qty), (f64::MAX, f64::MAX, f64::MAX, f64::MAX));
+        assert_eq!((o.trigger_price, o.adjusted_stop_price, o.adjusted_stop_limit_price), (f64::MAX, f64::MAX, f64::MAX));
+        assert_eq!((o.min_qty, o.volatility_type, o.reference_price_type), (i32::MAX, i32::MAX, i32::MAX));
+        assert_eq!(o.tif, "");
         assert!(o.transmit);
         assert!(!o.what_if);
         assert!(!o.outside_rth);
+        assert!(!o.dont_use_auto_price_for_hedge);
+    }
+
+    // Unset values are no attribute: no minimum quantity, no cash quantity.
+    #[test]
+    fn unset_values_are_no_attribute() {
+        let o = Order::default();
+        assert!(!o.has_extended_attrs());
+        let a = o.attrs();
+        assert_eq!((a.min_qty, a.cash_qty), (0, 0));
+        let o = Order { min_qty: 100, cash_qty: 500.0, ..Default::default() };
+        assert!(o.has_extended_attrs());
+        assert_eq!((o.attrs().min_qty, o.attrs().cash_qty), (100, 500 * PRICE_SCALE));
     }
 
     #[test]
@@ -1315,11 +1383,15 @@ mod tests {
 
     // ── OrderState ──
 
+    // Unset numbers are the maximum double, as the official API's and the
+    // reference's openOrder.
     #[test]
     fn order_state_default() {
         let os = OrderState::default();
         assert_eq!(os.status, "");
-        assert_eq!(os.commission_and_fees, 0.0);
+        assert_eq!(os.commission_and_fees, f64::MAX);
+        assert_eq!((os.min_commission_and_fees, os.max_commission_and_fees), (f64::MAX, f64::MAX));
+        assert_eq!(os.init_margin_before_outside_rth, f64::MAX);
     }
 
     // ── Execution ──

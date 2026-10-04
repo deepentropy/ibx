@@ -77,17 +77,7 @@ impl EClient {
             let account = if account.is_empty() { own.clone() } else { account };
             for pi in &batch.rows {
                 let ac = self.core.position_contract(pi.con_id, shared);
-                let mut c = Contract::default();
-                c.con_id = ac.con_id;
-                c.symbol = ac.symbol;
-                c.sec_type = ac.sec_type;
-                c.exchange = ac.exchange;
-                c.primary_exchange = ac.primary_exchange;
-                c.currency = ac.currency;
-                c.local_symbol = ac.local_symbol;
-                c.trading_class = ac.trading_class;
-                c.multiplier = ac.multiplier;
-                let c_py = Py::new(py, c)?.into_any();
+                let c_py = Py::new(py, Contract::from_api(py, &ac)?)?.into_any();
                 call_wrapper!(self.wrapper, py, "position_multi",
                     (req_id, account.as_str(), model_code.as_str(), &c_py,
                      pi.position_fixed as f64 / QTY_SCALE_F, pi.avg_cost as f64 / PRICE_SCALE_F));
@@ -108,17 +98,7 @@ impl EClient {
         let account = self.account();
         for pi in &batch.rows {
             let ac = self.core.position_contract(pi.con_id, shared);
-            let mut c = Contract::default();
-            c.con_id = ac.con_id;
-            c.symbol = ac.symbol;
-            c.sec_type = ac.sec_type;
-            c.exchange = ac.exchange;
-            c.primary_exchange = ac.primary_exchange;
-            c.currency = ac.currency;
-            c.local_symbol = ac.local_symbol;
-            c.trading_class = ac.trading_class;
-            c.multiplier = ac.multiplier;
-            let c_py = Py::new(py, c)?.into_any();
+            let c_py = Py::new(py, Contract::from_api(py, &ac)?)?.into_any();
             call_wrapper!(self.wrapper, py, "position",
                 (account.as_str(), &c_py, pi.position_fixed as f64 / QTY_SCALE_F, pi.avg_cost as f64 / PRICE_SCALE_F));
         }
@@ -135,38 +115,10 @@ impl EClient {
     fn send_open_order(&self, py: Python<'_>, order_id: OrderId, view: &crate::client_core::OrderView) -> PyResult<()> {
         // A combo's contract with its legs (ibx#470).
         let c = Contract::from_api(py, &view.contract)?;
-        let src = &view.order;
-        let mut o = Order::default();
+        // The order as the Rust client's openOrder shows it (ibx#487), a
+        // combo's per-leg prices and routing with it (ibx#470).
+        let mut o = Order::from_api(py, &view.order)?;
         o.order_id = order_id;
-        o.action = src.action.clone();
-        o.total_quantity = src.total_quantity;
-        o.order_type = src.order_type.clone();
-        o.lmt_price = src.lmt_price;
-        o.aux_price = src.aux_price;
-        o.tif = src.tif.clone();
-        o.account = src.account.clone();
-        o.perm_id = src.perm_id;
-        o.parent_id = src.parent_id;
-        o.oca_type = src.oca_type;
-        o.outside_rth = src.outside_rth;
-        o.order_ref = src.order_ref.clone();
-        o.use_price_mgmt_algo = (src.use_price_mgmt_algo != i32::MAX).then_some(src.use_price_mgmt_algo != 0);
-        o.trail_stop_price = src.trail_stop_price;
-        o.algo_strategy = src.algo_strategy.clone();
-        o.what_if = src.what_if;
-        // As the Rust client's openOrder (ibx#487: found by the scenario
-        // replay of the Python client, 26/09/2026 lmt_cancel and oca_group).
-        o.client_id = src.client_id;
-        o.oca_group = src.oca_group.clone();
-        o.good_after_time = src.good_after_time.clone();
-        o.good_till_date = src.good_till_date.clone();
-        o.trailing_percent = src.trailing_percent;
-        // A combo's per-leg prices and routing (ibx#470).
-        for price in &src.order_combo_legs {
-            o.order_combo_legs.push(Py::new(py, super::super::contract::OrderComboLeg { price: *price })?.into_any());
-        }
-        o.smart_combo_routing_params = src.smart_combo_routing_params.iter()
-            .map(|tv| super::super::contract::TagValue { tag: tv.tag.clone(), value: tv.value.clone() }).collect();
         let mut state = OrderState::default();
         state.status = view.state.status.clone();
         state.commission_and_fees = view.state.commission_and_fees;
@@ -305,16 +257,7 @@ impl EClient {
             crate::client_core::ClientCore::apply_combo_exec(&fill_exec, &mut api_contract, &mut api_exec);
 
             // Build Python contract for callback
-            let exec_contract = Contract {
-                con_id: api_contract.con_id,
-                symbol: api_contract.symbol.clone(),
-                sec_type: api_contract.sec_type.clone(),
-                exchange: api_contract.exchange.clone(),
-                currency: api_contract.currency.clone(),
-                local_symbol: api_contract.local_symbol.clone(),
-                trading_class: api_contract.trading_class.clone(),
-                ..Default::default()
-            };
+            let exec_contract = Contract::from_api(py, &api_contract)?;
 
             let c_py = Py::new(py, exec_contract)?.into_any();
             let exec_obj = Execution {
@@ -632,29 +575,12 @@ impl EClient {
                 self.core.peek_what_if(wi.order_id)
             };
             let (contract_py, order_py) = if let Some((mut contract, mut order)) = tracked {
-                // A combo shows its combo (ibx#470).
+                // The order as the reference shows it (its unset values); a
+                // combo shows its combo (ibx#470).
+                crate::client_core::reported_unset_values(&mut order);
                 crate::client_core::ClientCore::apply_combo_view(wi.order_id, &mut contract, &mut order, shared);
-                let c = if contract.sec_type.eq_ignore_ascii_case("BAG") {
-                    Contract::from_api(py, &contract)?
-                } else {
-                    Contract {
-                        con_id: contract.con_id,
-                        symbol: contract.symbol,
-                        sec_type: contract.sec_type,
-                        exchange: contract.exchange,
-                        currency: contract.currency,
-                        ..Default::default()
-                    }
-                };
-                let mut o = Order::default();
-                o.order_id = order.order_id;
-                o.action = order.action;
-                o.total_quantity = order.total_quantity;
-                o.order_type = order.order_type;
-                o.lmt_price = order.lmt_price;
-                o.aux_price = order.aux_price;
-                o.tif = order.tif;
-                o.what_if = order.what_if;
+                let c = Contract::from_api(py, &contract)?;
+                let mut o = Order::from_api(py, &order)?;
                 // The account and the client id, as the reference's (ibx#486).
                 o.account = if order.account.is_empty() { self.account() } else { order.account };
                 o.client_id = self.core.client_id.load(std::sync::atomic::Ordering::Relaxed) as i32;
@@ -687,7 +613,7 @@ impl EClient {
         let hist_data = shared.reference.drain_historical_data();
         for (req_id, response) in hist_data {
             for bar in &response.bars {
-                let bar_obj = BarData::new(
+                let bar_obj = BarData::reported(
                     bar.time.clone(), bar.open, bar.high, bar.low, bar.close,
                     bar.volume, bar.wap, bar.count,
                     response.timezone.clone(),
@@ -702,7 +628,7 @@ impl EClient {
 
         // keepUpToDate: the whole current bar each time (ibx#429).
         for (req_id, bar) in shared.reference.drain_historical_updates() {
-            let bar_obj = BarData::new(
+            let bar_obj = BarData::reported(
                 bar.time, bar.open, bar.high, bar.low, bar.close,
                 bar.volume, bar.wap, bar.count, String::new(),
             );
@@ -946,17 +872,8 @@ impl EClient {
             let portfolio = self.core.prepare_portfolio_updates(shared);
             for entry in &portfolio {
                 let ac = self.core.position_contract(entry.con_id, shared);
-                let mut c = crate::python::compat::contract::Contract::default();
-                c.con_id = ac.con_id;
-                c.symbol = ac.symbol;
-                c.sec_type = ac.sec_type;
-                c.exchange = ac.exchange;
-                c.primary_exchange = ac.primary_exchange;
-                c.currency = ac.currency;
-                c.local_symbol = ac.local_symbol;
-                c.trading_class = ac.trading_class;
-                c.multiplier = ac.multiplier;
-                let c_py = pyo3::Py::new(py, c).unwrap().into_any();
+                let c = crate::python::compat::contract::Contract::from_api(py, &ac)?;
+                let c_py = pyo3::Py::new(py, c)?.into_any();
                 call_wrapper!(self.wrapper, py, "update_portfolio",
                     (&c_py, entry.position, entry.market_price, entry.market_value,
                      entry.avg_cost, entry.unrealized_pnl, entry.realized_pnl, account_name.as_str()));

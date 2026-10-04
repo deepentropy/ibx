@@ -938,7 +938,7 @@ impl HotLoop {
             filters,
             continuous: false,
         };
-        let strike = if lookup.filters.strike > 0.0 { format!("{}", lookup.filters.strike) } else { String::new() };
+        let strike = lookup.filters.strike_text();
         match self.ccp_conn.as_mut().filter(|_| !self.ccp.disconnected) {
             Some(conn) => {
                 ccp::send_symbol_lookup_on(conn, ReqId::from(req_id), &lookup, &strike);

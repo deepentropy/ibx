@@ -1,5 +1,7 @@
 """Tests for ibapi-compatible class construction, fields, and subclassing."""
 
+from decimal import Decimal
+
 import pytest
 from ibx import (
     Contract, Order, BarData, ContractDetails, TagValue, OrderState,
@@ -12,14 +14,31 @@ from ibx import (
 
 # ── Contract ──
 
+# The official API's values of an unset field (ibapi 10.46 `ibapi.const`).
+UNSET_DOUBLE = 1.7976931348623157e308
+UNSET_INTEGER = 2147483647
+UNSET_DECIMAL = Decimal("170141183460469231731687303715884105727")
+
+
 def test_contract_defaults():
+    # The official API's Contract(): no security type, exchange or currency.
     c = Contract()
     assert c.con_id == 0
     assert c.symbol == ""
-    assert c.sec_type == "STK"
-    assert c.exchange == "SMART"
-    assert c.currency == "USD"
-    assert c.strike == 0.0
+    assert (c.sec_type, c.secType) == ("", "")
+    assert c.exchange == ""
+    assert c.currency == ""
+    assert c.strike == UNSET_DOUBLE
+    assert c.comboLegs == [] and c.deltaNeutralContract is None
+
+
+def test_contract_combo_legs_list_is_the_attribute():
+    # As the official API's: appending to comboLegs changes the contract.
+    from ibx import ComboLeg
+    c = Contract()
+    c.comboLegs.append(ComboLeg())
+    assert len(c.comboLegs) == 1
+    assert c.comboLegs is c.combo_legs
 
 
 def test_contract_kwargs():
@@ -46,14 +65,49 @@ def test_contract_repr():
 # ── Order ──
 
 def test_order_defaults():
+    # The official API's Order(): unset values, empty texts, None lists.
     o = Order()
     assert o.order_id == 0
     assert o.action == ""
-    assert o.total_quantity == 0.0
+    assert o.totalQuantity == UNSET_DECIMAL and isinstance(o.totalQuantity, Decimal)
+    assert o.filledQuantity == UNSET_DECIMAL
     assert o.order_type == ""
-    assert o.tif == "DAY"
+    assert o.tif == ""
     assert o.transmit is True
     assert o.what_if is False
+    for name in ("lmtPrice", "auxPrice", "trailingPercent", "cashQty", "triggerPrice",
+                 "adjustedStopPrice", "adjustedStopLimitPrice", "percentOffset", "trailStopPrice"):
+        assert getattr(o, name) == UNSET_DOUBLE, name
+    for name in ("minQty", "volatilityType", "referencePriceType", "hedgeMaxSize", "basisPointsType"):
+        assert getattr(o, name) == UNSET_INTEGER, name
+    assert o.dontUseAutoPriceForHedge is False
+    for name in ("algoParams", "smartComboRoutingParams", "orderComboLegs", "orderMiscOptions",
+                 "routeMarketableToBbo", "seekPriceImprovement", "usePriceMgmtAlgo"):
+        assert getattr(o, name) is None, name
+    assert o.conditions == []
+
+
+def test_order_list_attributes_are_the_lists():
+    # As the official API's: appending to the list changes the order.
+    o = Order()
+    o.conditions.append(TimeCondition(True, "20991231-23:59:59"))
+    assert len(o.conditions) == 1
+    o.algoParams = []
+    o.algoParams.append(TagValue("maxPctVol", "0.1"))
+    assert o.algoParams[0].tag == "maxPctVol"
+
+
+def test_order_quantities_are_decimals():
+    # totalQuantity takes a Decimal, an int, a float or a text, and is a Decimal.
+    o = Order()
+    o.totalQuantity = 100
+    assert o.totalQuantity == Decimal("100")
+    o.totalQuantity = Decimal("1.5")
+    assert o.total_quantity == Decimal("1.5")
+    o.totalQuantity = "2"
+    assert o.totalQuantity == 2
+    o.totalQuantity = UNSET_DECIMAL
+    assert o.totalQuantity == UNSET_DECIMAL
 
 
 def test_order_kwargs():
@@ -100,7 +154,8 @@ def test_bardata_defaults():
     b = BarData()
     assert b.date == ""
     assert b.open == 0.0
-    assert b.volume == 0
+    assert b.volume == UNSET_DECIMAL
+    assert b.wap == UNSET_DECIMAL
 
 
 def test_bardata_kwargs():
@@ -117,6 +172,10 @@ def test_contract_details_defaults():
     assert cd.min_tick == 0.0
     assert cd.long_name == ""
     assert cd.contract.con_id == 0
+    # The official API's names and unset values.
+    assert (cd.minTick, cd.longName, cd.marketName) == (0.0, "", "")
+    assert cd.minSize == UNSET_DECIMAL and cd.sizeIncrement == UNSET_DECIMAL
+    assert cd.secIdList is None and cd.ineligibilityReasonList is None
 
 
 def test_contract_details_contract_is_mutable_in_place():
@@ -140,7 +199,13 @@ def test_contract_details_contract_is_mutable_in_place():
 def test_order_state_defaults():
     os = OrderState()
     assert os.status == ""
-    assert os.commission_and_fees == 0.0
+    assert os.commission_and_fees == UNSET_DOUBLE
+    # The official API's names and unset values.
+    assert (os.commissionAndFees, os.minCommissionAndFees, os.initMarginBeforeOutsideRTH) == (UNSET_DOUBLE,) * 3
+    assert os.suggestedSize == UNSET_DECIMAL
+    assert os.orderAllocations is None
+    os.initMarginBefore = "5"
+    assert os.init_margin_before == "5"
 
 
 # ── TagValue ──
@@ -149,6 +214,8 @@ def test_tagvalue():
     tv = TagValue("key", "value")
     assert tv.tag == "key"
     assert tv.value == "value"
+    # As the official API's: the text of what it is given.
+    assert (TagValue().tag, TagValue().value) == ("None", "None")
 
 
 # ── TickAttrib classes ──
@@ -190,46 +257,58 @@ def test_tick_type_constants():
 
 # ── Conditions ──
 
+# The official API's constructors (ibapi 10.46 `order_condition`): the same
+# arguments, the camelCase names, None until set.
+
 def test_price_condition():
-    pc = PriceCondition(con_id=265598, price=200.0, is_more=True)
-    assert pc.con_id == 265598
+    pc = PriceCondition(conId=265598, price=200.0, isMore=True)
+    assert pc.con_id == 265598 and pc.conId == 265598
     assert pc.price == 200.0
-    assert pc.is_more is True
+    assert pc.is_more is True and pc.isMore is True
+    assert pc.condType == 1
+    assert PriceCondition(1, 265598, "SMART", True, 200.0).triggerMethod == 1
 
 
 def test_time_condition():
-    tc = TimeCondition(time="20260311-09:30:00", is_more=True)
+    tc = TimeCondition(time="20260311-09:30:00", isMore=True)
     assert tc.time == "20260311-09:30:00"
+    assert tc.condType == 3
 
 
 def test_margin_condition():
-    mc = MarginCondition(percent=30, is_more=False)
+    mc = MarginCondition(percent=30, isMore=False)
     assert mc.percent == 30
     assert mc.is_more is False
+    assert mc.condType == 4
 
 
 def test_volume_condition():
-    vc = VolumeCondition(con_id=265598, volume=1_000_000, is_more=True)
+    vc = VolumeCondition(conId=265598, volume=1_000_000, isMore=True)
     assert vc.volume == 1_000_000
+    assert vc.condType == 6
 
 
 def test_percent_change_condition():
-    pcc = PercentChangeCondition(con_id=265598, change_percent=5.0, is_more=True)
-    assert pcc.change_percent == 5.0
+    pcc = PercentChangeCondition(conId=265598, changePercent=5.0, isMore=True)
+    assert pcc.change_percent == 5.0 and pcc.changePercent == 5.0
+    assert pcc.condType == 7
+    assert PercentChangeCondition().changePercent == UNSET_DOUBLE
 
 
 def test_execution_condition():
-    ec = ExecutionCondition(symbol="AAPL", exchange="SMART", sec_type="STK")
+    ec = ExecutionCondition(symbol="AAPL", exch="SMART", secType="STK")
     assert ec.symbol == "AAPL"
     assert ec.exchange == "SMART"
-    assert ec.sec_type == "STK"
+    assert ec.sec_type == "STK" and ec.secType == "STK"
+    assert ec.condType == 5
 
 
-def test_execution_condition_defaults():
+def test_condition_defaults():
     ec = ExecutionCondition()
-    assert ec.symbol == ""
-    assert ec.exchange == ""
-    assert ec.sec_type == ""
+    assert (ec.symbol, ec.exchange, ec.secType) == (None, None, None)
+    pc = PriceCondition()
+    assert (pc.conId, pc.exchange, pc.price, pc.isMore, pc.triggerMethod) == (None,) * 5
+    assert (TimeCondition().time, MarginCondition().percent, VolumeCondition().volume) == (None, None, None)
 
 
 # ── EWrapper subclassing ──

@@ -211,7 +211,9 @@ impl EClient {
                 self.core.peek_what_if(wi.order_id)
             };
             let (mut contract, mut order) = tracked.unwrap_or_else(|| (Contract::default(), ApiOrder::default()));
-            // A combo shows its combo (ibx#470).
+            // The order as the reference shows it (its unset values); a
+            // combo shows its combo (ibx#470).
+            crate::client_core::reported_unset_values(&mut order);
             ClientCore::apply_combo_view(wi.order_id, &mut contract, &mut order, &self.shared);
             // The preview's order carries the account and the client id,
             // as the reference's (ibx#486, b1_462_whatif of 02/10/2026).

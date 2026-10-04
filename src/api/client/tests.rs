@@ -1774,11 +1774,38 @@ fn stp_order_with_zero_aux_price_is_rejected() {
     let order = Order {
         action: "SELL".into(), total_quantity: 100.0, order_type: "STP".into(),
         lmt_price: 145.0, // common mistake: setting lmt_price instead of aux_price
+        aux_price: 0.0,
         ..Default::default()
     };
     let result = client.place_order(1, &spy(), &order);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("aux_price"));
+}
+
+// The auxPrice left unset (the official API's default): the reference's
+// refusal of a stop type without its stop price, of MIT and LIT without
+// their trigger price; nothing is sent.
+#[test]
+fn stop_types_with_unset_aux_price_get_the_reference_refusal() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let cases = [
+        ("STP", "Please enter a stop price"), ("STP LMT", "Please enter a stop price"),
+        ("STP PRT", "Please enter a stop price"), ("MIT", "Invalid Trigger Price"), ("LIT", "Invalid Trigger Price"),
+    ];
+    for (i, (order_type, cause)) in cases.iter().enumerate() {
+        let order = Order {
+            action: "SELL".into(), total_quantity: 100.0, order_type: (*order_type).into(),
+            lmt_price: 145.0, ..Default::default()
+        };
+        assert_eq!(order.aux_price, f64::MAX);
+        client.place_order(i as i64 + 1, &spy(), &order).unwrap();
+        assert!(rx.try_iter().all(|c| !matches!(c, ControlCommand::Order(_))), "{order_type}: nothing sent");
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
+        let want = format!("error:{}:321:Error validating request.-'bH' : cause - {}", i + 1, cause);
+        assert!(w.events.contains(&want), "{order_type}: {:?}", w.events);
+    }
 }
 
 #[test]
@@ -1800,7 +1827,7 @@ fn stp_lmt_order_with_zero_aux_price_is_rejected() {
     shared.market.set_instrument_count(1);
     let order = Order {
         action: "SELL".into(), total_quantity: 100.0, order_type: "STP LMT".into(),
-        lmt_price: 144.0, ..Default::default() // aux_price missing
+        lmt_price: 144.0, aux_price: 0.0, ..Default::default()
     };
     let result = client.place_order(1, &spy(), &order);
     assert!(result.is_err());
@@ -1852,7 +1879,7 @@ fn mit_order_with_zero_aux_price_is_rejected() {
     shared.market.set_instrument_count(1);
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "MIT".into(),
-        ..Default::default()
+        aux_price: 0.0, ..Default::default()
     };
     let result = client.place_order(1, &spy(), &order);
     assert!(result.is_err());
@@ -1865,7 +1892,7 @@ fn stp_prt_order_with_zero_aux_price_is_rejected() {
     shared.market.set_instrument_count(1);
     let order = Order {
         action: "SELL".into(), total_quantity: 100.0, order_type: "STP PRT".into(),
-        ..Default::default()
+        aux_price: 0.0, ..Default::default()
     };
     let result = client.place_order(1, &spy(), &order);
     assert!(result.is_err());
@@ -1878,7 +1905,7 @@ fn lit_order_with_zero_aux_price_is_rejected() {
     shared.market.set_instrument_count(1);
     let order = Order {
         action: "BUY".into(), total_quantity: 100.0, order_type: "LIT".into(),
-        lmt_price: 150.0, ..Default::default() // aux_price missing
+        lmt_price: 150.0, aux_price: 0.0, ..Default::default()
     };
     let result = client.place_order(1, &spy(), &order);
     assert!(result.is_err());

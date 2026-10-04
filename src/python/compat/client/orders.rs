@@ -244,14 +244,7 @@ impl EClient {
         // every execution, then the commission reports, then the end.
         let execs = self.core.matching_executions(&filter);
         for se in &execs {
-            let c_py = Py::new(py, Contract {
-                con_id: se.contract.con_id,
-                symbol: se.contract.symbol.clone(),
-                sec_type: se.contract.sec_type.clone(),
-                exchange: se.contract.exchange.clone(),
-                currency: se.contract.currency.clone(),
-                ..Default::default()
-            })?.into_any();
+            let c_py = Py::new(py, Contract::from_api(py, &se.contract)?)?.into_any();
 
             let exec_obj = Execution {
                 exec_id: se.execution.exec_id.clone(),
@@ -273,6 +266,7 @@ impl EClient {
                 model_code: se.execution.model_code.clone(),
                 last_liquidity: se.execution.last_liquidity,
                 pending_price_revision: se.execution.pending_price_revision,
+                submitter: String::new(),
             };
             let exec_py = Py::new(py, exec_obj)?.into_any();
 
@@ -314,51 +308,9 @@ impl EClient {
                 // start from rich_info.order_state when available, override status with the
                 // canonical status_str, fall back to defaults otherwise.
                 let state = if let Some(info) = rich_info.as_ref() {
-                    let s = &info.order_state;
-                    let allocations: Vec<super::super::contract::OrderAllocation> = s
-                        .order_allocations.iter().map(|a| {
-                            super::super::contract::OrderAllocation {
-                                account: a.account.clone(),
-                                position: a.position.clone(),
-                                position_desired: a.position_desired.clone(),
-                                position_after: a.position_after.clone(),
-                                desired_alloc_qty: a.desired_alloc_qty.clone(),
-                                allowed_alloc_qty: a.allowed_alloc_qty.clone(),
-                                is_monetary: a.is_monetary,
-                            }
-                        }).collect();
-                    super::super::contract::OrderState {
-                        status: status_str.into(),
-                        init_margin_before: s.init_margin_before.clone(),
-                        maint_margin_before: s.maint_margin_before.clone(),
-                        equity_with_loan_before: s.equity_with_loan_before.clone(),
-                        init_margin_change: s.init_margin_change.clone(),
-                        maint_margin_change: s.maint_margin_change.clone(),
-                        equity_with_loan_change: s.equity_with_loan_change.clone(),
-                        init_margin_after: s.init_margin_after.clone(),
-                        maint_margin_after: s.maint_margin_after.clone(),
-                        equity_with_loan_after: s.equity_with_loan_after.clone(),
-                        commission_and_fees: s.commission_and_fees,
-                        min_commission_and_fees: s.min_commission_and_fees,
-                        max_commission_and_fees: s.max_commission_and_fees,
-                        commission_and_fees_currency: s.commission_and_fees_currency.clone(),
-                        warning_text: s.warning_text.clone(),
-                        completed_time: s.completed_time.clone(),
-                        completed_status: s.completed_status.clone(),
-                        margin_currency: s.margin_currency.clone(),
-                        init_margin_before_outside_rth: s.init_margin_before_outside_rth,
-                        maint_margin_before_outside_rth: s.maint_margin_before_outside_rth,
-                        equity_with_loan_before_outside_rth: s.equity_with_loan_before_outside_rth,
-                        init_margin_change_outside_rth: s.init_margin_change_outside_rth,
-                        maint_margin_change_outside_rth: s.maint_margin_change_outside_rth,
-                        equity_with_loan_change_outside_rth: s.equity_with_loan_change_outside_rth,
-                        init_margin_after_outside_rth: s.init_margin_after_outside_rth,
-                        maint_margin_after_outside_rth: s.maint_margin_after_outside_rth,
-                        equity_with_loan_after_outside_rth: s.equity_with_loan_after_outside_rth,
-                        suggested_size: s.suggested_size.clone(),
-                        reject_reason: s.reject_reason.clone(),
-                        order_allocations: allocations,
-                    }
+                    let mut s = super::super::contract::OrderState::from_api(py, &info.order_state)?;
+                    s.status = status_str.into();
+                    s
                 } else {
                     let mut s = super::super::contract::OrderState::default();
                     s.status = status_str.into();
@@ -366,53 +318,13 @@ impl EClient {
                 };
                 let state_py = Py::new(py, state)?.into_any();
 
-                let tracked = self.core.open_orders.lock().unwrap().get(&co.order_id).map(|o| {
-                    (Contract {
-                        con_id: o.contract.con_id,
-                        symbol: o.contract.symbol.clone(),
-                        sec_type: o.contract.sec_type.clone(),
-                        exchange: o.contract.exchange.clone(),
-                        currency: o.contract.currency.clone(),
-                        ..Default::default()
-                    }, {
-                        let mut ord = Order::default();
-                        ord.order_id = o.order.order_id;
-                        ord.action = o.order.action.clone();
-                        ord.total_quantity = o.order.total_quantity;
-                        ord.order_type = o.order.order_type.clone();
-                        ord.lmt_price = o.order.lmt_price;
-                        ord.aux_price = o.order.aux_price;
-                        ord.tif = o.order.tif.clone();
-                        ord.account = o.order.account.clone();
-                        ord.perm_id = o.order.perm_id;
-                        ord
-                    })
-                });
-                if let Some((c, o)) = tracked {
-                    let c_py = Py::new(py, c)?.into_any();
-                    let o_py = Py::new(py, o)?.into_any();
-                    self.wrapper.call_method1(py, "completed_order", (&c_py, &o_py, &state_py))?;
-                } else if let Some(info) = rich_info {
-                    let c = Contract {
-                        con_id: info.contract.con_id,
-                        symbol: info.contract.symbol,
-                        sec_type: info.contract.sec_type,
-                        exchange: info.contract.exchange,
-                        currency: info.contract.currency,
-                        ..Default::default()
-                    };
-                    let mut o = Order::default();
-                    o.order_id = info.order.order_id;
-                    o.action = info.order.action;
-                    o.total_quantity = info.order.total_quantity;
-                    o.order_type = info.order.order_type;
-                    o.lmt_price = info.order.lmt_price;
-                    o.aux_price = info.order.aux_price;
-                    o.tif = info.order.tif;
-                    o.account = info.order.account;
-                    o.perm_id = info.order.perm_id;
-                    let c_py = Py::new(py, c)?.into_any();
-                    let o_py = Py::new(py, o)?.into_any();
+                let tracked = self.core.open_orders.lock().unwrap().get(&co.order_id)
+                    .map(|o| (o.contract.clone(), o.order.clone()));
+                // The order as the reference shows it (its unset values).
+                if let Some((c, mut o)) = tracked.or_else(|| rich_info.map(|info| (info.contract, info.order))) {
+                    crate::client_core::reported_unset_values(&mut o);
+                    let c_py = Py::new(py, Contract::from_api(py, &c)?)?.into_any();
+                    let o_py = Py::new(py, Order::from_api(py, &o)?)?.into_any();
                     self.wrapper.call_method1(py, "completed_order", (&c_py, &o_py, &state_py))?;
                 } else {
                     let c_py = Py::new(py, Contract::default())?.into_any();
@@ -437,27 +349,8 @@ impl EClient {
         for (order_id, tracked) in &orders {
             // A combo with its legs (ibx#470).
             let c_py = Py::new(py, Contract::from_api(py, &tracked.contract)?)?.into_any();
-            let mut o = Order::default();
-            o.order_id = tracked.order.order_id;
-            o.action = tracked.order.action.clone();
-            o.total_quantity = tracked.order.total_quantity;
-            o.order_type = tracked.order.order_type.clone();
-            o.lmt_price = tracked.order.lmt_price;
-            o.aux_price = tracked.order.aux_price;
-            o.tif = tracked.order.tif.clone();
-            o.account = tracked.order.account.clone();
-            o.perm_id = tracked.order.perm_id;
-            o.oca_type = tracked.order.oca_type;
-            o.use_price_mgmt_algo = (tracked.order.use_price_mgmt_algo != i32::MAX).then_some(tracked.order.use_price_mgmt_algo != 0);
-            o.trail_stop_price = tracked.order.trail_stop_price;
-            o.algo_strategy = tracked.order.algo_strategy.clone();
-            // A combo's per-leg prices and routing (ibx#470).
-            for price in &tracked.order.order_combo_legs {
-                o.order_combo_legs.push(Py::new(py, super::super::contract::OrderComboLeg { price: *price })?.into_any());
-            }
-            o.smart_combo_routing_params = tracked.order.smart_combo_routing_params.iter()
-                .map(|tv| super::super::contract::TagValue { tag: tv.tag.clone(), value: tv.value.clone() }).collect();
-            let o_py = Py::new(py, o)?.into_any();
+            // A combo's per-leg prices and routing with it (ibx#470).
+            let o_py = Py::new(py, Order::from_api(py, &tracked.order)?)?.into_any();
             let mut state = super::super::contract::OrderState::default();
             state.status = tracked.status.clone();
             let state_py = Py::new(py, state)?.into_any();
