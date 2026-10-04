@@ -81,7 +81,7 @@ fn main() {
     }).unwrap();
 
     // Market data
-    let spy = Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() };
+    let spy = Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
     client.req_mkt_data(1, &spy, "", false, false);
 
     // SeqLock quote read (lock-free, any thread)
@@ -164,7 +164,7 @@ thread.start()
 app.connected.wait(timeout=10)
 
 # Market data
-aapl = Contract(con_id=265598, symbol="AAPL")
+aapl = Contract(con_id=265598, symbol="AAPL", sec_type="STK", exchange="SMART", currency="USD")
 client.req_mkt_data(1, aapl)
 
 # Orders

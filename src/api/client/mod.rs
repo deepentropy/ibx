@@ -22,7 +22,7 @@
 //!     core_id: None,
 //! }).unwrap();
 //!
-//! client.req_mkt_data(1, &Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() },
+//! client.req_mkt_data(1, &Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() },
 //!     "", false, false).unwrap();
 //!
 //! let mut wrapper = MyWrapper;

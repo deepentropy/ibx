@@ -54,7 +54,7 @@ fn main() {
         core_id: None,
     }).unwrap();
 
-    let spy = Contract { con_id: 756733, symbol: "SPY".into(), ..Default::default() };
+    let spy = Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
     client.req_mkt_data(1, &spy, "", false, false);
 
     std::thread::sleep(std::time::Duration::from_secs(10));
