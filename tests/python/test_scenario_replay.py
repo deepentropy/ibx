@@ -184,6 +184,10 @@ class Driver:
             c.cancel_historical_data(rid)
         elif name == "REQ_POSITIONS":
             c.req_positions()
+        elif name == "REQ_ALL_OPEN_ORDERS":
+            c.req_all_open_orders()
+        elif name == "REQ_GLOBAL_CANCEL":
+            c.req_global_cancel()
         elif name == "CANCEL_POSITIONS":
             c.cancel_positions()
         else:
@@ -250,6 +254,17 @@ def test_oca_group_and_the_refused_second_cancel():
 def test_cancel_of_an_unknown_order():
     out = replay("20260926/cancel_unknown", compare=["order"])
     assert assert_same(out)[0].startswith("error|")
+
+
+# Orders of earlier sessions known from the logon replay (01/10/2026, paper),
+# then reqGlobalCancel: the 8 cancels tagged ALL, in the reference's book
+# order. Only the frames are checked, as in the Rust test
+# (tests/scenario_replay.rs `global_cancel_of_orders_of_earlier_sessions`).
+def test_global_cancel_of_orders_of_earlier_sessions():
+    out = replay("20261001/global_cancel_replayed", compare=["order"])
+    assert out["frame_error"] is None, out["frame_error"]
+    assert out["not_made"] == [], out["not_made"]
+    assert out["frames_compared"] == 8
 
 
 # A SMART combo bought and sold (30/09/2026, ibx#474, ibx#471): the fills of

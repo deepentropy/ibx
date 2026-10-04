@@ -314,6 +314,10 @@ fn cases() -> Vec<Case> {
             SubmitLimit { order_id: 143, instrument: i, side: s, qty: q, price: 100 * P },
             CancelAll { instrument: i }],
             vec![d("LMT", &["lmt_price"]), f()]),
+        case("GlobalCancel", vec![
+            SubmitLimit { order_id: 146, instrument: i, side: s, qty: q, price: 100 * P },
+            GlobalCancel],
+            vec![d("LMT", &["lmt_price"]), f()]),
         case("Modify", vec![
             SubmitLimit { order_id: 144, instrument: i, side: s, qty: q, price: 100 * P },
             Modify { new_order_id: 144, order_id: 144, qty: 2, kind: OrderKind::Limit { price: 101 * P }, tif: b'0', attrs: attrs() }],
@@ -371,7 +375,7 @@ fn frame_ids(requests: &[OrderRequest]) -> Vec<i64> {
     for req in requests {
         match req {
             OrderRequest::SubmitBracket { parent_id, tp_id, sl_id, .. } => out.extend([*parent_id, *tp_id, *sl_id]),
-            OrderRequest::CancelAll { .. } => out.push(last),
+            OrderRequest::CancelAll { .. } | OrderRequest::GlobalCancel => out.push(last),
             other => {
                 last = other.order_id();
                 out.push(last);

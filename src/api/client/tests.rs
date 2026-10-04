@@ -1742,27 +1742,24 @@ fn cancel_order_sends_cancel_command() {
     }
 }
 
+// The global cancel is one request for the whole book, whatever the
+// contracts the session registered: the engine cancels every order it
+// holds, those of earlier sessions too, as the reference.
 #[test]
-fn req_global_cancel_sends_cancel_all_for_each_instrument() {
+fn req_global_cancel_sends_one_global_cancel() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(2);
     client.req_global_cancel().unwrap();
-    let mut cancel_instruments = vec![];
-    while let Ok(cmd) = rx.try_recv() {
-        if let ControlCommand::Order(OrderRequest::CancelAll { instrument }) = cmd {
-            cancel_instruments.push(instrument);
-        }
-    }
-    assert_eq!(cancel_instruments.len(), 2);
-    cancel_instruments.sort();
-    assert_eq!(cancel_instruments, vec![0, 1]);
+    let cmds: Vec<ControlCommand> = rx.try_iter().collect();
+    assert_eq!(cmds.len(), 1);
+    assert!(matches!(cmds[0], ControlCommand::Order(OrderRequest::GlobalCancel)));
 }
 
 #[test]
-fn req_global_cancel_no_instruments_no_commands() {
+fn req_global_cancel_without_contracts_still_goes() {
     let (client, rx, _shared) = test_client();
     client.req_global_cancel().unwrap();
-    assert!(rx.try_recv().is_err());
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::GlobalCancel))));
 }
 
 // ═══════════════════════════════════════════════════════════════════

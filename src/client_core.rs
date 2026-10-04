@@ -611,6 +611,7 @@ pub fn order_status_str(status: OrderStatus) -> &'static str {
         // with the rejection reason carried separately on OrderState.completedStatus.
         OrderStatus::Rejected => "Inactive",
         OrderStatus::Inactive => "Inactive",
+        OrderStatus::ApiCancelled => "ApiCancelled",
     }
 }
 
@@ -2921,6 +2922,12 @@ impl ClientCore {
             if matches!(status, "Filled" | "Cancelled") {
                 self.finished_orders.lock().unwrap().insert(order_id);
             }
+        }
+        // An order that never left (a global cancel came while it
+        // waited): the reference never put it in its book, so its id names
+        // no order any more.
+        if status == "ApiCancelled" {
+            orders.remove(&order_id);
         }
     }
 

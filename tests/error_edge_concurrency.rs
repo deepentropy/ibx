@@ -166,10 +166,12 @@ fn cancel_order_nonexistent_sends_cancel_anyway() {
 }
 
 #[test]
-fn req_global_cancel_no_instruments_no_commands() {
+fn req_global_cancel_without_contracts_still_goes() {
+    // The global cancel is for the whole book, orders of earlier sessions
+    // too: it goes even when this session registered no contract.
     let (client, rx, _shared) = test_client();
     client.req_global_cancel().unwrap();
-    assert!(rx.try_recv().is_err());
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::Order(OrderRequest::GlobalCancel))));
 }
 
 // ═══════════════════════════════════════════════════════════════════════

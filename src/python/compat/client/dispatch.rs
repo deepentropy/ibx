@@ -139,7 +139,8 @@ impl EClient {
         let remaining = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
         let view = self.core.order_view(update.order_id, shared, status);
         let (last_fill_price, client_id) = view.as_ref().map(|v| (v.last_fill_price, v.client_id)).unwrap_or((0.0, 0));
-        let view = view.filter(|_| status != "Cancelled");
+        // A cancel, and an order that never left, give the status only.
+        let view = view.filter(|_| !matches!(status, "Cancelled" | "ApiCancelled"));
         let report = crate::client_core::OrderReport {
             view, status: status.into(), filled, remaining,
             avg_fill_price: update.avg_fill_price as f64 / PRICE_SCALE_F,

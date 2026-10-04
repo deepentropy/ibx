@@ -45,9 +45,16 @@ pub(crate) fn drain_and_send_orders(
             req
         };
         if what_if && matches!(order_req, OrderRequest::Cancel { .. } | OrderRequest::CancelAll { .. }
-            | OrderRequest::Modify { .. } | OrderRequest::SubmitBracket { .. } | OrderRequest::SubmitWhatIf { .. })
+            | OrderRequest::GlobalCancel | OrderRequest::Modify { .. } | OrderRequest::SubmitBracket { .. }
+            | OrderRequest::SubmitWhatIf { .. })
         {
             log::warn!("What-if of order {} dropped: only a single new order can be previewed", oid);
+            continue;
+        }
+        // The global cancel waits for nothing: it ends the orders that
+        // wait and cancels the book (`global_cancel`).
+        if matches!(order_req, OrderRequest::GlobalCancel) {
+            global_cancel(conn, context, account_id, hb, shared);
             continue;
         }
         // A request that depends on one waiting for its contract definition
@@ -186,7 +193,7 @@ pub(crate) fn drain_and_send_orders(
         // A what-if goes out under a ClOrdID of its own and stays out of
         // the order table: an order with the same id is left as it is
         // (ibx#462).
-        let held = what_if.then(|| (context.order(oid).copied(), context.modify_versions.get(&oid).copied()));
+        let held = what_if.then(|| (context.order(oid).copied(), context.modify_versions.get(&oid).copied(), context.book_peak));
         if what_if {
             let clord = format!("{}.{}", oid, WHAT_IF_CLORD_BASE + context.next_what_if);
             context.next_what_if = context.next_what_if.wrapping_add(1);
@@ -1329,6 +1336,7 @@ pub(crate) fn drain_and_send_orders(
                 }
                 result
             }
+            OrderRequest::GlobalCancel => Ok(()),
             OrderRequest::CancelAll { instrument } => {
                 let open_ids: Vec<OrderId> = context.open_orders_for(instrument)
                     .iter()
@@ -1350,11 +1358,14 @@ pub(crate) fn drain_and_send_orders(
                 let prev_ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
                 let new_ver = prev_ver + 1;
                 context.modify_versions.insert(order_id, new_ver);
-                let clord_str = format!("{}.{}", order_id, new_ver);
+                // Under the server's id of the order: an order of another
+                // session may be kept under its API order id.
+                let server_id = context.server_id(order_id);
+                let clord_str = format!("{}.{}", server_id, new_ver);
                 // OrigClOrdID matches whatever the server last recorded for
                 // this order (which may pre-date the versioned scheme — ibx#179).
                 let orig_clord = context.last_clord.get(&order_id).cloned()
-                    .unwrap_or_else(|| format!("{}.{}", order_id, prev_ver));
+                    .unwrap_or_else(|| format!("{}.{}", server_id, prev_ver));
                 // Pre-seed `last_clord` with what we're about to emit so a
                 // subsequent cancel before the modify-ack still references the
                 // right version.
@@ -1411,12 +1422,13 @@ pub(crate) fn drain_and_send_orders(
             shared.orders.set_combo_view(oid, view);
             if !what_if { context.combos.track(oid, combo_order); }
         }
-        if let Some((order, version)) = held {
+        if let Some((order, version, peak)) = held {
             let clord = context.what_if_send.take().unwrap_or_default();
             match order {
                 Some(o) => context.insert_order(o),
                 None => context.remove_order(oid),
             }
+            context.book_peak = peak;
             if version.is_none() { context.modify_versions.remove(&oid); }
             if let Err(e) = &result {
                 log::error!("Failed to send the what-if of order {}: {}", oid, e);
@@ -1533,13 +1545,17 @@ fn cancel_fields(context: &mut Context, account_id: &str, order_id: crate::types
     let prev_ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
     let new_ver = prev_ver + 1;
     context.modify_versions.insert(order_id, new_ver);
-    let clord = format!("{}.{}", order_id, new_ver);
+    // The next version of the order's ClOrdID, under the server's id of
+    // the order (`jfix.co.bp()@44`): an order of another session is kept
+    // under its API order id, and its version is the one the server gave.
+    let server_id = context.server_id(order_id);
+    let clord = format!("{}.{}", server_id, new_ver);
     // OrigClOrdID must match exactly what the server has on record: the
     // string last seen on the wire (ibx#179 — orders recorded without a
     // `.{ver}` suffix), else the versioned scheme (a cancel right after
     // the place, before its ack).
     let orig_clord = context.last_clord.get(&order_id).cloned()
-        .unwrap_or_else(|| format!("{}.{}", order_id, prev_ver));
+        .unwrap_or_else(|| format!("{}.{}", server_id, prev_ver));
     context.cancel_clord.insert(order_id, clord.clone());
 
     let mut fields = vec![
@@ -1563,20 +1579,146 @@ fn cancel_fields(context: &mut Context, account_id: &str, order_id: crate::types
     fields
 }
 
+/// The reference's global cancel (API message 58, `jextend.bp.o()`):
+/// - the orders of this client that wait to be sent end as ApiCancelled,
+///   nothing on the wire (`bp.d()`: the client's pending orders; captured
+///   25/09/2026: orderStatus ApiCancelled, permId 0, all remaining); the
+///   requests about them go with them;
+/// - every order of the book, whatever its client or session
+///   (`jextend.dK.a(String, String)@9`: `gi.b1().w()`, no client filter),
+///   gets a cancel tagged ALL (`@66`), in the book's order with the orders
+///   that have a parent last (`trader.order.bh`); only the first order of
+///   an OCA group, and not a child whose parent goes in this cancel
+///   (`trader.order.ay.c(List, bs, bE)@96-183`);
+/// - an order with a cancel or a replace pending is not sent: 161 to its
+///   client (`ay.a(pe, bs, bE, boolean)@176`); a finished one is left.
+///
+/// Captured 01/10/2026 (17:11:41, paper): 8 orders of earlier sessions,
+/// known from the logon replay, cancelled in one write, in the book's
+/// order.
+fn global_cancel(
+    conn: &mut Connection,
+    context: &mut Context,
+    account_id: &str,
+    hb: &mut HeartbeatState,
+    shared: &Arc<SharedState>,
+) {
+    // The orders that wait (a what-if is not an order: it keeps waiting).
+    let parked = std::mem::take(&mut context.rth_parked);
+    let mut ended: Vec<OrderId> = Vec::new();
+    for req in &parked {
+        let Some(qty) = req.new_order_qty().filter(|_| !matches!(req, OrderRequest::SubmitWhatIf { .. })) else {
+            continue;
+        };
+        let bracket = matches!(req, OrderRequest::SubmitBracket { .. });
+        let parent = match req {
+            OrderRequest::SubmitBracket { parent_id, .. } => *parent_id,
+            _ => req.new_order_side().and_then(|(_, a)| a).map_or(0, |a| a.parent_id),
+        };
+        for (i, id) in request_order_ids(req).into_iter().enumerate() {
+            log::info!("Global cancel: order {} not sent, ApiCancelled", id);
+            shared.orders.push_order_update(OrderUpdate {
+                order_id: id,
+                instrument: req.instrument().unwrap_or(0),
+                status: OrderStatus::ApiCancelled,
+                filled_qty_fixed: 0,
+                remaining_qty_fixed: qty,
+                avg_fill_price: 0,
+                perm_id: 0,
+                parent_id: if bracket && i == 0 { 0 } else { parent },
+                timestamp_ns: context.now_ns(),
+            });
+            ended.push(id);
+        }
+    }
+    context.rth_parked = parked.into_iter()
+        .filter(|r| !request_order_ids(r).iter().any(|id| ended.contains(id)))
+        .collect();
+
+    // The book, in its order.
+    let table = book_table_size(context.book_peak);
+    let mut book: Vec<(OrderId, OrderId, crate::engine::context::BookEntry)> = context.book.iter()
+        .filter(|(id, _)| context.order(**id).is_some())
+        .map(|(&id, e)| (id, context.server_id(id), e.clone()))
+        .collect();
+    book.sort_by_key(|(_, server, e)| (book_bucket(*server, table), e.seq));
+    book.sort_by_key(|(_, _, e)| e.parent != 0);
+
+    let mut groups: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut taken: std::collections::HashSet<OrderId> = std::collections::HashSet::new();
+    for (id, server, entry) in book {
+        if !entry.oca_group.is_empty() && !groups.insert(entry.oca_group.clone()) {
+            continue;
+        }
+        if entry.parent != 0 && taken.contains(&entry.parent) {
+            continue;
+        }
+        let Some(status) = context.order(id).map(|o| o.status) else { continue };
+        if status.is_terminal() || status == OrderStatus::Inactive {
+            continue;
+        }
+        taken.insert(id);
+        if matches!(status, OrderStatus::PendingCancel | OrderStatus::PendingReplace) {
+            log::warn!("Global cancel: order {} has a cancel or replace pending, not sent", id);
+            if context.owned(id) {
+                shared.orders.push_order_error(id, 161, format!(
+                    "Cancel attempted when order is not in a cancellable state.  Order permId ={}", server));
+            }
+            continue;
+        }
+        let fields = cancel_fields(context, account_id, id, "ALL");
+        let refs: Vec<(u32, &str)> = fields.iter().map(|(t, s)| (*t, s.as_str())).collect();
+        match conn.send_fix(&refs) {
+            Ok(()) => {
+                hb.last_ccp_sent = Instant::now();
+                synthesize_pending_cancel(context, shared, id);
+            }
+            Err(e) => log::error!("Global cancel: the cancel of order {} was not sent: {}", id, e),
+        }
+    }
+}
+
+/// The table size of a `java.util.HashMap` that held `peak` entries: 16,
+/// doubled each time the entries pass three quarters of it; it never
+/// shrinks.
+fn book_table_size(peak: usize) -> usize {
+    let mut size = 16;
+    while peak > size * 3 / 4 {
+        size *= 2;
+    }
+    size
+}
+
+/// The bucket of a permId in the reference's book, a `java.util.HashMap`
+/// keyed by a `Long` (`jclient.jv.l`): the key's hash, spread, masked by
+/// the table size. The book is walked bucket by bucket, each in insertion
+/// order.
+fn book_bucket(perm_id: OrderId, table: usize) -> usize {
+    let v = perm_id as u64;
+    let h = (v ^ (v >> 32)) as u32;
+    ((h ^ (h >> 16)) as usize) & (table - 1)
+}
+
 /// The reference's answer to a cancel it does not send (ibx#464): the order
 /// is unknown (10147), or finished or already pending cancel (10148, with
 /// the state; "cannot" as in every captured 10148, where the message table
 /// of the JAR says "can not", ibx#485). `None` when the cancel goes out.
 fn cancel_refusal(context: &Context, order_id: crate::types::OrderId) -> Option<(i64, String)> {
+    let not_found = || Some((
+        10147,
+        format!("OrderId {} that needs to be cancelled is not found.", order_id),
+    ));
     let state = match context.order(order_id) {
+        // An order the server reported for another client: the reference
+        // finds an API order by this client's id and the order id
+        // (`jextend.bw.o()@46`, `jclient.jv.b(int, int)`), so not this one
+        // (ib-agent#151: an order of another client gets 10147).
+        Some(_) if !context.owned(order_id) => return not_found(),
         Some(o) if o.status == OrderStatus::PendingCancel => OrderStatus::PendingCancel,
         Some(_) => return None,
         None => match context.finished_status(order_id) {
             Some(status) => status,
-            None => return Some((
-                10147,
-                format!("OrderId {} that needs to be cancelled is not found.", order_id),
-            )),
+            None => return not_found(),
         },
     };
     // "cannot" as the reference's API message (every capture, 23/09 to
@@ -1748,10 +1890,22 @@ fn oca_type_str(oca_type: u8) -> &'static str {
 /// flag and without the OCA fields (ibx#462).
 fn send_new_order(
     conn: &mut Connection,
-    context: &Context,
+    context: &mut Context,
     instrument: crate::types::InstrumentId,
     fields: &[(u32, &str)],
 ) -> std::io::Result<()> {
+    // The order's parent and OCA group, as the reference's book holds
+    // them for its global cancel; a what-if is not in the book.
+    let (link, oca_group) = (field(fields, 6107), field(fields, 583));
+    if (link.is_some() || oca_group.is_some()) && context.what_if_send.is_none() {
+        let id_of = |v: &str| v.split('.').next().and_then(|i| i.parse::<crate::types::OrderId>().ok());
+        if let Some(oid) = field(fields, 11).and_then(id_of) {
+            let parent = link.and_then(id_of)
+                .map(|p| context.recovered_keys.get(&p).copied().unwrap_or(p));
+            context.set_links(oid, parent, oca_group);
+        }
+    }
+    let context: &Context = context;
     let short_sale: Fields = match &context.short_sale_send {
         Some(s) if fields.iter().any(|&(t, v)| t == 54 && v == "5") => short_sale_fields(s),
         _ => Vec::new(),
@@ -2443,7 +2597,7 @@ fn request_order_ids(req: &OrderRequest) -> Vec<crate::types::OrderId> {
     match req {
         OrderRequest::SubmitWhatIf { request } => request_order_ids(request),
         OrderRequest::SubmitBracket { parent_id, tp_id, sl_id, .. } => vec![*parent_id, *tp_id, *sl_id],
-        OrderRequest::CancelAll { .. } => Vec::new(),
+        OrderRequest::CancelAll { .. } | OrderRequest::GlobalCancel => Vec::new(),
         other => vec![other.order_id()],
     }
 }
@@ -3915,6 +4069,211 @@ mod tests {
         );
         assert_eq!(tag(&tags, 11), Some("7.1"));
         assert_eq!(tag(&tags, 6944), Some("ALL"));
+    }
+
+    /// One global cancel through `drain_and_send_orders` after `setup`:
+    /// each frame sent (its fields), the order errors and the order
+    /// updates raised.
+    #[allow(clippy::type_complexity)]
+    fn global_cancel_of(setup: impl FnOnce(&mut Context)) -> (Vec<Vec<(u32, String)>>, Vec<(i64, i64, String)>, Vec<OrderUpdate>) {
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.api_client_id = 7;
+        setup(&mut context);
+        context.pending_orders.push(OrderRequest::GlobalCancel);
+        let shared = Arc::new(SharedState::new());
+        shared.reference.set_api_client_id(7);
+        let (conn, mut peer) = crate::test_support::Peer::pair();
+        let mut conn = Some(conn);
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        let frames = peer.messages().iter().map(|m| crate::test_support::parse_fields(m)).collect();
+        (frames, shared.orders.drain_order_errors(), shared.orders.drain_order_updates())
+    }
+
+    /// An order of another session in the book, as the logon replay puts
+    /// it: under `key`, its server id `server`, its ClOrdID version and
+    /// API client.
+    fn replayed(ctx: &mut Context, key: OrderId, server: OrderId, version: u32, owner: i64) {
+        replayed_on(ctx, key, server, version, owner, 0);
+    }
+
+    fn replayed_on(ctx: &mut Context, key: OrderId, server: OrderId, version: u32, owner: i64, instrument: u32) {
+        ctx.insert_order(Order { status: OrderStatus::PreSubmitted, ..Order::new(key, instrument, Side::Buy, 1, 100, b'2', b'0', 0) });
+        if key != server { ctx.recovered_keys.insert(server, key); }
+        ctx.modify_versions.insert(key, version);
+        ctx.last_clord.insert(key, format!("{server}.{version}"));
+        ctx.book.get_mut(&key).unwrap().owner = Some(owner);
+    }
+
+    fn sent_ids(frames: &[Vec<(u32, String)>]) -> Vec<String> {
+        frames.iter().filter(|f| tag(f, 35) == Some("F")).map(|f| tag(f, 11).unwrap().to_string()).collect()
+    }
+
+    // The global cancel reaches every order of the book: this session's,
+    // and those of other clients and earlier sessions, on any contract
+    // (`jextend.dK.a(String, String)@9`, no client filter). Paper
+    // 04/10/2026: orders of earlier sessions got nothing.
+    #[test]
+    fn global_cancel_reaches_every_order_of_the_book() {
+        let (frames, errors, _) = global_cancel_of(|ctx| {
+            let other = ctx.market.register(756733);
+            ctx.insert_order(Order::new(5, 0, Side::Buy, 1, 100, b'2', b'0', 0));
+            replayed(ctx, 1790862363895062, 1790862363895062, 0, 0);
+            replayed_on(ctx, 15, 1183455398, 2, 99, other);
+        });
+        assert!(errors.is_empty());
+        let mut ids = sent_ids(&frames);
+        ids.sort();
+        assert_eq!(ids, ["1183455398.3", "1790862363895062.1", "5.1"]);
+        assert!(frames.iter().all(|f| tag(f, 6944) == Some("ALL") && tag(f, 6088) == Some("Socket")));
+    }
+
+    // The book's order: a hash table keyed by permId, walked bucket by
+    // bucket, each in the order the orders came. Captured 01/10/2026: the
+    // logon replay gave 8 orders in this order, the global cancel sent
+    // them in the order below.
+    #[test]
+    fn global_cancel_goes_in_the_books_order() {
+        let replay = [1790862363895062, 1790862423941063, 1790863660514062, 1790863720603063,
+            1790865682753062, 1790865742870063, 1790866970032000, 1790867030123001];
+        let (frames, _, _) = global_cancel_of(|ctx| {
+            for id in replay { replayed(ctx, id, id, 0, 0); }
+        });
+        let captured = [1790865742870063i64, 1790865682753062, 1790862423941063, 1790866970032000,
+            1790863660514062, 1790867030123001, 1790862363895062, 1790863720603063];
+        assert_eq!(sent_ids(&frames), captured.map(|id| format!("{id}.1")));
+        let orig: Vec<&str> = frames.iter().filter_map(|f| tag(f, 41)).collect();
+        assert_eq!(orig, captured.map(|id| format!("{id}.0")));
+    }
+
+    #[test]
+    fn the_books_table_grows_as_a_java_hash_map() {
+        assert_eq!(book_table_size(0), 16);
+        assert_eq!(book_table_size(12), 16);
+        assert_eq!(book_table_size(13), 32);
+        assert_eq!(book_table_size(25), 64);
+        // Long.hashCode, spread: (int)(v ^ v >>> 32), then h ^ h >>> 16.
+        assert_eq!(book_bucket(1790865742870063, 16), 0);
+        assert_eq!(book_bucket(1790865682753062, 64), 52);
+    }
+
+    // Only the first order of an OCA group gets the cancel; the server
+    // cancels the group (`ay.c@96-131`).
+    #[test]
+    fn global_cancel_sends_one_order_of_an_oca_group() {
+        let (frames, _, _) = global_cancel_of(|ctx| {
+            for id in [21, 22, 23] { ctx.insert_order(Order::new(id, 0, Side::Buy, 1, 100, b'2', b'0', 0)); }
+            ctx.set_links(21, None, Some("G1"));
+            ctx.set_links(22, None, Some("G1"));
+        });
+        let mut ids = sent_ids(&frames);
+        ids.sort();
+        assert_eq!(ids, ["21.1", "23.1"], "22 is in the group of 21, which comes first in the book");
+    }
+
+    // A child whose parent goes in the same cancel is left to the server
+    // (`ay.c@160-183`); the parents go first (`trader.order.bh`). A child
+    // whose parent is not in the book gets its own cancel.
+    #[test]
+    fn global_cancel_leaves_a_child_to_its_parent() {
+        let (frames, _, _) = global_cancel_of(|ctx| {
+            for id in [31, 32, 33, 34] { ctx.insert_order(Order::new(id, 0, Side::Buy, 1, 100, b'2', b'0', 0)); }
+            ctx.set_links(32, Some(31), Some("31"));
+            ctx.set_links(33, Some(31), Some("31"));
+            ctx.set_links(34, Some(999), None);
+        });
+        let ids = sent_ids(&frames);
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert!(ids.contains(&"31.1".to_string()) && ids.contains(&"34.1".to_string()));
+        assert_eq!(ids.last().map(String::as_str), Some("34.1"), "an order with a parent comes last");
+    }
+
+    // A bracket of this session: its children carry their parent and OCA
+    // group as sent, so the global cancel sends the parent's cancel only.
+    #[test]
+    fn global_cancel_of_a_bracket_cancels_its_parent() {
+        let (frames, _, _) = global_cancel_of(|ctx| {
+            let shared = Arc::new(SharedState::new());
+            let (conn, _peer) = crate::test_support::Peer::pair();
+            let mut conn = Some(conn);
+            ctx.pending_orders.push(OrderRequest::SubmitBracket {
+                parent_id: 51, tp_id: 52, sl_id: 53, instrument: 0, side: Side::Buy, qty: 1,
+                entry_price: 100 * P, take_profit: 110 * P, stop_loss: 90 * P,
+            });
+            drain_and_send_orders(&mut conn, ctx, "DU1", &mut HeartbeatState::new(), false, &shared);
+            let child = ctx.book.get(&52).cloned().unwrap();
+            assert_eq!((child.parent, child.oca_group.as_str()), (51, "51"));
+        });
+        assert_eq!(sent_ids(&frames), ["51.1"]);
+    }
+
+    // An order whose cancel is pending is not sent again: 161 at its
+    // client, with the order's permId (`ay.a(pe, bs, bE, boolean)@176`;
+    // the text as captured 01/10/2026 in pd-orders). An order of another
+    // client gives nothing to this one.
+    #[test]
+    fn global_cancel_refuses_an_order_with_a_pending_cancel() {
+        let (frames, errors, _) = global_cancel_of(|ctx| {
+            ctx.insert_order(order(41, 0, OrderStatus::PendingCancel));
+            replayed(ctx, 42, 42, 1, 3);
+            ctx.set_order_status_forced(42, OrderStatus::PendingCancel);
+            replayed(ctx, 43, 7043, 0, 7);
+            ctx.set_order_status_forced(43, OrderStatus::PendingCancel);
+        });
+        assert!(sent_ids(&frames).is_empty());
+        let mut errors = errors;
+        errors.sort();
+        assert_eq!(errors, [
+            (41, 161, "Cancel attempted when order is not in a cancellable state.  Order permId =41".to_string()),
+            (43, 161, "Cancel attempted when order is not in a cancellable state.  Order permId =7043".to_string()),
+        ]);
+    }
+
+    // The orders of this client that wait to be sent end as ApiCancelled,
+    // nothing on the wire (`jextend.bp.d()`; captured 25/09/2026: permId
+    // 0, the whole quantity remaining); the requests about them go too.
+    #[test]
+    fn global_cancel_ends_the_orders_that_wait() {
+        let (frames, errors, updates) = global_cancel_of(|ctx| {
+            ctx.rth_parked.push(OrderRequest::SubmitLimit { order_id: 9, instrument: 0, side: Side::Buy, qty: 3, price: 100 });
+            ctx.rth_parked.push(OrderRequest::Cancel { order_id: 9 });
+            ctx.rth_parked.push(OrderRequest::Modify {
+                new_order_id: 5, order_id: 5, qty: 1, kind: crate::types::OrderKind::Limit { price: 100 },
+                tif: b'0', attrs: Default::default(),
+            });
+        });
+        assert!(frames.is_empty() && errors.is_empty());
+        assert_eq!(updates.len(), 1);
+        let u = &updates[0];
+        assert_eq!((u.order_id, u.status, u.filled_qty_fixed, u.remaining_qty_fixed, u.perm_id),
+            (9, OrderStatus::ApiCancelled, 0, 3 * crate::types::QTY_SCALE, 0));
+    }
+
+    // An order of another session kept under its API order id: its
+    // cancel goes under the server's id, at the version the server gave
+    // (`jfix.co.bp()@44`).
+    #[test]
+    fn a_replayed_order_is_cancelled_under_its_server_id() {
+        let tags = wire_tags_with(
+            |ctx| { ctx.api_client_id = 0; replayed(ctx, 15, 1183455398, 2, 0); },
+            OrderRequest::Cancel { order_id: 15 },
+        );
+        assert_eq!(tag(&tags, 11), Some("1183455398.3"));
+        assert_eq!(tag(&tags, 41), Some("1183455398.2"));
+        assert_eq!(tag(&tags, 6944), Some("SEL"));
+    }
+
+    // The reference finds an API order by the client's id and the order
+    // id (`jextend.bw.o()@46`): an order of another client is not found
+    // (10147, ib-agent#151) and nothing is sent.
+    #[test]
+    fn cancel_of_an_order_of_another_client_is_refused_with_10147() {
+        let (sent, errors) = cancel_of(|ctx| replayed(ctx, 5, 5, 0, 250));
+        assert_eq!(sent, 0);
+        assert_eq!(errors, [(5, 10147, "OrderId 5 that needs to be cancelled is not found.".to_string())]);
+        let (sent, errors) = cancel_of(|ctx| replayed(ctx, 5, 5, 0, 0));
+        assert!(sent > 0, "an order of this client's id (0) is found");
+        assert!(errors.is_empty());
     }
 
     // ibx#466: the orderRef rides 6010 on the order and on each replace, as

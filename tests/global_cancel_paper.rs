@@ -1,9 +1,11 @@
 //! Global cancel against the real server on the paper account, through `EClient`.
 //!
 //! An order left open by an earlier session is listed by the server at
-//! connect. `req_global_cancel` walks the instrument ids below the shared
-//! instrument count, and that listing took a slot without raising the count,
-//! so the global cancel never reached such an order.
+//! connect (the logon replay). `req_global_cancel` cancels every order of
+//! the book, as the reference: those of this session, of other clients and
+//! of earlier sessions. An order the replay gave as not routed yet (39=A)
+//! was not in the book, so the global cancel sent nothing for it (paper
+//! 04/10/2026).
 //!
 //! Session 1 places a GTC limit order far from the market and disconnects.
 //! Session 2 connects, lists the open orders, calls `req_global_cancel` and

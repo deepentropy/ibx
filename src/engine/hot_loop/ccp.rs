@@ -1227,14 +1227,30 @@ impl CcpState {
         }).unwrap_or(0);
         let mut clord_id = context.recovered_keys.get(&server_id).copied().unwrap_or(server_id);
 
-        // Recovery insert: a 35=8 with status New/New (150=0/39=0) for an order
-        // that is NOT in this session's context is a cross-session recovery entry
-        // pushed by CCP on session establishment. Insert into context.open_orders
-        // so subsequent cancel/modify ACKs at ~line 668 can match via
-        // context.order(clord_id) and emit OrderUpdate events to the user. ibx#191.
-        let is_new_ack = parsed.get(&150).map(|s| s.as_str()) == Some("0")
-            && parsed.get(&39).map(|s| s.as_str()) == Some("0");
-        if is_new_ack && context.order(clord_id).is_none() {
+        // An order this session does not hold, reported working: an order
+        // of another session or client, put in the book so it can be
+        // cancelled, by its id or by a global cancel, and its reports reach
+        // it (ibx#191). The reference makes an order of any report of an
+        // unknown order (`jclient.pe.<init>(jexec.fq, boolean,
+        // jclient.dy)`: API order id 6121, client id 6119, ClOrdID 11); the
+        // logon replay reports an order not routed yet as 39=A (captured
+        // 01/10/2026: 8 orders of earlier sessions, 150=A 20=3 39=A), which
+        // was left out when only 150=0 39=0 was taken (paper 04/10/2026:
+        // 10147 on their cancel, nothing sent by a global cancel).
+        let replayed_status = match parsed.get(&39).map(|s| s.as_str()) {
+            Some("0" | "5") => {
+                let routed = parsed.get(&100).is_some_and(|s| !s.is_empty())
+                    || parsed.get(&198).is_some_and(|s| s != "NONE" && !s.is_empty());
+                Some(if routed { crate::types::OrderStatus::Submitted } else { crate::types::OrderStatus::PreSubmitted })
+            }
+            Some("A") => Some(crate::types::OrderStatus::PreSubmitted),
+            Some("1") => Some(crate::types::OrderStatus::PartiallyFilled),
+            Some("6" | "D") => Some(crate::types::OrderStatus::PendingCancel),
+            _ => None,
+        };
+        let replayed_status = replayed_status
+            .filter(|_| context.order(clord_id).is_none() && context.finished_status(clord_id).is_none());
+        if let Some(replayed_status) = replayed_status {
             // The API order id only names the order to the caller (ibx#466):
             // taken when no order of this session has it.
             let api_id = parsed.get(&6121).and_then(|s| s.parse::<OrderId>().ok())
@@ -1274,8 +1290,8 @@ impl CcpState {
                 None
             };
             if let Some(instrument) = instrument {
-                // req_global_cancel walks ids below this count; without it a
-                // recovered order on a new contract was never cancelled.
+                // The shared count covers the contract of the order, for the
+                // per-instrument requests that walk ids below it.
                 shared.market.set_instrument_count(context.market.count());
                 if let Some(sym) = parsed.get(&55) {
                     context.set_symbol(instrument, sym.clone());
@@ -1286,12 +1302,22 @@ impl CcpState {
                     side,
                     price: limit_price_i64,
                     qty_fixed: qty,
-                    filled_fixed: 0,
-                    status: crate::types::OrderStatus::Submitted,
+                    filled_fixed: parsed.get(&14).and_then(|s| parse_qty(s)).unwrap_or(0),
+                    status: replayed_status,
                     ord_type: ord_type_byte,
                     tif: tif_byte,
                     stop_price: stop_price_i64,
                 });
+                // Its ClOrdID version, the one the server gives: the next
+                // cancel or replace goes out under the next one.
+                let version = parsed.get(&11)
+                    .and_then(|c| c.split_once('.')).and_then(|(_, v)| v.parse::<u32>().ok()).unwrap_or(0);
+                context.modify_versions.insert(clord_id, version);
+                // Its API client (0 when the report names none, as the
+                // reference reads it).
+                if let Some(entry) = context.book.get_mut(&clord_id) {
+                    entry.owner = Some(parsed.get(&6119).and_then(|s| s.parse().ok()).unwrap_or(0));
+                }
                 log::info!("CCP recovery: inserted orderId={} sym={:?} side={:?} qty={} px={}",
                     clord_id, parsed.get(&55), side, qty as f64 / QTY_SCALE as f64,
                     limit_price_i64 as f64 / PRICE_SCALE as f64);
@@ -1389,6 +1415,14 @@ impl CcpState {
                 ord_status, exec_type, clord_id,
                 parsed.get(&58).map(|s| s.as_str()).unwrap_or(""),
                 parsed.get(&103).map(|s| s.as_str()).unwrap_or(""));
+        }
+
+        // The parent and OCA group the server gives for a held order, as
+        // the reference's book keeps them for its global cancel.
+        if context.order(clord_id).is_some() && (parsed.contains_key(&6107) || parsed.contains_key(&583)) {
+            let parent = parsed.contains_key(&6107).then(|| parent_order_id(parsed, context)).filter(|&p| p > 0);
+            let group = parsed.get(&583).map(String::as_str);
+            context.set_links(clord_id, parent, group);
         }
 
         // A bracket key on a report: kept for an order that has none, and
@@ -6170,9 +6204,9 @@ mod tests {
         assert!(shared.orders.drain_order_notices().is_empty());
     }
 
-    // req_global_cancel sends a cancel-all for each id below the shared
-    // instrument count. A recovered order on a new contract took a slot
-    // without raising that count, so the global cancel never reached it.
+    // A recovered order on a new contract took a slot without raising the
+    // shared instrument count, so a cancel-all walking the ids below it
+    // never reached the order.
     #[test]
     fn recovered_order_is_inside_the_global_cancel_range() {
         let mut ccp = CcpState::new();
@@ -6191,6 +6225,64 @@ mod tests {
         }
         assert!(context.pending_orders.drain().any(|r| matches!(r,
             crate::types::OrderRequest::CancelAll { instrument } if instrument == order.instrument)));
+    }
+
+    /// A report in pipe form, as `handle_exec_report` reads it.
+    fn report_of(text: &str) -> std::collections::HashMap<u32, String> {
+        text.split('|').filter_map(|kv| kv.split_once('='))
+            .filter_map(|(t, v)| Some((t.parse::<u32>().ok()?, v.to_string())))
+            .collect()
+    }
+
+    /// An order of an earlier session in the logon replay, not routed yet
+    /// (captured 01/10/2026, fix-agent-gw.20261001-171159 seq 1124, account
+    /// masked): 150=A 20=3 39=A, no API order id or client id.
+    const REPLAY_NOT_ROUTED: &str = "35=8|11=1790862363895062.0|17=140781.1790867253.0|150=A|20=3|39=A|167=CS|55=SPY|6210=BEST|38=1|44=0.00|32=0|31=0.00|14=0|151=1|6=0|54=1|37=00cf16ed.000225ed.6abde767.0001|1=DUXXXXXXX|60=20261001-15:07:33|6571=20261001-13:46:05|40=5|59=0|6008=756733|15=USD|6004=BEST|6122=c|6205=1|198=NONE|6115=0|6088=Socket|6035=SPY|6419=IB";
+
+    // The logon replay gives an order of an earlier session that is not
+    // routed yet as 39=A: it is in the book, PreSubmitted, of client 0
+    // (no 6119, read as 0 by the reference), at the server's version.
+    // Paper 04/10/2026: such orders were listed and then not found by a
+    // cancel (10147), and a global cancel sent nothing.
+    #[test]
+    fn a_replayed_order_not_routed_yet_is_in_the_book() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        ccp.handle_exec_report(&report_of(REPLAY_NOT_ROUTED), &mut context, &shared, &None, "");
+        let order = context.order(1790862363895062).copied().expect("in the book");
+        assert_eq!(order.status, crate::types::OrderStatus::PreSubmitted);
+        assert_eq!(context.book.get(&1790862363895062).and_then(|e| e.owner), Some(0));
+        assert_eq!(context.modify_versions.get(&1790862363895062), Some(&0));
+        assert_eq!(context.last_clord.get(&1790862363895062).map(String::as_str), Some("1790862363895062.0"));
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.len(), 1, "its status, as for every report of a held order");
+        assert_eq!(updates[0].status, crate::types::OrderStatus::PreSubmitted);
+    }
+
+    // An order of another client, with its API ids: kept under its API
+    // order id, of its client (6119), at the version the server gives; its
+    // parent and OCA group as reported. A finished report of an unknown
+    // order puts nothing in the book.
+    #[test]
+    fn a_replayed_order_keeps_its_client_version_and_links() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let parent = "35=8|11=57311390.0|17=e.1|150=0|20=3|39=0|55=AAPL|100=NASDAQ|38=1|44=238.44|14=0|151=1|54=1|37=x|40=2|6119=198|6121=35|59=0|6008=265598";
+        let child = "35=8|11=57311391.2|17=e.2|150=5|20=3|39=5|55=AAPL|38=1|44=250|14=0|151=1|54=2|37=y|40=2|6119=198|6121=36|59=1|6008=265598|583=57311390|6107=57311390.0";
+        ccp.handle_exec_report(&report_of(parent), &mut context, &shared, &None, "");
+        ccp.handle_exec_report(&report_of(child), &mut context, &shared, &None, "");
+        assert_eq!(context.order(35).map(|o| o.status), Some(crate::types::OrderStatus::Submitted));
+        assert_eq!(context.order(36).map(|o| o.status), Some(crate::types::OrderStatus::PreSubmitted));
+        assert_eq!((context.server_id(35), context.server_id(36)), (57311390, 57311391));
+        assert_eq!(context.modify_versions.get(&36), Some(&2));
+        let entry = context.book.get(&36).cloned().unwrap();
+        assert_eq!((entry.owner, entry.parent, entry.oca_group.as_str()), (Some(198), 35, "57311390"));
+
+        let filled = "35=8|11=57311399.0|17=e.3|150=2|20=0|39=2|55=AAPL|38=1|32=1|31=1|14=1|151=0|54=1|37=z|40=2|59=0|6008=265598";
+        ccp.handle_exec_report(&report_of(filled), &mut context, &shared, &None, "");
+        assert!(context.order(57311399).is_none());
     }
 
     // ibx#475: account frames captured on paper 25/09/2026 (account masked,

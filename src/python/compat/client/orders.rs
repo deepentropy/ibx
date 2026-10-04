@@ -154,16 +154,13 @@ impl EClient {
         Ok(())
     }
 
-    /// Cancel all orders globally.
+    /// Cancel all orders globally: every order of the account the session
+    /// knows, those of other clients and of earlier sessions too, as the
+    /// reference cancels them.
     fn req_global_cancel(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
-        let shared = self.shared_state()?;
-        let count = shared.market.instrument_count();
-        for instrument in 0..count {
-            let _ = send_cmd(py, &tx, ControlCommand::Order(OrderRequest::CancelAll { instrument }));
-        }
-        Ok(())
+        send_cmd(py, &tx, ControlCommand::Order(OrderRequest::GlobalCancel))
     }
 
     /// Request next valid order ID.

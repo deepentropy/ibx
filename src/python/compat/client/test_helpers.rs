@@ -182,6 +182,7 @@ impl EClient {
             "Cancelled" => OrderStatus::Cancelled,
             "Rejected" => OrderStatus::Rejected,
             "Inactive" => OrderStatus::Inactive,
+            "ApiCancelled" => OrderStatus::ApiCancelled,
             _ => return Err(PyRuntimeError::new_err(format!("Invalid status: {}", status))),
         };
         shared.orders.push_order_update(OrderUpdate {

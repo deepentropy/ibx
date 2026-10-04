@@ -130,14 +130,11 @@ impl EClient {
         self.cancel_order(order_id, "")
     }
 
-    /// Cancel all orders. Matches `reqGlobalCancel` in C++.
+    /// Cancel all orders. Matches `reqGlobalCancel` in C++: every order of
+    /// the account the session knows, those of other clients and of
+    /// earlier sessions too, as the reference cancels them.
     pub fn req_global_cancel(&self) -> Result<(), String> {
-        // Use global instrument count (not just locally-tracked ones)
-        let count = self.shared.market.instrument_count();
-        for instrument in 0..count {
-            self.send(ControlCommand::Order(OrderRequest::CancelAll { instrument }))?;
-        }
-        Ok(())
+        self.send(ControlCommand::Order(OrderRequest::GlobalCancel))
     }
 
     /// Request next valid order ID. Matches `reqIds` in C++.
