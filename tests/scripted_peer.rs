@@ -125,3 +125,98 @@ fn compressed_messages_round_trip_through_the_peer() {
     let frames = conn.extract_frames();
     assert!(matches!(&frames[..], [Frame::FixComp(_)]), "{frames:?}");
 }
+
+/// The open orders a client lists: (order id, permId) of each openOrder,
+/// and whether the end came.
+#[derive(Default)]
+struct Listing {
+    open: Vec<(i64, i64)>,
+    end: bool,
+}
+
+impl ibx::api::wrapper::Wrapper for Listing {
+    fn open_order(&mut self, order_id: i64, _c: &Contract, order: &Order, _s: &ibx::api::types::OrderState) {
+        self.open.push((order_id, order.perm_id));
+    }
+    fn open_order_end(&mut self) {
+        self.end = true;
+    }
+}
+
+/// The engine on a signed in-memory auth link, with a Rust client on top.
+fn session(shared: &Arc<SharedState>) -> (EClient, Peer, crossbeam_channel::Sender<ControlCommand>, std::thread::JoinHandle<()>) {
+    let (farm_conn, _farm) = Peer::pair();
+    let (mut ccp_conn, mut ccp) = Peer::pair();
+    let mac_key: Vec<u8> = (1..=20).collect();
+    ccp_conn.set_keys(mac_key.clone(), (0..16).collect(), mac_key, (16..32).collect());
+    ccp.sign_like(&ccp_conn);
+    let (mut engine, control_tx) = HotLoop::with_connections(
+        shared.clone(), None, "DUXXXXXXX".into(), farm_conn, ccp_conn, None, None);
+    let stop_tx = control_tx.clone();
+    let handle = std::thread::spawn(move || engine.run());
+    let client = EClient::from_parts(shared.clone(), control_tx, std::thread::spawn(|| {}), "DUXXXXXXX".into());
+    (client, ccp, stop_tx, handle)
+}
+
+// Paper 05/10/2026 (global_cancel_paper): an order a Rust client placed in
+// one session was not found among the open orders of the next session by
+// its order id. The Rust client's ids are above the int range, so the new
+// order carries no API order id (6121); the next session's logon replay
+// gives the order with none, and it is listed as the reference lists such
+// an order: order id 0, permId the id part of its ClOrdID (captured
+// 01/10/2026), which is the order id of the first session.
+#[test]
+fn an_order_of_an_earlier_session_is_listed_by_its_perm_id() {
+    // Session 1: the new order as sent.
+    let shared = Arc::new(SharedState::new());
+    let (client, mut ccp, stop_tx, handle) = session(&shared);
+    let id = 1_791_194_572_000;
+    let spy = Contract {
+        con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
+        exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
+    };
+    let order = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
+        lmt_price: 1.0, tif: "GTC".into(), ..Default::default()
+    };
+    client.place_order(id, &spy, &order).unwrap();
+    let is_order = |m: &Vec<u8>| parse_fields(m).iter().any(|(t, v)| *t == 35 && v == "D");
+    let sent = ccp.messages_until(Duration::from_secs(5), |ms| ms.iter().any(is_order));
+    stop_tx.send(ControlCommand::Shutdown).unwrap();
+    handle.join().unwrap();
+    let new_order = parse_fields(sent.iter().find(|m| is_order(m)).expect("the new order"));
+    let tag = |t: u32| new_order.iter().find(|(k, _)| *k == t).map(|(_, v)| v.clone());
+    assert_eq!(tag(11).as_deref(), Some("1791194572000.0"));
+    assert_eq!(tag(6121), None, "an id above the int range is not sent");
+    assert_eq!(tag(6119).as_deref(), Some("0"));
+
+    // Session 2: the logon replay gives it back, working, then its end.
+    let shared = Arc::new(SharedState::new());
+    let (client, mut ccp, stop_tx, handle) = session(&shared);
+    ccp.send_fix(&[
+        (35, "8"), (11, "1791194572000.0"), (17, "140781.1791194600.0"), (150, "A"), (20, "3"), (39, "A"),
+        (167, "CS"), (55, "SPY"), (6210, "BEST"), (38, "1"), (44, "1"), (32, "0"), (31, "0.00"), (14, "0"),
+        (151, "1"), (6, "0"), (54, "1"), (37, "00cf16ed.000225ed.6abde767.0001"), (1, "DUXXXXXXX"),
+        (40, "2"), (6119, "0"), (59, "1"), (6008, "756733"), (15, "USD"), (6088, "Socket"),
+    ]);
+    ccp.send_fix(&[(35, "8"), (11, "*"), (150, "0"), (20, "3"), (39, "0"), (55, "*"), (37, "*")]);
+    let mut listing = Listing::default();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while shared.orders.get_order_info(id).is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The replay's report reaches this client (client 0, the order's).
+    client.process_msgs(&mut listing);
+    assert_eq!(listing.open, [(0, id)], "the replayed report: order id 0 and its permId");
+    listing.open.clear();
+    client.req_all_open_orders(&mut listing);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !listing.end && std::time::Instant::now() < deadline {
+        client.process_msgs(&mut listing);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    stop_tx.send(ControlCommand::Shutdown).unwrap();
+    handle.join().unwrap();
+    assert!(listing.end, "the listing ends");
+    assert_eq!(listing.open, [(0, id)], "listed with order id 0 and its permId");
+}
