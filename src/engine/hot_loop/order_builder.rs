@@ -3610,6 +3610,72 @@ mod tests {
         }
     }
 
+    // The three frames of a bracket against the reference's (four-leg
+    // bracket of 26/09/2026, ib-agent captures/four-leg/20260926, a DAY
+    // parent LMT, a LMT take-profit and a STP stop-loss on AAPL), field by
+    // field and in order. The ids are masked as their role (parent, child);
+    // left out: the account, the client id (6119), the bracket colour, and
+    // what the bracket request does not carry (6010 orderRef, 8339 price
+    // management). The children of the bracket request are GTC (59=1, the
+    // reference's form for a GTC child, pd_bracket_keys of 01/10/2026);
+    // the recorded ones were DAY (ibx#486, phase 51 of 05/10/2026).
+    #[test]
+    fn bracket_frames_as_the_reference() {
+        const REFERENCE: [&str; 3] = [
+            "35=D|11=1339547416.0|44=272.86|1=DUXXXXXXX|8339=1|6122=c|6010=fourleg|6531=1/0/-9911633|6121=3|6119=198|38=1|40=2|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=",
+            "35=D|11=1339547417.0|44=300.14|1=DUXXXXXXX|8339=1|583=1339547416|6122=c|6010=fourleg|6531=1/1/-9911633|6121=4|6119=198|38=1|40=2|55=AAPL|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=265598|6209=ReduceOnFillNonBlock|6088=Socket|6107=1339547416.0|15=USD|6211=|6238=",
+            "35=D|11=1339547418.0|99=245.57|1=DUXXXXXXX|6117=245.57|583=1339547416|6122=c|6010=fourleg|6531=1/2/-9911633|6115=0|6121=5|6119=198|38=1|40=3|55=AAPL|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=265598|6209=ReduceOnFillNonBlock|6088=Socket|6107=1339547416.0|15=USD|6211=|6238=",
+        ];
+        use std::io::Read;
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        server.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+        let mut context = Context::new();
+        context.order_ids.start_at(FIRST as i32);
+        let inst = context.market.register(265598);
+        context.set_symbol(inst, "AAPL".to_string());
+        context.pending_orders.push(OrderRequest::SubmitBracket {
+            parent_id: 3, tp_id: 4, sl_id: 5, instrument: inst, side: Side::Buy, qty: 1,
+            entry_price: px(272.86), take_profit: px(300.14), stop_loss: px(245.57),
+        });
+        let shared = Arc::new(SharedState::new());
+        let mut conn = Some(Connection::new_mem(client));
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        let mut bytes = Vec::new();
+        let mut buf = vec![0u8; 16384];
+        while let Ok(n) = server.read(&mut buf) {
+            if n == 0 { break; }
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        let text = String::from_utf8_lossy(&bytes).replace('\x01', "|");
+        let ours: Vec<&str> = text.split("8=FIX.4.1|").filter(|m| !m.is_empty()).collect();
+        assert_eq!(ours.len(), 3, "{text}");
+        // The parent's ClOrdID base on each side, for the role masks.
+        let base = |frame: &str| frame.split('|').find_map(|f| f.strip_prefix("11=")).and_then(|c| c.split('.').next()).unwrap().to_string();
+        let form = |frame: &str, parent: &str| -> Vec<String> {
+            frame.split('|').filter_map(|f| {
+                let (t, v) = f.split_once('=')?;
+                let t: u32 = t.parse().ok()?;
+                if matches!(t, 8 | 9 | 34 | 52 | 10 | 1 | 6119 | 6010 | 8339) { return None; }
+                let v = match t {
+                    11 => if v.starts_with(&format!("{parent}.")) { "{parent}.0".to_string() } else { "{child}.0".to_string() },
+                    6107 => v.replacen(parent, "{parent}", 1),
+                    583 => v.replacen(parent, "{parent}", 1),
+                    6531 => v.rsplitn(2, '/').nth(1).unwrap_or(v).to_string(),
+                    _ => v.to_string(),
+                };
+                Some(format!("{t}={v}"))
+            }).collect()
+        };
+        let (pr, po) = (base(REFERENCE[0]), base(ours[0]));
+        for (k, (r, o)) in REFERENCE.iter().zip(&ours).enumerate() {
+            let mut want = form(r, &pr);
+            if k > 0 {
+                for f in want.iter_mut() { if f == "59=0" { *f = "59=1".to_string(); } }
+            }
+            assert_eq!(form(o, &po), want, "frame {k}");
+        }
+    }
+
     // A bracket child with the OCA type unset gets the default type, as the
     // reference's child of 01/10/2026 (ib-agent captures/pd-orders,
     // pd_bracket_keys); a type the caller gives is kept (ib-agent#192 A5,
