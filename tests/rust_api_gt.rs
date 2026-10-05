@@ -2348,8 +2348,11 @@ fn api_logon_values_live() {
 /// account on paper, the logon account); a Vwap whose startTime cannot be
 /// read is refused with 10314 and none is sent, one with no zone gets the
 /// warning 2174 and is sent; a LMT with all-or-none on SPY SMART (AON in
-/// the list) is sent, not refused with 10257; a bar request from 1820 is
-/// refused with the second years rule (199 years on paper) and no query.
+/// the list) is sent, not refused with 10257; 199 years of bars ending
+/// 01/01/1978 (the earliest end date the reference reads, `jutils.U.c(String)`;
+/// an earlier one is 10314) start before now minus 199 years and one day,
+/// and are refused with the second years rule (199 years on paper) and no
+/// query.
 /// The orders are far from the market and cancelled.
 /// Run with: cargo test --test rust_api_gt api_accounts_algo_times_aon_live -- --ignored --nocapture
 #[test]
@@ -2400,7 +2403,7 @@ fn api_accounts_algo_times_aon_live() {
         ..Default::default()
     }).unwrap();
     let old = Contract { ..spy() };
-    client.req_historical_data(130, &old, "18200101 00:00:00", "1 D", "1 day", "TRADES", true, 1, false).unwrap();
+    client.req_historical_data(130, &old, "19780101 00:00:00", "199 Y", "1 month", "TRADES", true, 1, false).unwrap();
     poll_until(&client, &mut wrapper, |cbs| {
         [no_zone, aon].iter().all(|id| cbs.iter().any(|c| matches!(c, Cb::OrderStatus { order_id, .. } if order_id == id)))
     }, Duration::from_secs(20));
@@ -2424,7 +2427,7 @@ fn api_accounts_algo_times_aon_live() {
     assert!(!errors(&cbs, aon).iter().any(|(code, _)| *code == 10257));
     assert!(cbs.iter().any(|c| matches!(c, Cb::OrderStatus { order_id, .. } if *order_id == aon)), "sent");
     let hist = errors(&cbs, 130);
-    println!("1820 bars: {:?}", hist);
+    println!("1978 bars: {:?}", hist);
     assert_eq!(hist.len(), 1);
     assert!(hist[0].1.starts_with("Error validating request.-'bM' : cause - Historical data queries on this contract requesting any data earlier than 199 year(s) back from now which is "), "{:?}", hist);
 }
