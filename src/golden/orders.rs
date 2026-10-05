@@ -317,7 +317,7 @@ fn time_conditions_refused_by_the_server() {
 // OVERNIGHT time in force (28/09/2026, i196_overnight): the order and the
 // refused change of its price (462 for the time in force the modify
 // restates), Cancelled then 202. Up to the order on the OVERNIGHT
-// exchange (see the ignored test below).
+// exchange (see `overnight_directed_order`).
 #[test]
 fn overnight_time_in_force_on_smart() {
     replay_and_compare("orders_i196_overnight", |r| r.seq < 1237, KNOWN, &[]);
@@ -325,13 +325,13 @@ fn overnight_time_in_force_on_smart() {
 
 // The session's order types (28/09/2026, rth_order_types): PEG BENCH, its
 // replace and cancel (openOrder auxPrice = the starting price);
-// OVERNIGHT, OVERNIGHT + DAY and includeOvernight in the session. Left
-// out here, each in an ignored test below: TRAIL MIT, TRAIL LIT, PASSV
-// REL, RPI and PEG BEST (refused by ibx, ibx#469), the directed OVERNIGHT
-// order (10), the option combos refused with 460 (13, 14).
+// OVERNIGHT, OVERNIGHT + DAY and includeOvernight in the session, the
+// directed OVERNIGHT order discarded (10). Left out here, each in an
+// ignored test below: TRAIL MIT, TRAIL LIT, PASSV REL, RPI and PEG BEST
+// (refused by ibx, ibx#469), the option combos refused with 460 (13, 14).
 #[test]
 fn session_order_types() {
-    replay_and_compare("orders_rth_order_types", all, KNOWN, &[1, 2, 3, 4, 5, 6, 7, 10, 13, 14]);
+    replay_and_compare("orders_rth_order_types", all, KNOWN, &[1, 2, 3, 4, 5, 6, 7, 13, 14]);
 }
 
 // What-if previews (02/10/2026, b1_462_whatif): LMT, MKT and a margin
@@ -426,16 +426,14 @@ fn condition_time_in_another_zone() {
 
 // An order routed to the OVERNIGHT exchange: the reference warns 10329
 // "This order will be directly routed to OVERNIGHT." and discards it
-// (Cancelled, then 201 "Order was discarded."). It is the API precaution
-// "Bypass Redirect Order warning for Stock API Orders" (off by default,
-// `trader.order.confirm.OrderChecker$6.check(pe)`): a stock order directed
-// to an exchange other than SMART when the contract trades on SMART gets
-// 10311 (10329 for OVERNIGHT and IBEOS) and is discarded. ibx has no such
-// setting: the rule would discard every directed stock order. The
-// Cancelled status also has a permId in this recording and none in the
-// ISLAND one of 25/09/2026.
+// (Cancelled, then 201 "Order was discarded."); the same id placed again
+// gets 103, its cancel 10147. It is the API precaution "Bypass Redirect
+// Order warning for Stock API Orders" (off by default,
+// `trader.order.confirm.OrderChecker$6.check(pe)`; ibx:
+// `IBX_BYPASS_REDIRECT_ORDER_WARNING`). The Cancelled status has a permId
+// here and none in the ISLAND capture of 25/09/2026: ibx gives the id the
+// order would have gone out under.
 #[test]
-#[ignore = "ibx#486: the redirect precaution (10311, 10329) needs a decision on its setting"]
 fn overnight_directed_order() {
     replay_and_compare("orders_i196_overnight", all, KNOWN, &[]);
     replay_and_compare("orders_rth_order_types", all, KNOWN, &[1, 2, 3, 4, 5, 6, 7, 13, 14]);
@@ -450,7 +448,7 @@ fn overnight_directed_order() {
 #[test]
 #[ignore = "ibx#486: the data behind 460 is not in the logon or the contract replies"]
 fn option_combo_without_permission() {
-    replay_and_compare("orders_rth_order_types", all, KNOWN, &[1, 2, 3, 4, 5, 6, 7, 10]);
+    replay_and_compare("orders_rth_order_types", all, KNOWN, &[1, 2, 3, 4, 5, 6, 7]);
 }
 
 // The algo refusals 441 / 443 need the algo definitions the reference

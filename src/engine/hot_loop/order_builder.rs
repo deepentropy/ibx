@@ -175,6 +175,15 @@ pub(crate) fn drain_and_send_orders(
             Some(on) => context.price_mgmt_send = on,
             None => { context.rth_parked.push(rewrap(order_req)); continue; }
         }
+        // A stock order directed away from SMART: discarded by the
+        // reference's redirect precaution unless it is bypassed (ibx#486).
+        if !what_if {
+            match redirect_precaution(&order_req, context, conn, hb, shared) {
+                Some(false) => { context.rth_parked.push(rewrap(order_req)); continue; }
+                Some(true) => continue,
+                None => {}
+            }
+        }
         // The contract's currency (tag 15), USD when unknown (ibx#466).
         let currency: String = order_req.instrument()
             .map(|i| context.market.currency(i).to_string())
@@ -2713,12 +2722,13 @@ pub(crate) fn rth_definition_reply(context: &mut Context, req_id: &str, msg: &[u
     let tags = fix::fix_parse(msg);
     let tokens: Vec<String> = tags.get(&6431).map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
     let def = crate::control::contracts::parse_secdef_response(msg);
-    let types = crate::engine::outside_rth::RthTypes::from_definition(
+    let mut types = crate::engine::outside_rth::RthTypes::from_definition(
         &tokens,
         tags.get(&6523).map(String::as_str).unwrap_or(""),
         def.as_ref().map(|d| d.sec_type.to_api_str()).unwrap_or(""),
         def.as_ref().map(|d| d.currency.as_str()).unwrap_or(""),
     );
+    types.smart = tags.get(&6046).is_some_and(|v| v.split(',').any(|e| e == "BEST" || e == "SMART"));
     log::info!("Outside RTH definition for con_id {} on {}: {:?}", key.0, key.1, types);
     log::debug!("Order-type list for con_id {} on {}: {:?}", key.0, key.1, tokens);
     context.rth_types.insert(key, types);
@@ -2822,6 +2832,78 @@ pub(crate) fn order_contract_reply(context: &mut Context, shared: &SharedState, 
     }
     release_rth_parked(context);
     true
+}
+
+/// Text of the redirect precaution (`trader.order.warning.x.u()`): 10311
+/// "Routing_warning", 10329 "Routing_warning_for_overnight" for OVERNIGHT
+/// and IBEOS (`jfix.R.C`), then the API precaution line
+/// (`API_Precautionary_Settings_Specified`), as captured on 28/09/2026.
+pub(crate) fn redirect_warning(exchange: &str) -> (i64, String) {
+    const API_PRECAUTION: &str = "Restriction is specified in Precautionary Settings of Global Configuration/API.";
+    match exchange {
+        "OVERNIGHT" | "IBEOS" => (10329, format!("This order will be directly routed to {}.\n{}", exchange, API_PRECAUTION)),
+        _ => (10311, format!("This order will be directly routed to {}. Direct routed orders may result in higher trade fees.\n{}",
+            exchange, API_PRECAUTION)),
+    }
+}
+
+/// The reference's redirect precaution for API orders
+/// (`trader.order.confirm.OrderChecker$6.check(pe)`, ibx#486): a stock
+/// order whose exchange is set and is not SMART, IBDESK or ZERO, on a
+/// contract that trades on SMART (`jclient.dy.dI()`), with the setting
+/// "Bypass Redirect Order warning for Stock API Orders" off (the default;
+/// `IBX_BYPASS_REDIRECT_ORDER_WARNING`): 10311 (10329 for OVERNIGHT and
+/// IBEOS), then the order is discarded: orderStatus Cancelled with nothing
+/// filled, then 201 "Order was discarded." (`jextend.dK.b(pe, String)`;
+/// captured 28/09/2026 on OVERNIGHT, 25/09/2026 on ISLAND, named NASDAQ).
+/// Its permId is the id it would have gone out under. `Some(false)` while
+/// the contract's definition on that exchange is asked, `Some(true)` when
+/// discarded, `None` to go on.
+fn redirect_precaution(
+    req: &OrderRequest,
+    context: &mut Context,
+    conn: &mut Connection,
+    hb: &mut HeartbeatState,
+    shared: &Arc<SharedState>,
+) -> Option<bool> {
+    if context.bypass_redirect_warning || req.combo().is_some()
+        || matches!(req, OrderRequest::SubmitBracket { .. } | OrderRequest::CancelAll { .. })
+    {
+        return None;
+    }
+    let qty = req.new_order_qty()?;
+    let instrument = req.instrument()?;
+    let (sec_type, _) = context.market.order_routing(instrument);
+    let exchange = context.market.exchange(instrument).to_string();
+    if sec_type != "STK" || matches!(exchange.as_str(), "" | "SMART" | "IBDESK" | "ZERO") {
+        return None;
+    }
+    match definition(context, conn, hb, instrument) {
+        Definition::NoContract => None,
+        Definition::Waiting => Some(false),
+        Definition::Known(types, _) if !types.smart => None,
+        Definition::Known(..) => {
+            let oid = req.order_id();
+            // The reference names the exchange as it keeps it.
+            let shown = if exchange == "ISLAND" { "NASDAQ" } else { exchange.as_str() };
+            let (code, text) = redirect_warning(shown);
+            log::warn!("Order {} discarded: directed to {} (redirect precaution)", oid, exchange);
+            shared.orders.push_order_error(oid, code, text);
+            shared.orders.push_order_update(OrderUpdate {
+                order_id: oid,
+                instrument,
+                status: OrderStatus::Cancelled,
+                filled_qty_fixed: 0,
+                remaining_qty_fixed: qty,
+                avg_fill_price: 0,
+                perm_id: oid,
+                parent_id: req.new_order_side().and_then(|(_, a)| a).map_or(0, |a| a.parent_id),
+                timestamp_ns: context.now_ns(),
+            });
+            shared.orders.push_order_notice(oid, 201, "Order rejected - reason:Order was discarded.".into());
+            Some(true)
+        }
+    }
 }
 
 /// The waiting requests go back ahead of the queue, in their order.
@@ -3678,6 +3760,48 @@ mod tests {
         });
         assert!(bracket.iter().any(|(t, _)| *t == 6210));
         assert!(contract_id_follows_routing(&bracket, "265598"));
+    }
+
+    // ibx#486: the redirect precaution (`OrderChecker$6`): a stock order
+    // directed away from SMART, on a contract that trades on SMART, is
+    // discarded (10311, or 10329 for OVERNIGHT; Cancelled; 201) and nothing
+    // goes out; with the bypass on, or a contract not on SMART, it goes.
+    #[test]
+    fn a_directed_stock_order_is_discarded_unless_bypassed() {
+        let run = |exchange: &str, smart: bool, bypass: bool| {
+            let mut context = Context::new();
+            context.bypass_redirect_warning = bypass;
+            let id = context.market.register(265598);
+            context.market.set_symbol(id, "AAPL".into());
+            context.market.set_routing(id, "STK", exchange);
+            context.rth_types.insert((265598, exchange.to_string()), crate::engine::outside_rth::RthTypes {
+                rth: true, sec_type: "STK".into(), smart, ..Default::default()
+            });
+            context.pending_orders.push(OrderRequest::SubmitLimit { order_id: 8, instrument: id, side: Side::Buy, qty: 1, price: 100 * P });
+            let shared = Arc::new(SharedState::new());
+            let (client, mut server) = crate::protocol::connection::mem_pair();
+            let mut conn = Some(Connection::new_mem(client));
+            let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+            let sent = frames.iter().any(|f| tag(f, 35) == Some("D"));
+            let errors: Vec<(i64, i64, String)> = shared.orders.drain_order_errors();
+            let statuses: Vec<(OrderStatus, i64, i64)> = shared.orders.drain_order_updates().iter()
+                .map(|u| (u.status, u.remaining_qty_fixed, u.perm_id)).collect();
+            let notices = shared.orders.drain_order_notices();
+            (sent, errors, statuses, notices)
+        };
+        let (sent, errors, statuses, notices) = run("OVERNIGHT", true, false);
+        assert!(!sent);
+        assert_eq!(errors, [(8, 10329, "This order will be directly routed to OVERNIGHT.\nRestriction is specified in Precautionary Settings of Global Configuration/API.".to_string())]);
+        assert_eq!(statuses, [(OrderStatus::Cancelled, crate::types::QTY_SCALE, 8)]);
+        assert_eq!(notices, [(8, 201, "Order rejected - reason:Order was discarded.".to_string())]);
+        let (sent, errors, ..) = run("ISLAND", true, false);
+        assert!(!sent);
+        assert_eq!(errors[0].1, 10311);
+        assert!(errors[0].2.starts_with("This order will be directly routed to NASDAQ. Direct routed orders may result in higher trade fees.\n"));
+        let (sent, errors, statuses, _) = run("ISLAND", true, true);
+        assert!(sent && errors.is_empty() && statuses.is_empty(), "bypassed");
+        let (sent, errors, ..) = run("ISLAND", false, false);
+        assert!(sent && errors.is_empty(), "a contract that does not trade on SMART");
     }
 
     // ibx#486: an order on a contract given without a conId waits for the

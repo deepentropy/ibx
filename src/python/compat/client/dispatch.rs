@@ -377,7 +377,7 @@ impl EClient {
         // the order and its status once more (ibx#486).
         for (order_id, code, msg) in shared.orders.drain_order_notices() {
             call_wrapper!(self.wrapper, py, "error", (shared.orders.api_order_id(order_id), code, msg.as_str(), ""));
-            if let Some(update) = reported.get(&order_id).filter(|_| code == 201) {
+            if let Some(update) = reported.get(&order_id).filter(|u| code == 201 && u.status != OrderStatus::Cancelled) {
                 self.report_order_update(py, shared, update)?;
             }
         }

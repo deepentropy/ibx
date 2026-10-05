@@ -123,23 +123,25 @@ fn top_of_book_after_orders_on_the_contract() {
 }
 
 // OVERNIGHT time in force (28/09/2026): the orders and the refused change
-// of the time in force (462), up to the order directed to the OVERNIGHT
-// exchange (src/golden/orders.rs, `overnight_directed_order`, ibx#486).
+// of the time in force (462); the order directed to the OVERNIGHT exchange
+// discarded by the redirect precaution: 10329, Cancelled, 201, then 103
+// for its id placed again and 10147 for its cancel (ibx#486).
 #[test]
 fn overnight_time_in_force() {
-    check("20260928/overnight_tif", orders().until(1237));
+    let o = check("20260928/overnight_tif", orders());
+    assert!(o.theirs.iter().any(|(_, l)| l.starts_with("error|2|10329|")));
 }
 
 // The session's order types (28/09/2026, RTH): SPY and QQQ top of book,
 // contract details, PEG BENCH with its replace and cancel, the OVERNIGHT
 // orders, up to the second SPY request (src/golden/l1.rs
-// `spy_and_qqq_in_the_session`). Left out as in src/golden/orders.rs: TRAIL MIT, TRAIL LIT,
-// PASSV REL, RPI and PEG BEST (ibx#469), the directed OVERNIGHT order
-// (ibx#486). The commission reports (no order id) are those of the fills
-// of the orders left out.
+// `spy_and_qqq_in_the_session`), the directed OVERNIGHT order discarded
+// (ibx#486). Left out as in src/golden/orders.rs: TRAIL MIT, TRAIL LIT,
+// PASSV REL, RPI and PEG BEST (ibx#469). The commission reports (no order
+// id) are those of the fills of the orders left out.
 #[test]
 fn rth_order_types() {
-    check("20260928/rth_order_types", Options::default().mask(known).skip_orders(&[1, 2, 3, 4, 5, 6, 7, 10]).until(6581)
+    check("20260928/rth_order_types", Options::default().mask(known).skip_orders(&[1, 2, 3, 4, 5, 6, 7]).until(6581)
         .keep(|l| !l.starts_with("commissionAndFeesReport")));
 }
 
@@ -149,7 +151,7 @@ fn rth_order_types() {
 // seq 2461 and 2590, 28/09/2026 seq 5292 and 22088) (ibx#487).
 #[test]
 fn exchange_map_cancel_source() {
-    let o = check("20260928/rth_order_types", Options::default().mask(known).skip_orders(&[1, 2, 3, 4, 5, 6, 7, 10]).until(6581)
+    let o = check("20260928/rth_order_types", Options::default().mask(known).skip_orders(&[1, 2, 3, 4, 5, 6, 7]).until(6581)
         .keep(|l| !l.starts_with("commissionAndFeesReport")));
     assert!(o.frames_compared > 10, "{}", o.frames_compared);
 }

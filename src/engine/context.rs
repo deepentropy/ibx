@@ -144,6 +144,10 @@ pub struct Context {
     /// The contract lookups of orders given without a conId: request
     /// number and the order's slot (ibx#486).
     pub(crate) order_lookups: Vec<(u32, InstrumentId)>,
+    /// The API precaution "Bypass Redirect Order warning for Stock API
+    /// Orders" (`IBX_BYPASS_REDIRECT_ORDER_WARNING`, off by default as the
+    /// reference's, ibx#486).
+    pub(crate) bypass_redirect_warning: bool,
     /// Sequence of those lookups.
     pub(crate) next_order_lookup: u32,
     /// Set while a short-side order is encoded: its short-sale fields
@@ -258,6 +262,7 @@ impl Context {
             what_ifs: HashMap::new(),
             what_if_send: None,
             order_lookups: Vec::new(),
+            bypass_redirect_warning: crate::config::bypass_redirect_order_warning(),
             next_order_lookup: 0,
             short_sale_send: None,
             combos: Default::default(),

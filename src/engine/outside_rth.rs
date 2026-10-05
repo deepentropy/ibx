@@ -47,6 +47,9 @@ pub(crate) struct RthTypes {
     pub price_chk: bool,
     /// The all-or-none key (AON) is in the list (ibx#263).
     pub aon: bool,
+    /// SMART is a valid exchange of the contract (tag 6046 names it BEST;
+    /// `jclient.dy.dI()`), for the redirect precaution (ibx#486).
+    pub smart: bool,
 }
 
 impl RthTypes {

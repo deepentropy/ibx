@@ -1144,6 +1144,9 @@ pub struct ClientCore {
     /// Orders that went out without outside RTH (warning 2109): their
     /// openOrder shows it off, as the reference's order record (ibx#486).
     rth_dropped: Mutex<HashSet<OrderId>>,
+    /// Orders the redirect precaution discarded (10311, 10329), until
+    /// their Cancelled status (ibx#486).
+    discarded: Mutex<HashSet<OrderId>>,
     /// The last report given for each order (ibx#486).
     last_reports: Mutex<HashMap<OrderId, OrderReport>>,
     // Commission reports that came before their execution, by execution id
@@ -1443,6 +1446,7 @@ impl ClientCore {
             executions: Mutex::new(Vec::new()),
             client_id: AtomicI64::new(0),
             rth_dropped: Mutex::new(HashSet::new()),
+            discarded: Mutex::new(HashSet::new()),
             last_reports: Mutex::new(HashMap::new()),
             pending_commissions: Mutex::new(PendingCommissions::default()),
             open_orders: Mutex::new(HashMap::new()),
@@ -3082,6 +3086,10 @@ impl ClientCore {
         if code == 2109 {
             self.rth_dropped.lock().unwrap().insert(order_id);
         }
+        // The redirect precaution discards the order (ibx#486).
+        if matches!(code, 10311 | 10329) {
+            self.discarded.lock().unwrap().insert(order_id);
+        }
     }
 
     /// orderStatus whyHeld, as the reference's `jclient.pe.iK()`: only for
@@ -3172,10 +3180,13 @@ impl ClientCore {
             }
         }
         // An order that never left (a global cancel came while it
-        // waited): the reference never put it in its book, so its id names
-        // no order any more.
-        if status == "ApiCancelled" {
+        // waited), or one the redirect precaution discarded (ibx#486; its
+        // id placed again gets 103, captured 28/09/2026): the reference
+        // never put it in its book, so its id names no order any more.
+        let discarded = status == "Cancelled" && self.discarded.lock().unwrap().remove(&order_id);
+        if status == "ApiCancelled" || discarded {
             orders.remove(&order_id);
+            self.finished_orders.lock().unwrap().remove(&order_id);
         }
     }
 
