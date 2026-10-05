@@ -504,6 +504,12 @@ fn server_reject(paper: &mut Paper, id: i64) {
 /// ibx#486: an order on a contract given without a conId: its contract is
 /// looked up by symbol first (35=c FixSecDefReqBySymbol before the 35=D),
 /// the order goes out with the conId found, and the server takes it.
+///
+/// Only the frames after the place call are read, each parsed: the 35=D
+/// is found by its ClOrdID (the order id before the dot; the API order id
+/// 6121 is left out of the frame for an id beyond the API's int range, as
+/// the reference, and this test's ids are), the lookup by its message
+/// type, request name and symbol, its answer by the lookup's 320.
 fn order_by_symbol(paper: &mut Paper, id: i64) {
     println!("  order by symbol (order {})", id);
     let by_symbol = Contract { con_id: 0, ..aapl() };
@@ -511,18 +517,62 @@ fn order_by_symbol(paper: &mut Paper, id: i64) {
         action: "BUY".into(), order_type: "LMT".into(), total_quantity: 1.0, lmt_price: 100.0,
         tif: "DAY".into(), ..Default::default()
     };
+    let start = wire().lines.lock().unwrap().len();
     paper.placed.push(id);
     if let Err(e) = paper.client.place_order(id, &by_symbol, &order) {
         paper.fail(&format!("order {}: place_order returned {}", id, e));
     }
     let done = paper.pump(20, |s| working(s, id));
     paper.check(done, "order by symbol: working");
-    let lines = wire().lines.lock().unwrap().clone();
-    let lookup = lines.iter().position(|l| l.starts_with("WIRE>") && l.contains("35=c") && l.contains("FixSecDefReqBySymbol")
-        && l.contains("|55=AAPL|"));
-    let new_order = lines.iter().position(|l| l.starts_with("WIRE>") && l.contains("|35=D|") && l.contains(&format!("|6121={}|", id)));
-    paper.check(lookup.is_some() && lookup < new_order, "order by symbol: the lookup before the 35=D");
-    paper.check(new_order.is_some_and(|n| lines[n].contains("|6008=265598|")), "order by symbol: the conId found on the 35=D");
+    let lines = wire().lines.lock().unwrap()[start..].to_vec();
+    for (ok, what) in order_by_symbol_checks(&lines, id, "AAPL", "265598") {
+        paper.check(ok, &format!("order by symbol: {}", what));
+    }
+}
+
+/// The wire checks of [`order_by_symbol`] on the frames logged after the
+/// place call: one lookup by symbol, its answer, then the order's 35=D with
+/// the conId found.
+fn order_by_symbol_checks(lines: &[String], id: i64, symbol: &str, con_id: &str) -> Vec<(bool, String)> {
+    let lines: Vec<(bool, Frame)> = lines.iter()
+        .filter(|l| l.starts_with("WIRE"))
+        .map(|l| (l.starts_with("WIRE>"), parse_frame(l))).collect();
+    let lookups: Vec<usize> = lines.iter().enumerate()
+        .filter(|(_, (out, f))| *out && field(f, 35) == Some("c") && field(f, 55) == Some(symbol)
+            && field(f, 320).is_some_and(|r| r.starts_with("FixSecDefReqBySymbol")))
+        .map(|(n, _)| n).collect();
+    let clord_id = |f: &Frame| field(f, 11).and_then(|c| c.split('.').next()).and_then(|v| v.parse::<i64>().ok());
+    let new_order = lines.iter().position(|(out, f)| *out && field(f, 35) == Some("D") && clord_id(f) == Some(id));
+    let answer = lookups.first().and_then(|&n| field(&lines[n].1, 320).map(str::to_string)).and_then(|rid| {
+        lines.iter().position(|(out, f)| !*out && field(f, 35) == Some("d") && field(f, 320) == Some(rid.as_str()))
+    });
+    vec![
+        (lookups.len() == 1, format!("one lookup by symbol ({} sent)", lookups.len())),
+        (new_order.is_some(), "the 35=D sent".to_string()),
+        (lookups.first().is_some_and(|&l| Some(l) < new_order) && answer.is_some() && answer < new_order,
+            "the lookup and its answer before the 35=D".to_string()),
+        (new_order.is_some_and(|n| field(&lines[n].1, 6008) == Some(con_id)), "the conId found on the 35=D".to_string()),
+    ]
+}
+
+// The checks of the order by symbol on the frame shapes the engine logs
+// (offline): an order id beyond the API's int range has no 6121 on the
+// wire, so the 35=D is found by its ClOrdID (the paper run of 05/10/2026
+// looked for 6121 and failed though ibx sent the lookup and the conId).
+#[test]
+fn order_by_symbol_checks_read_the_logged_frames() {
+    let id = 1791194469804_i64;
+    let lookup = "WIRE> seq=7 8=FIX.4.1|9=0120|35=c|34=000007|52=x|320=FixSecDefReqBySymbol3221225472|321=2|6088=Socket|55=AAPL|167=CS|100=BEST|15=USD|10=250|";
+    let answer = "WIRE< ccp/fix 8=FIX.4.1|9=0100|35=d|34=000900|320=FixSecDefReqBySymbol3221225472|322=*|323=4|55=AAPL|167=STK|6008=265598|10=000|";
+    let order = format!("WIRE> seq=9 8=FIX.4.1|9=0215|35=D|34=000009|52=x|11={id}.0|44=100.00|1=DU1|6122=c|6119=0|38=1|40=2|55=AAPL|167=STK|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|10=096|");
+    let ok = |lines: Vec<String>| order_by_symbol_checks(&lines, id, "AAPL", "265598").iter().all(|(ok, _)| *ok);
+    assert!(ok(vec!["log line".into(), lookup.into(), answer.into(), order.clone()]));
+    // The 35=D first, no answer, no conId, two lookups: each fails.
+    assert!(!ok(vec![order.clone(), lookup.into(), answer.into()]));
+    assert!(!ok(vec![lookup.into(), order.clone()]));
+    assert!(!ok(vec![lookup.into(), answer.into(), order.replace("|6008=265598", "")]));
+    assert!(!ok(vec![lookup.into(), lookup.into(), answer.into(), order.clone()]));
+    assert!(!ok(vec![lookup.into(), answer.into(), order.replace(&format!("11={id}.0"), "11=5.0")]));
 }
 
 /// ibx#328: every new order carries the contract id after the secondary
