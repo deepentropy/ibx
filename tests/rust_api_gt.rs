@@ -2920,6 +2920,7 @@ impl Wrapper for B2Wrapper {
 /// - A plain TRAIL BUY 1 SPY, trail 1.00 (it fills only if the price rises
 ///   1.00 within 40 s): openOrder shows the server's stop price; cancelled
 ///   at the end.
+///
 /// The log shows the generic entries: 101, 106, 233, 375, 456 after the top
 /// of book; the others with 626 at its acknowledgement.
 /// Run with: cargo test --test rust_api_gt api_b2_regular_hours_live -- --ignored --nocapture
