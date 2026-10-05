@@ -190,6 +190,8 @@ class Driver:
             c.req_global_cancel()
         elif name == "CANCEL_POSITIONS":
             c.cancel_positions()
+        elif name == "REQ_CONTRACT_DATA":
+            c.req_contract_details(rid, make_contract(q["contract"]))
         else:
             return False
         return True
@@ -345,3 +347,14 @@ def test_generic_ticks():
     for prefix in ("tickGeneric|9620|46|", "tickSize|9620|87|", "tickString|9620|59|", "tickString|9621|48|",
                    "tickSize|9625|86|"):
         assert any(l.startswith(prefix) for l in theirs), prefix
+
+
+# Market data errors (05/10/2026, ibx#444): two ids on AAPL, then 7203 refused
+# on the Tokyo farm (354 with its contract, 10167 and delayed data, the kept
+# request parameters), as the Rust test; the exchange letters of AAPL (the
+# reference had its map from earlier in its session) are left out.
+def test_market_data_errors():
+    out = replay("20261005/b2_mkt_errors", farms=["jfarm"], skip_seqs=[18512], compare=[])
+    theirs = assert_same(out, keep=lambda l: not (l.startswith("tickString|") and l.split("|")[2] in ("32", "33")))
+    assert any("|354|" in l and l.endswith("7203 TSEJ (7203.T) /TOP/ALL") for l in theirs)
+    assert any(l.startswith("error|9654|10167|") for l in theirs)
