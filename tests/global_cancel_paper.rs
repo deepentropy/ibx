@@ -11,6 +11,12 @@
 //! Session 2 connects, lists the open orders, calls `req_global_cancel` and
 //! requires a Cancelled status from the server for every listed order.
 //!
+//! The orders are told apart by permId. An order id above the int range
+//! (the Rust client's ids) is not sent to the server (no 6121), so a later
+//! session shows the order with order id 0, as the reference shows an
+//! order whose report has none (captured 01/10/2026); its permId is the
+//! id part of its ClOrdID, the order id of session 1.
+//!
 //! This cancels EVERY open order on the paper account.
 //!
 //! Requires IB_USERNAME and IB_PASSWORD (paper account) in the environment.
@@ -26,8 +32,10 @@ use ibx::api::wrapper::Wrapper;
 
 #[derive(Default)]
 struct State {
-    statuses: Vec<(i64, String)>,
-    open: Vec<i64>,
+    /// (order id, permId, status) of each orderStatus.
+    statuses: Vec<(i64, i64, String)>,
+    /// (order id, permId) of each openOrder.
+    open: Vec<(i64, i64)>,
 }
 
 struct Probe {
@@ -37,13 +45,13 @@ struct Probe {
 impl Wrapper for Probe {
     fn order_status(
         &mut self, order_id: i64, status: &str, _filled: f64, _remaining: f64,
-        _avg_fill_price: f64, _perm_id: i64, _parent_id: i64, _last_fill_price: f64,
+        _avg_fill_price: f64, perm_id: i64, _parent_id: i64, _last_fill_price: f64,
         _client_id: i64, _why_held: &str, _mkt_cap_price: f64,
     ) {
-        self.state.lock().unwrap().statuses.push((order_id, status.into()));
+        self.state.lock().unwrap().statuses.push((order_id, perm_id, status.into()));
     }
-    fn open_order(&mut self, order_id: i64, _contract: &Contract, _order: &Order, _state: &OrderState) {
-        self.state.lock().unwrap().open.push(order_id);
+    fn open_order(&mut self, order_id: i64, _contract: &Contract, order: &Order, _state: &OrderState) {
+        self.state.lock().unwrap().open.push((order_id, order.perm_id));
     }
     fn error(&mut self, req_id: i64, code: i64, msg: &str, _adv: &str) {
         eprintln!("  [error] id={} code={} {}", req_id, code, msg);
@@ -51,7 +59,11 @@ impl Wrapper for Probe {
 }
 
 fn last_status(s: &State, id: i64) -> Option<&str> {
-    s.statuses.iter().rev().find(|(o, _)| *o == id).map(|(_, st)| st.as_str())
+    s.statuses.iter().rev().find(|(o, ..)| *o == id).map(|(.., st)| st.as_str())
+}
+
+fn last_status_of_perm(s: &State, perm_id: i64) -> Option<&str> {
+    s.statuses.iter().rev().find(|(_, p, _)| *p == perm_id).map(|(.., st)| st.as_str())
 }
 
 fn pump(client: &EClient, probe: &mut Probe, secs: u64, done: impl Fn(&State) -> bool) -> bool {
@@ -103,26 +115,34 @@ fn global_cancel_reaches_orders_from_an_earlier_session() {
     let up = pump(&client, &mut probe, 20, |s| {
         matches!(last_status(s, id), Some("PreSubmitted" | "Submitted"))
     });
+    let perm_id = probe.state.lock().unwrap().statuses.iter().rev()
+        .find(|(o, ..)| *o == id).map_or(0, |(_, p, _)| *p);
     client.disconnect();
     assert!(up, "session 1: order {} not accepted", id);
-    println!("  session 1: order {} working, disconnected", id);
+    assert_eq!(perm_id, id, "session 1: the permId is the id part of the ClOrdID, the order id");
+    println!("  session 1: order {} (permId {}) working, disconnected", id, perm_id);
 
     // Session 2: the server lists it at connect; the global cancel must reach it.
     let client = connect_paper(&config);
     let mut probe = Probe { state: Arc::new(Mutex::new(State::default())) };
     pump(&client, &mut probe, 5, |_| false);
+    // The listing only (the replay's reports gave openOrder already).
+    probe.state.lock().unwrap().open.clear();
     client.req_all_open_orders(&mut probe);
-    let listed = probe.state.lock().unwrap().open.clone();
-    println!("  session 2: {} open order(s) listed", listed.len());
-    assert!(listed.contains(&id), "session 2: order {} from session 1 not listed", id);
+    let open = probe.state.lock().unwrap().open.clone();
+    println!("  session 2: {} open order(s) listed: {:?}", open.len(), open);
+    let listed: Vec<i64> = open.iter().map(|&(_, p)| p).collect();
+    assert!(listed.contains(&perm_id), "session 2: order of permId {} from session 1 not listed", perm_id);
+    assert!(open.iter().any(|&(o, p)| p == perm_id && o == 0),
+        "session 2: the order of session 1 has no API order id on the server: order id 0");
 
     client.req_global_cancel().expect("req_global_cancel");
     let all = pump(&client, &mut probe, 20, |s| {
-        listed.iter().all(|&o| last_status(s, o) == Some("Cancelled"))
+        listed.iter().all(|&p| last_status_of_perm(s, p) == Some("Cancelled"))
     });
     let not_cancelled: Vec<i64> = {
         let s = probe.state.lock().unwrap();
-        listed.iter().copied().filter(|&o| last_status(&s, o) != Some("Cancelled")).collect()
+        listed.iter().copied().filter(|&p| last_status_of_perm(&s, p) != Some("Cancelled")).collect()
     };
     client.disconnect();
     assert!(all, "global cancel left {} of {} listed order(s) not cancelled",
