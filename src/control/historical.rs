@@ -1537,6 +1537,25 @@ pub fn realtime_bar_data(what_to_show: &str) -> Option<&'static str> {
     }
 }
 
+/// The id of a real-time bar query, as the reference writes it
+/// (`jextend.eG.a(Query)`, `hmdscore.xml.j.toString()`; captured
+/// 05/10/2026): `realTime{n};;{symbol}@{exchange} {data};;1;;true;;0;;U`,
+/// the data named as the reference's bar types (Trades, Midpoint, Bid,
+/// Ask); an empty exchange is SMART.
+pub fn realtime_bar_query_id(window: &str, symbol: &str, exchange: &str, what_to_show: &str) -> String {
+    let exchange = match exchange.trim() {
+        "" => "SMART",
+        e => e,
+    };
+    let name = match what_to_show {
+        "MIDPOINT" => "Midpoint",
+        "BID" => "Bid",
+        "ASK" => "Ask",
+        _ => "Trades",
+    };
+    format!("{window};;{symbol}@{exchange} {name};;1;;true;;0;;U")
+}
+
 /// Build the XML subscription for real-time 5-second bars.
 ///
 /// Unlike the other historical queries, the exchange is the API contract
@@ -1676,9 +1695,12 @@ pub fn decode_bar_payload(payload: &[u8], min_tick: f64) -> Option<crate::types:
         low
     };
 
+    // The prices as the reference sends them: a whole number of ticks
+    // (captured 05/10/2026: 333.79, not 333.78999999999996).
+    let price = crate::control::generic_values::java_price;
     Some(crate::types::RealTimeBar {
         timestamp: 0, // filled by caller from message header
-        open, high, low, close, volume, wap, count,
+        open: price(open), high: price(high), low: price(low), close: price(close), volume, wap, count,
     })
 }
 
@@ -2695,6 +2717,19 @@ mod tests {
         let mut series = Vec::new();
         merge_five_seconds(&mut series, &rth, BarSize::Hour1, true, parse_server_time("20261001-13:30:05").unwrap(), &empty);
         assert_eq!(server_time(series[0].start), "20261001-13:30:00");
+    }
+
+    // The real-time bar query ids and the bars of 05/10/2026 (b2_rtbars):
+    // the reference's id form, prices on whole ticks.
+    #[test]
+    fn realtime_bar_ids_and_prices() {
+        assert_eq!(realtime_bar_query_id("realTime1", "AAPL", "SMART", "TRADES"), "realTime1;;AAPL@SMART Trades;;1;;true;;0;;U");
+        assert_eq!(realtime_bar_query_id("realTime3", "AAPL", "", "MIDPOINT"), "realTime3;;AAPL@SMART Midpoint;;1;;true;;0;;U");
+        let hex = "104b645a13a0d000096483de";
+        let payload: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        let bar = decode_bar_payload(&payload, 0.01).unwrap();
+        assert_eq!((bar.open, bar.high, bar.low, bar.close, bar.volume, bar.count), (333.77, 333.79, 333.71, 333.78, 2404.0, 34));
+        assert_eq!(bar.wap, 333.7429450915141);
     }
 
     #[test]

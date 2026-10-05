@@ -151,6 +151,12 @@ impl EClient {
                 return Ok(());
             }
         };
+        // A contract without a conId is looked up first, as the reference
+        // does (captured 05/10/2026).
+        if contract.con_id == 0 {
+            return self.core.register_tbt_by_symbol(&tx, req_id, &contract.to_api(), tbt_type, number_of_ticks, ignore_size)
+                .map_err(PyRuntimeError::new_err);
+        }
         send_cmd(py, &tx, ControlCommand::RegisterInstrument {
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
@@ -272,7 +278,9 @@ impl EClient {
         if !crate::client_core::ClientCore::ids_fit("req_real_time_bars", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
         let _ = (bar_size, real_time_bars_options);
-        send_cmd(py, &tx, ControlCommand::SubscribeRealTimeBar {
+        // A contract without a conId is looked up first, as the reference
+        // does (captured 05/10/2026).
+        send_cmd(py, &tx, crate::client_core::ClientCore::resolve_first(req_id, &contract.to_api(), ControlCommand::SubscribeRealTimeBar {
             req_id,
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
@@ -280,7 +288,7 @@ impl EClient {
             exchange: contract.exchange.clone(),
             what_to_show: what_to_show.to_string(),
             use_rth: use_rth != 0,
-        })?;
+        }))?;
         Ok(())
     }
 

@@ -429,7 +429,8 @@ impl Wrapper for Recorder {
                 _ => unreachable!("{k}"),
             }
         };
-        let fields: Vec<String> = OPEN_ORDER_FIELDS.iter().map(|k| format!("{k}={}", field(k))).collect();
+        let fields: Vec<String> = OPEN_ORDER_FIELDS.iter().filter(|k| super::record::compared_field(k, &o.order_type))
+            .map(|k| format!("{k}={}", field(k))).collect();
         self.lines.push(format!(
             "openOrder|{order_id}|{}|{}|{}|{}|{}", c.con_id, c.symbol, c.sec_type, fields.join(","), state.status,
         ));
@@ -449,5 +450,43 @@ impl Wrapper for Recorder {
     }
     fn commission_and_fees_report(&mut self, r: &CommissionAndFeesReport) {
         self.lines.push(format!("commissionAndFeesReport|{}|{}", n(r.commission_and_fees), r.currency));
+    }
+    fn tick_by_tick_all_last(
+        &mut self, req_id: i64, tick_type: i32, time: i64, price: f64, size: f64,
+        a: &crate::api::types::TickAttribLast, exchange: &str, special: &str,
+    ) {
+        self.lines.push(format!(
+            "tickByTickAllLast|{req_id}|{tick_type}|{time}|{}|{}|{}|{exchange}|{special}",
+            n(price), n(size), attr_mask(false, a.past_limit, a.unreported),
+        ));
+    }
+    fn tick_by_tick_bid_ask(
+        &mut self, req_id: i64, time: i64, bid: f64, ask: f64, bid_size: f64, ask_size: f64,
+        a: &crate::api::types::TickAttribBidAsk,
+    ) {
+        self.lines.push(format!(
+            "tickByTickBidAsk|{req_id}|{time}|{}|{}|{}|{}|{}",
+            n(bid), n(ask), n(bid_size), n(ask_size), attr_mask(false, a.bid_past_low, a.ask_past_high),
+        ));
+    }
+    fn tick_by_tick_mid_point(&mut self, req_id: i64, time: i64, mid: f64) {
+        self.lines.push(format!("tickByTickMidPoint|{req_id}|{time}|{}", n(mid)));
+    }
+    fn historical_ticks_last(&mut self, req_id: i64, ticks: &crate::types::HistoricalTickData, done: bool) {
+        if let crate::types::HistoricalTickData::Last(rows) = ticks {
+            let rows: Vec<String> = rows.iter().map(|t| format!(
+                "{}:{}:{}:{}:{}:{}", t.time, n(t.price), n(t.size),
+                attr_mask(false, t.tick_attrib_last.past_limit, t.tick_attrib_last.unreported), t.exchange, t.special_conditions,
+            )).collect();
+            self.lines.push(format!("historicalTicksLast|{req_id}|{}|{done}", rows.join(",")));
+        }
+    }
+    fn real_time_bar(
+        &mut self, req_id: i64, date: i64, open: f64, high: f64, low: f64, close: f64, volume: f64, wap: f64, count: i32,
+    ) {
+        self.lines.push(format!(
+            "realtimeBar|{req_id}|{date}|{}|{}|{}|{}|{}|{}|{count}",
+            n(open), n(high), n(low), n(close), n(volume), n(wap),
+        ));
     }
 }

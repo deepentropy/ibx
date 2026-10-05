@@ -355,7 +355,7 @@ fn req_tick_by_tick_data_types_and_local_refusals() {
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     for e in [
-        "error:20:321:Error validating request.-'bT' : cause - Tick-by-tick data type is incorrect/not set",
+        "error:20:321:Error validating request.-'bT' : cause - Tick-by-tick data type is incorrect/not set.",
         "error:21:321:Error validating request.-'bT' : cause - 'BAG' security type is not supported in ReqTickByTick(97) request",
         "error:22:10189:Failed to request tick-by-tick data.AllLast tick-by-tick requests are not supported for SPY",
     ] {

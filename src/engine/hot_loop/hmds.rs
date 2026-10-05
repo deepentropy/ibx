@@ -36,6 +36,9 @@ pub(crate) struct HmdsState {
     /// before the start, 3 days long, as the reference (ibx#404).
     pub(crate) tbt_guess_window: (i64, i64),
     pub(crate) next_hmds_query_id: u32,
+    /// The counter of the real-time bar query ids (`realTime{n}`, the
+    /// reference's `jextend.eG`), from 1.
+    pub(crate) next_rtbar_id: u32,
     pub(crate) disconnected: bool,
     /// In-flight historical bar queries: (query_id, req_id). No deadline,
     /// as in the reference: its bar query (`jextend.j`, `hmdscore`) waits
@@ -452,6 +455,7 @@ impl HmdsState {
                 (now - 5, now - 5 + 259_200)
             },
             next_hmds_query_id: 1000,
+            next_rtbar_id: 0,
             disconnected: false,
             pending_historical: Vec::new(),
             pending_head_ts: Vec::new(),
@@ -1134,6 +1138,10 @@ impl HmdsState {
             let subs: Vec<(ReqId, f64)> = self.rtbar_subs.iter()
                 .filter(|s| farm == super::pool::PRIMARY_HMDS && s.ticker_id == Some(ticker_id))
                 .map(|s| (s.req_id, s.min_tick)).collect();
+            // A bar of quotes has no volume, average price or trade count:
+            // -1 each (captured 05/10/2026, MIDPOINT).
+            let trades = self.rtbar_subs.iter().find(|s| s.ticker_id == Some(ticker_id))
+                .is_none_or(|s| matches!(s.data, "Last" | "AggLast"));
             let live_tick = self.live_bars.iter()
                 .find(|l| l.farm == farm && l.ticker_id == Some(ticker_id))
                 .map(|l| l.min_tick);
@@ -1146,6 +1154,9 @@ impl HmdsState {
             if let Some(&(_, min_tick)) = subs.first() {
                 if let Some(mut bar) = crate::control::historical::decode_bar_payload(payload, min_tick) {
                     bar.timestamp = timestamp;
+                    if !trades {
+                        (bar.volume, bar.wap, bar.count) = (-1.0, -1.0, -1);
+                    }
                     for &(req_id, _) in &subs {
                         shared.market.push_real_time_bar(req_id, bar);
                     }
@@ -2266,7 +2277,7 @@ impl HmdsState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn send_realtime_bar_subscribe(&mut self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, _symbol: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
+    pub(crate) fn send_realtime_bar_subscribe(&mut self, req_id: ReqId, con_id: i64, sec_type: &str, exchange: &str, symbol: &str, what_to_show: &str, use_rth: bool, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState, shared: &SharedState) {
         // The reference checks, in its order (ibx#454): whatToShow (321),
         // a request id already streaming (102), the request limit (456).
         if crate::control::historical::realtime_bar_data(what_to_show).is_none() {
@@ -2304,10 +2315,10 @@ impl HmdsState {
             self.rtbar_subs.push(RtBarSub { query_id: String::new(), req_id, con_id, data, use_rth, ticker_id, min_tick });
             return;
         }
-        let qid = self.next_hmds_query_id;
-        self.next_hmds_query_id += 1;
-        let query_id = format!("rt_{}", qid);
-        let xml = crate::control::historical::build_realtime_bar_xml(&query_id, con_id, sec_type, exchange, what_to_show, use_rth);
+        self.next_rtbar_id += 1;
+        let query_id = format!("realTime{}", self.next_rtbar_id);
+        let full_id = crate::control::historical::realtime_bar_query_id(&query_id, symbol, exchange, what_to_show);
+        let xml = crate::control::historical::build_realtime_bar_xml(&full_id, con_id, sec_type, exchange, what_to_show, use_rth);
         if let Some(conn) = hmds_conn.as_mut() {
             let ts = chrono_free_timestamp();
             let _ = super::pool::send_plain_on(conn, &[

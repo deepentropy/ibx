@@ -486,6 +486,50 @@ impl EClient {
             }
         }
 
+        // Drain historical ticks -> the official tick objects (ibx#432),
+        // before the tick-by-tick ticks: the past ticks of a tick-by-tick
+        // request come before the ticks held for them (05/10/2026).
+        let hist_ticks = shared.reference.drain_historical_ticks();
+        for (req_id, data, _what, done) in hist_ticks {
+            use super::super::tick_types::{HistoricalTick, HistoricalTickBidAsk, HistoricalTickLast, TickAttribBidAsk, TickAttribLast};
+            match data {
+                crate::types::HistoricalTickData::Midpoint(ticks) => {
+                    let objs = ticks.iter().map(|t| Py::new(py, HistoricalTick { time: t.time, price: t.price, size: t.size }))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    let list = pyo3::types::PyList::new(py, objs)?;
+                    call_wrapper!(self.wrapper, py, "historical_ticks", (req_id, list, done));
+                }
+                crate::types::HistoricalTickData::Last(ticks) => {
+                    let objs = ticks.iter().map(|t| {
+                        let attrib = Py::new(py, TickAttribLast {
+                            past_limit: t.tick_attrib_last.past_limit,
+                            unreported: t.tick_attrib_last.unreported,
+                        })?;
+                        Py::new(py, HistoricalTickLast {
+                            time: t.time, tick_attrib_last: attrib, price: t.price, size: t.size,
+                            exchange: t.exchange.clone(), special_conditions: t.special_conditions.clone(),
+                        })
+                    }).collect::<PyResult<Vec<_>>>()?;
+                    let list = pyo3::types::PyList::new(py, objs)?;
+                    call_wrapper!(self.wrapper, py, "historical_ticks_last", (req_id, list, done));
+                }
+                crate::types::HistoricalTickData::BidAsk(ticks) => {
+                    let objs = ticks.iter().map(|t| {
+                        let attrib = Py::new(py, TickAttribBidAsk {
+                            bid_past_low: t.tick_attrib_bid_ask.bid_past_low,
+                            ask_past_high: t.tick_attrib_bid_ask.ask_past_high,
+                        })?;
+                        Py::new(py, HistoricalTickBidAsk {
+                            time: t.time, tick_attrib_bid_ask: attrib, price_bid: t.price_bid, price_ask: t.price_ask,
+                            size_bid: t.size_bid, size_ask: t.size_ask,
+                        })
+                    }).collect::<PyResult<Vec<_>>>()?;
+                    let list = pyo3::types::PyList::new(py, objs)?;
+                    call_wrapper!(self.wrapper, py, "historical_ticks_bid_ask", (req_id, list, done));
+                }
+            }
+        }
+
         // Tick-by-tick requests that ended with an error (10189, 10190):
         // the engine already let them go (ibx#455).
         for (req_id, code, text) in shared.market.drain_tbt_errors() {
@@ -806,48 +850,6 @@ impl EClient {
             }).collect();
             let py_list = pyo3::types::PyList::new(py, tuples)?;
             call_wrapper!(self.wrapper, py, "histogram_data", (req_id, py_list));
-        }
-
-        // Drain historical ticks -> the official tick objects (ibx#432)
-        let hist_ticks = shared.reference.drain_historical_ticks();
-        for (req_id, data, _what, done) in hist_ticks {
-            use super::super::tick_types::{HistoricalTick, HistoricalTickBidAsk, HistoricalTickLast, TickAttribBidAsk, TickAttribLast};
-            match data {
-                crate::types::HistoricalTickData::Midpoint(ticks) => {
-                    let objs = ticks.iter().map(|t| Py::new(py, HistoricalTick { time: t.time, price: t.price, size: t.size }))
-                        .collect::<PyResult<Vec<_>>>()?;
-                    let list = pyo3::types::PyList::new(py, objs)?;
-                    call_wrapper!(self.wrapper, py, "historical_ticks", (req_id, list, done));
-                }
-                crate::types::HistoricalTickData::Last(ticks) => {
-                    let objs = ticks.iter().map(|t| {
-                        let attrib = Py::new(py, TickAttribLast {
-                            past_limit: t.tick_attrib_last.past_limit,
-                            unreported: t.tick_attrib_last.unreported,
-                        })?;
-                        Py::new(py, HistoricalTickLast {
-                            time: t.time, tick_attrib_last: attrib, price: t.price, size: t.size,
-                            exchange: t.exchange.clone(), special_conditions: t.special_conditions.clone(),
-                        })
-                    }).collect::<PyResult<Vec<_>>>()?;
-                    let list = pyo3::types::PyList::new(py, objs)?;
-                    call_wrapper!(self.wrapper, py, "historical_ticks_last", (req_id, list, done));
-                }
-                crate::types::HistoricalTickData::BidAsk(ticks) => {
-                    let objs = ticks.iter().map(|t| {
-                        let attrib = Py::new(py, TickAttribBidAsk {
-                            bid_past_low: t.tick_attrib_bid_ask.bid_past_low,
-                            ask_past_high: t.tick_attrib_bid_ask.ask_past_high,
-                        })?;
-                        Py::new(py, HistoricalTickBidAsk {
-                            time: t.time, tick_attrib_bid_ask: attrib, price_bid: t.price_bid, price_ask: t.price_ask,
-                            size_bid: t.size_bid, size_ask: t.size_ask,
-                        })
-                    }).collect::<PyResult<Vec<_>>>()?;
-                    let list = pyo3::types::PyList::new(py, objs)?;
-                    call_wrapper!(self.wrapper, py, "historical_ticks_bid_ask", (req_id, list, done));
-                }
-            }
         }
 
         // Drain real-time bars -> real_time_bar

@@ -209,6 +209,9 @@ impl EClient {
                 return Ok(());
             }
         };
+        if contract.con_id == 0 {
+            return self.core.register_tbt_by_symbol(&self.control_tx, req_id, contract, tbt_type, number_of_ticks, ignore_size);
+        }
         self.core.register_tbt(
             &self.shared, &self.control_tx, req_id,
             contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
@@ -262,7 +265,9 @@ impl EClient {
         _bar_size: i32, what_to_show: &str, use_rth: bool,
     ) -> Result<(), String> {
         if !crate::client_core::ClientCore::ids_fit("req_real_time_bars", &[req_id, contract.con_id]) { return Ok(()); }
-        self.send(ControlCommand::SubscribeRealTimeBar {
+        // A contract without a conId is looked up first, as the reference
+        // does (captured 05/10/2026).
+        self.send(crate::client_core::ClientCore::resolve_first(req_id, contract, ControlCommand::SubscribeRealTimeBar {
             req_id,
             con_id: contract.con_id,
             symbol: contract.symbol.clone(),
@@ -270,7 +275,7 @@ impl EClient {
             exchange: contract.exchange.clone(),
             what_to_show: what_to_show.into(),
             use_rth,
-        })
+        }))
     }
 
     /// Cancel real-time bars. Matches `cancelRealTimeBars` in C++.

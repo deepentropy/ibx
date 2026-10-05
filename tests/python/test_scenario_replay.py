@@ -30,8 +30,8 @@ def contract_dict(c):
 
 
 ORDER_FIELDS = ["action", "totalQuantity", "orderType", "lmtPrice", "auxPrice", "tif", "ocaGroup", "orderRef",
-                "parentId", "outsideRth", "goodAfterTime", "goodTillDate", "account", "trailingPercent", "whatIf",
-                "permId", "clientId"]
+                "parentId", "outsideRth", "goodAfterTime", "goodTillDate", "account", "trailingPercent", "trailStopPrice",
+                "whatIf", "permId", "clientId"]
 
 
 def order_dict(o):
@@ -121,6 +121,27 @@ class Recorder(EWrapper):
     def historical_data_end(self, req_id, start, end):
         self._add("historicalDataEnd", req_id, start, end)
 
+    def tick_by_tick_all_last(self, req_id, tick_type, time, price, size, attrib, exchange, special):
+        self._add("tickByTickAllLast", req_id, tick_type, time, price, size,
+                  {"pastLimit": attrib.pastLimit, "unreported": attrib.unreported}, exchange, special)
+
+    def tick_by_tick_bid_ask(self, req_id, time, bid, ask, bid_size, ask_size, attrib):
+        self._add("tickByTickBidAsk", req_id, time, bid, ask, bid_size, ask_size,
+                  {"bidPastLow": attrib.bidPastLow, "askPastHigh": attrib.askPastHigh})
+
+    def tick_by_tick_mid_point(self, req_id, time, mid):
+        self._add("tickByTickMidPoint", req_id, time, mid)
+
+    def historical_ticks_last(self, req_id, ticks, done):
+        self._add("historicalTicksLast", req_id, [{
+            "time": t.time, "price": t.price, "size": t.size, "exchange": t.exchange,
+            "specialConditions": t.specialConditions,
+            "tickAttribLast": {"pastLimit": t.tickAttribLast.pastLimit, "unreported": t.tickAttribLast.unreported},
+        } for t in ticks], done)
+
+    def real_time_bar(self, req_id, time, open_, high, low, close, volume, wap, count):
+        self._add("realtimeBar", req_id, time, open_, high, low, close, volume, wap, count)
+
 
 def make_contract(q):
     c = Contract()
@@ -192,6 +213,18 @@ class Driver:
             c.cancel_positions()
         elif name == "REQ_CONTRACT_DATA":
             c.req_contract_details(rid, make_contract(q["contract"]))
+        elif name == "REQ_TICK_BY_TICK_DATA":
+            c.req_tick_by_tick_data(rid, make_contract(q["contract"]), q.get("tickType", ""), q.get("numberOfTicks", 0),
+                                    q.get("ignoreSize", False))
+        elif name == "CANCEL_TICK_BY_TICK_DATA":
+            c.cancel_tick_by_tick_data(rid)
+        elif name == "REQ_REAL_TIME_BARS":
+            c.req_real_time_bars(rid, make_contract(q["contract"]), q.get("barSize", 5), q.get("whatToShow", ""),
+                                 int(q.get("useRTH", False)), [])
+        elif name == "CANCEL_REAL_TIME_BARS":
+            c.cancel_real_time_bars(rid)
+        elif name == "REQ_OPEN_ORDERS":
+            c.req_open_orders()
         else:
             return False
         return True
@@ -358,3 +391,38 @@ def test_market_data_errors():
     theirs = assert_same(out, keep=lambda l: not (l.startswith("tickString|") and l.split("|")[2] in ("32", "33")))
     assert any("|354|" in l and l.endswith("7203 TSEJ (7203.T) /TOP/ALL") for l in theirs)
     assert any(l.startswith("error|9654|10167|") for l in theirs)
+
+
+# Tick-by-tick types, past ticks, ignoreSize, EUR.USD (the reference's query
+# on the cash farm), an unknown type (05/10/2026, ibx#404, ibx#455), as the
+# Rust test.
+def test_tick_by_tick_types():
+    out = replay("20261005/b2_tbt", hmds_farms=["cashfarm"])
+    theirs = assert_same(out)
+    assert any(l.startswith("historicalTicksLast|9605|") for l in theirs)
+    assert any(l.startswith("tickByTickMidPoint|9608|") for l in theirs)
+
+
+def rtbar_wap(line):
+    """The average price of a real-time bar to 12 decimals (one AXTI bar of
+    the reference is one unit in the last place off), as the Rust test."""
+    f = line.split("|")
+    if f[0] == "realtimeBar" and len(f) == 10:
+        f[8] = f"{float(f[8]):.12f}"
+    return "|".join(f)
+
+
+# Real-time bars shared by four requests, empty bars, the cancel of one
+# (05/10/2026, ibx#454).
+def test_real_time_bars_shared():
+    out = replay("20261005/b2_rtbars")
+    theirs = assert_same(out, mask=rtbar_wap)
+    assert sum(l.startswith("realtimeBar|9642|") for l in theirs) > 3
+
+
+# Plain TRAIL orders: openOrder shows the stop price each report gives
+# (05/10/2026, ibx#491).
+def test_plain_trail_follows_the_server():
+    out = replay("20261005/b2_trail", compare=["order"])
+    theirs = assert_same(out)
+    assert any("trailStopPrice=775.06" in l for l in theirs)

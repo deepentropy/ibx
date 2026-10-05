@@ -425,6 +425,8 @@ pub(crate) fn request_with_con_id(mut request: crate::types::ControlCommand, con
         | C::FetchHistoricalTicks { con_id: c, .. }
         | C::FetchHistoricalSchedule { con_id: c, .. }
         | C::FetchFundamentalData { con_id: c, .. }
+        | C::SubscribeTbt { con_id: c, .. }
+        | C::SubscribeRealTimeBar { con_id: c, .. }
         | C::CalcOption { con_id: c, .. } => *c = con_id,
         _ => {}
     }

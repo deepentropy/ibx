@@ -213,6 +213,42 @@ pub fn canonical(cb: &Value) -> Option<String> {
             )
         }
         "historicalDataEnd" => format!("historicalDataEnd|{}|{}|{}", i(1), s(2), s(3)),
+        // The attributes as a mask: 2 past limit (bid past low), 4
+        // unreported (ask past high).
+        "tickByTickAllLast" => {
+            let at = &a[6];
+            let flag = |k: &str| at[k].as_bool().unwrap_or(false);
+            format!(
+                "tickByTickAllLast|{}|{}|{}|{}|{}|{}|{}|{}",
+                i(1), i(2), i(3), n(num(&a[4])), n(num(&a[5])), attr_mask(false, flag("pastLimit"), flag("unreported")), s(7), s(8),
+            )
+        }
+        "tickByTickBidAsk" => {
+            let at = &a[7];
+            let flag = |k: &str| at[k].as_bool().unwrap_or(false);
+            format!(
+                "tickByTickBidAsk|{}|{}|{}|{}|{}|{}|{}",
+                i(1), i(2), n(num(&a[3])), n(num(&a[4])), n(num(&a[5])), n(num(&a[6])),
+                attr_mask(false, flag("bidPastLow"), flag("askPastHigh")),
+            )
+        }
+        "tickByTickMidPoint" => format!("tickByTickMidPoint|{}|{}|{}", i(1), i(2), n(num(&a[3]))),
+        "historicalTicksLast" => {
+            let rows: Vec<String> = a[2].as_array().into_iter().flatten().map(|t| {
+                let at = &t["tickAttribLast"];
+                let flag = |k: &str| at[k].as_bool().unwrap_or(false);
+                format!(
+                    "{}:{}:{}:{}:{}:{}", t["time"].as_i64().unwrap_or(0), n(num(&t["price"])), n(num(&t["size"])),
+                    attr_mask(false, flag("pastLimit"), flag("unreported")), t["exchange"].as_str().unwrap_or(""),
+                    t["specialConditions"].as_str().unwrap_or(""),
+                )
+            }).collect();
+            format!("historicalTicksLast|{}|{}|{}", i(1), rows.join(","), a[3].as_bool().unwrap_or(false))
+        }
+        "realtimeBar" => format!(
+            "realtimeBar|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            i(1), i(2), n(num(&a[3])), n(num(&a[4])), n(num(&a[5])), n(num(&a[6])), n(num(&a[7])), n(num(&a[8])), i(9),
+        ),
         "headTimestamp" => format!("headTimestamp|{}|{}", i(1), s(2)),
         "accountSummary" => format!("accountSummary|{}|{}|{}|{}|{}", i(1), s(2), s(3), s(4), s(5)),
         "accountSummaryEnd" => format!("accountSummaryEnd|{}", i(1)),
@@ -233,13 +269,22 @@ pub fn perm(v: i64) -> &'static str {
     if v == 0 { "0" } else { "{perm}" }
 }
 
-/// The fields of an openOrder the comparison covers. trailStopPrice is
-/// left out: ibx#491 (the reference shows the stop the server reports).
+/// The fields of an openOrder the comparison covers. trailStopPrice only
+/// for a plain TRAIL order, whose stop is the one the server reports
+/// (6117, captured 05/10/2026); the reference shows one for other orders
+/// too that is not read yet (a LMT at 272.86 shows 273.86, ibx#491): see
+/// [`compared_field`].
 pub const OPEN_ORDER_FIELDS: &[&str] = &[
     "action", "totalQuantity", "orderType", "lmtPrice", "auxPrice", "tif", "ocaGroup", "orderRef",
     "parentId", "outsideRth", "goodAfterTime", "goodTillDate", "account", "trailingPercent",
-    "whatIf", "permId", "clientId",
+    "trailStopPrice", "whatIf", "permId", "clientId",
 ];
+
+/// Whether a field of [`OPEN_ORDER_FIELDS`] is compared for an order of
+/// this type.
+pub fn compared_field(field: &str, order_type: &str) -> bool {
+    field != "trailStopPrice" || order_type == "TRAIL"
+}
 
 /// A price field of an openOrder: unset (the client library's MAX, ibx's
 /// 0 for trailingPercent) as one value.
@@ -263,7 +308,9 @@ pub fn open_order_line(id: i64, contract: &Value, order: &Value, state: &Value) 
             _ => if v.is_null() { "0".into() } else { n(num(v)) },
         }
     };
-    let fields: Vec<String> = OPEN_ORDER_FIELDS.iter().map(|k| format!("{k}={}", field(k))).collect();
+    let order_type = order["orderType"].as_str().unwrap_or("");
+    let fields: Vec<String> = OPEN_ORDER_FIELDS.iter().filter(|k| compared_field(k, order_type))
+        .map(|k| format!("{k}={}", field(k))).collect();
     format!(
         "openOrder|{id}|{}|{}|{}|{}|{}",
         contract["conId"].as_i64().unwrap_or(0), contract["symbol"].as_str().unwrap_or(""),

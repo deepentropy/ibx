@@ -1481,9 +1481,10 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::UnsubscribeTbt { req_id } => {
-                    // A request waiting for its contract's definition is
-                    // never sent.
+                    // A request waiting for its contract's definition, or
+                    // for its contract's lookup, is never sent.
                     self.context.def_parked.retain(|(_, c)| !matches!(c, ControlCommand::SubscribeTbt { req_id: r, .. } if *r == req_id));
+                    self.ccp.pending_resolves.retain(|p| !(p.req_id == req_id && matches!(p.request, ControlCommand::SubscribeTbt { .. })));
                     if let Some(instrument) = self.hmds.send_tbt_unsubscribe(req_id, Instant::now()) {
                         self.try_reclaim_instrument(instrument);
                     }
@@ -1736,6 +1737,9 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::CancelRealTimeBar { req_id } => {
+                    // A request waiting for its contract's lookup is never
+                    // sent.
+                    self.ccp.pending_resolves.retain(|p| !(p.req_id == req_id && matches!(p.request, ControlCommand::SubscribeRealTimeBar { .. })));
                     // The router's cancel once no request is left on it
                     // (ibx#454).
                     if let Some(tid) = self.hmds.end_rtbar(req_id) {
@@ -2548,6 +2552,7 @@ impl HotLoop {
         );
         self.poll_auth();
         self.poll_control_commands();
+        self.send_due_tbt_cancels(Instant::now());
         self.check_writes();
     }
 

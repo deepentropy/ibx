@@ -361,6 +361,18 @@ impl EClient {
             }
         }
 
+        // Historical ticks — route to the variant-specific callback (iso
+        // ibapi); before the tick-by-tick ticks, as the past ticks of a
+        // tick-by-tick request come before the ticks held for them
+        // (captured 05/10/2026, AllLast with ten past ticks).
+        for (req_id, data, _query_id, done) in self.shared.reference.drain_historical_ticks() {
+            match &data {
+                HistoricalTickData::Midpoint(_) => wrapper.historical_ticks(req_id, &data, done),
+                HistoricalTickData::Last(_) => wrapper.historical_ticks_last(req_id, &data, done),
+                HistoricalTickData::BidAsk(_) => wrapper.historical_ticks_bid_ask(req_id, &data, done),
+            }
+        }
+
         // Tick-by-tick requests that ended with an error (10189, 10190):
         // the engine already let them go (ibx#455).
         for (req_id, code, text) in self.shared.market.drain_tbt_errors() {
@@ -601,15 +613,6 @@ impl EClient {
         for (req_id, entries) in self.shared.reference.drain_histogram_data() {
             let items: Vec<(f64, i64)> = entries.iter().map(|e| (e.price, e.count)).collect();
             wrapper.histogram_data(req_id, &items);
-        }
-
-        // Historical ticks — route to the variant-specific callback (iso ibapi).
-        for (req_id, data, _query_id, done) in self.shared.reference.drain_historical_ticks() {
-            match &data {
-                HistoricalTickData::Midpoint(_) => wrapper.historical_ticks(req_id, &data, done),
-                HistoricalTickData::Last(_) => wrapper.historical_ticks_last(req_id, &data, done),
-                HistoricalTickData::BidAsk(_) => wrapper.historical_ticks_bid_ask(req_id, &data, done),
-            }
         }
 
         // Real-time bars

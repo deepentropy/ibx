@@ -298,6 +298,9 @@ pub struct Options {
     /// Other market data farms of the recording played on the farm link
     /// (see [`Options::farms`]).
     pub farms: Vec<&'static str>,
+    /// Farms of the recording played on the historical link (see
+    /// [`Options::hmds_farms`]).
+    pub hmds_farms: Vec<&'static str>,
 }
 
 impl Default for Options {
@@ -313,6 +316,7 @@ impl Default for Options {
             skip_frame: |_| false,
             replies: Vec::new(),
             farms: Vec::new(),
+            hmds_farms: Vec::new(),
         }
     }
 }
@@ -373,6 +377,16 @@ impl Options {
     /// are left out.
     pub fn farms(mut self, farms: &[&'static str]) -> Self {
         self.farms = farms.to_vec();
+        self
+    }
+
+    /// Play the historical queries and answers of these farms of the
+    /// recording (tick-by-tick data of a currency pair on the cash farm)
+    /// on the historical link: without the logon's routing tables ibx
+    /// sends every historical query there. Their session frames are left
+    /// out.
+    pub fn hmds_farms(mut self, farms: &[&'static str]) -> Self {
+        self.hmds_farms = farms.to_vec();
         self
     }
 }
@@ -619,7 +633,9 @@ impl Run<'_> {
     /// The link of a recorded connection, with the other farms played on
     /// the farm link.
     fn link(&self, conn: &str) -> Option<Link> {
-        Link::of(conn).or_else(|| self.opts.farms.contains(&conn).then_some(Link::Farm))
+        Link::of(conn)
+            .or_else(|| self.opts.farms.contains(&conn).then_some(Link::Farm))
+            .or_else(|| self.opts.hmds_farms.contains(&conn).then_some(Link::Hmds))
     }
 
     /// A recorded market data frame of the farm link (the primary farm, or
@@ -961,6 +977,9 @@ impl Run<'_> {
         };
         // Another farm's session frames: its logon is not replayed.
         if link == Link::Farm && r.conn != "usfarm" && !matches!(r.msg.as_str(), "Q" | "L" | "P" | "G" | "3" | "Y" | "Z") {
+            return;
+        }
+        if link == Link::Hmds && r.conn != "ushmds" && !matches!(r.msg.as_str(), "W" | "Z" | "E") && !r.raw.starts_with(b"8=FIXCOMP") {
             return;
         }
         match link {

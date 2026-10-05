@@ -190,6 +190,18 @@ pub fn make(c: &EClient, r: &Rec, rec: &mut Recorder) -> bool {
         }
         "CANCEL_MKT_DEPTH" => { let _ = c.cancel_mkt_depth(id); }
         "REQ_CONTRACT_DATA" => { let _ = c.req_contract_details(id, &contract_of(&q["contract"])); }
+        "REQ_TICK_BY_TICK_DATA" => {
+            let contract = contract_of(&q["contract"]);
+            let _ = c.req_tick_by_tick_data(id, &contract, &st("tickType"), q["numberOfTicks"].as_i64().unwrap_or(0) as i32,
+                q["ignoreSize"].as_bool().unwrap_or(false));
+        }
+        "CANCEL_TICK_BY_TICK_DATA" => { let _ = c.cancel_tick_by_tick_data(id); }
+        "REQ_REAL_TIME_BARS" => {
+            let contract = contract_of(&q["contract"]);
+            let _ = c.req_real_time_bars(id, &contract, q["barSize"].as_i64().unwrap_or(5) as i32, &st("whatToShow"),
+                q["useRTH"].as_bool().unwrap_or(false));
+        }
+        "CANCEL_REAL_TIME_BARS" => { let _ = c.cancel_real_time_bars(id); }
         "REQ_EXECUTIONS" => {
             let f = &q["executionFilter"];
             let fs = |k: &str| f[k].as_str().unwrap_or("").to_string();

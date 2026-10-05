@@ -408,3 +408,37 @@ fn market_data_errors() {
         .keep(|l| !l.starts_with("tickString|9650|32|") && !l.starts_with("tickString|9650|33|")
             && !l.starts_with("tickString|9651|32|") && !l.starts_with("tickString|9651|33|")));
 }
+
+// ── Tick-by-tick data, real-time bars, trailing stops (05/10/2026) ──
+
+// Tick-by-tick Last, AllLast, BidAsk, MidPoint and BidAsk with ignoreSize
+// of AAPL, AllLast with ten past ticks, EUR.USD BidAsk and MidPoint (the
+// reference's query on the cash farm), an unknown type (321) (ibx#404,
+// ibx#455).
+#[test]
+fn tick_by_tick_types() {
+    check("20261005/b2_tbt", Options::default().hmds_farms(&["cashfarm"]));
+}
+
+// Real-time bars of AAPL TRADES asked twice, MIDPOINT, AXTI TRADES (with
+// empty bars), then the cancel of the first (ibx#454). The average price
+// is compared to 12 decimals: one AXTI bar's differs by one unit in the
+// last place (84.90555555555557 for 84.90555555555555), an order of the
+// reference's arithmetic not read yet.
+#[test]
+fn real_time_bars_shared() {
+    check("20261005/b2_rtbars", Options::default().mask(|l| {
+        let mut f: Vec<String> = l.split('|').map(str::to_string).collect();
+        if f[0] == "realtimeBar" && f.len() == 10 && let Ok(w) = f[8].parse::<f64>() {
+            f[8] = format!("{w:.12}");
+        }
+        f.join("|")
+    }));
+}
+
+// Plain TRAIL orders, by amount and by percent: openOrder shows the stop
+// price each report gives (6117), as the market moves (ibx#491).
+#[test]
+fn plain_trail_follows_the_server() {
+    check("20261005/b2_trail", orders());
+}

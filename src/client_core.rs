@@ -996,6 +996,9 @@ fn news_key_covers(key: &str, provider: &str) -> bool {
     key.is_empty() || key.split(',').any(|code| code.eq_ignore_ascii_case(provider))
 }
 
+/// The slot of a tick-by-tick request whose contract is being looked up.
+pub const NO_SLOT: InstrumentId = InstrumentId::MAX;
+
 /// The generic ticks of a market data request (ibx#450): request codes,
 /// and the exchange and security type it was asked with.
 #[derive(Debug, Clone)]
@@ -1416,6 +1419,11 @@ pub fn reported_unset_values(order: &mut ApiOrder) {
 }
 
 fn reported_trail_limit(order: &mut ApiOrder, reported: &ApiOrder) {
+    // A plain TRAIL shows the stop price the server reports too (captured
+    // 05/10/2026: 6117 775.06, 775.05, ... as the market moved).
+    if order.order_type.eq_ignore_ascii_case("TRAIL") && reported.trail_stop_price != f64::MAX {
+        order.trail_stop_price = reported.trail_stop_price;
+    }
     if !order.order_type.eq_ignore_ascii_case("TRAIL LIMIT") { return; }
     if reported.lmt_price != 0.0 { order.lmt_price = reported.lmt_price; }
     if reported.lmt_price_offset != f64::MAX { order.lmt_price_offset = reported.lmt_price_offset; }
@@ -2387,7 +2395,7 @@ impl ClientCore {
                 sec_type)));
         }
         let Some(tbt_type) = TbtType::from_api(tick_type) else {
-            return Err((321, "Error validating request.-'bT' : cause - Tick-by-tick data type is incorrect/not set".to_string()));
+            return Err((321, "Error validating request.-'bT' : cause - Tick-by-tick data type is incorrect/not set.".to_string()));
         };
         let (_, off) = shared.reference.tick_by_tick_limits();
         if off {
@@ -2431,10 +2439,30 @@ impl ClientCore {
         Ok(instrument_id)
     }
 
+    /// A tick-by-tick request for a contract given without a conId: the
+    /// engine looks the contract up first, as the reference does (captured
+    /// 05/10/2026: a symbol lookup, then the query with the conId found);
+    /// the request has no slot until then.
+    pub fn register_tbt_by_symbol(
+        &self, control_tx: &Sender<ControlCommand>, req_id: i64, contract: &crate::api::types::Contract,
+        tbt_type: TbtType, number_of_ticks: i32, ignore_size: bool,
+    ) -> Result<(), String> {
+        let request = ControlCommand::SubscribeTbt {
+            req_id, con_id: 0, symbol: contract.symbol.clone(), exchange: contract.exchange.clone(),
+            sec_type: contract.sec_type.clone(), tbt_type, number_of_ticks, ignore_size, reply_tx: None,
+        };
+        control_tx.send(Self::resolve_first(req_id, contract, request)).map_err(|e| format!("Engine stopped: {}", e))?;
+        self.tbt_reqs.lock().unwrap().insert(req_id, (NO_SLOT, 0, tbt_type));
+        Ok(())
+    }
+
     /// End a tick-by-tick request: its instrument, None when unknown. The
     /// conId cache keeps the slot while market data uses it.
     pub fn unregister_tbt(&self, req_id: i64) -> Option<InstrumentId> {
         let (instrument, ..) = self.tbt_reqs.lock().unwrap().remove(&req_id)?;
+        if instrument == NO_SLOT {
+            return Some(instrument);
+        }
         let still_used = self.instrument_to_req.lock().unwrap().contains_key(&instrument)
             || self.tbt_reqs.lock().unwrap().values().any(|(i, ..)| *i == instrument);
         if !still_used {
@@ -3408,13 +3436,23 @@ impl ClientCore {
             let orders = self.open_orders.lock().unwrap();
             for (&oid, o) in orders.iter() {
                 if is_open_status(&o.status) {
-                    let mut contract = if o.contract.con_id != 0 {
-                        self.get_contract(o.contract.con_id, shared).unwrap_or_else(|| o.contract.clone())
+                    let info = shared.orders.get_order_info(oid);
+                    // An order placed without a conId shows the contract the
+                    // server reported (captured 05/10/2026, reqOpenOrders of
+                    // two TRAIL orders on SPY placed by symbol).
+                    let con_id = if o.contract.con_id != 0 {
+                        o.contract.con_id
+                    } else {
+                        info.as_ref().map_or(0, |i| i.contract.con_id)
+                    };
+                    let mut contract = if con_id != 0 {
+                        self.get_contract(con_id, shared)
+                            .or_else(|| info.as_ref().map(|i| i.contract.clone()).filter(|c| c.con_id == con_id))
+                            .unwrap_or_else(|| o.contract.clone())
                     } else {
                         o.contract.clone()
                     };
                     let mut order = o.order.clone();
-                    let info = shared.orders.get_order_info(oid);
                     if let Some(info) = &info {
                         reported_trail_limit(&mut order, &info.order);
                     }
