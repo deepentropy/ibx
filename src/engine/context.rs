@@ -87,6 +87,55 @@ pub(crate) fn book_bucket(perm_id: OrderId, table: usize) -> usize {
     ((h ^ (h >> 16)) as usize) & (table - 1)
 }
 
+/// The reference's order id generator (`jclient.jv.b(String)`): the
+/// server's order id of each new order and preview, the id part of its
+/// ClOrdID and the permId the client sees. The API order id goes in 6121
+/// and is not this id. The first id has random high bits and the seconds
+/// of the clock in its low 20 bits (`jfix.cy.a(String)`); then it counts
+/// up, and starts again from a new first id at an id the reference does
+/// not take (0 and the int bounds, `twslaunch.jutils.av.c(int)`).
+pub(crate) struct OrderIdGenerator {
+    next: i32,
+    rng: u64,
+}
+
+impl OrderIdGenerator {
+    pub(crate) fn new() -> Self {
+        Self { next: 0, rng: crate::engine::bracket::seed() }
+    }
+
+    /// The next id; the caller skips the ids in use.
+    pub(crate) fn next(&mut self) -> i32 {
+        if matches!(self.next, 0 | i32::MAX | i32::MIN) {
+            self.next = self.first();
+        }
+        let id = self.next;
+        self.next = self.next.wrapping_add(1);
+        id
+    }
+
+    /// Start the ids at `first` (tests).
+    #[cfg(test)]
+    pub(crate) fn start_at(&mut self, first: i32) {
+        self.next = first;
+    }
+
+    /// `Math.abs((random & 0xFFF00000) | (seconds & 0xFFFFF))`.
+    fn first(&mut self) -> i32 {
+        // xorshift64
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng = x;
+        let random = (x >> 32) as u32;
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()) as u32;
+        (((random & 0xFFF0_0000) | (secs & 0x000F_FFFF)) as i32).wrapping_abs()
+    }
+}
+
 /// What the server last reported for a TRAIL LIMIT order. The offset is
 /// restated on its replace; all three fill the reports that omit them and
 /// show in openOrder (ib-agent#194, ib-agent#195, ibx#491). 0 = not reported.
@@ -114,9 +163,16 @@ pub struct Context {
     /// it appeared on the wire. Used as the OrigClOrdID on cancel/modify so that
     /// legacy orders recorded without a `.{ver}` suffix still match — see ibx#179.
     pub(crate) last_clord: HashMap<OrderId, String>,
-    /// Orders of an earlier session kept under their API order id: the
-    /// server's order id to that key (ibx#466).
+    /// The server's order id (the id part of the ClOrdID) of each order
+    /// held under another key, to that key: the orders of this session,
+    /// kept under their API order id (ibx#466), and the orders of an
+    /// earlier session kept under the API order id their report gives.
     pub(crate) recovered_keys: HashMap<OrderId, OrderId>,
+    /// The other way: the key of an order to its server's order id.
+    pub(crate) server_ids: HashMap<OrderId, OrderId>,
+    /// The reference's order id generator: the server's order id of each
+    /// new order and preview.
+    pub(crate) order_ids: OrderIdGenerator,
     /// ClOrdID of the cancel sent for each order, until the order ends or
     /// the cancel is rejected. Reports carrying it are about the cancel, not
     /// a new version of the order (ibx#464).
@@ -160,8 +216,6 @@ pub struct Context {
     pub(crate) combo_send: Option<crate::engine::combo::ComboSend>,
     /// The API client id the new orders carry (ibx#466).
     pub(crate) api_client_id: i64,
-    /// Sequence of the what-if ClOrdIDs of this session.
-    pub(crate) next_what_if: u32,
     /// Requests with outside-RTH waiting for their lookup, in order; later
     /// requests of the same order wait behind them.
     pub(crate) rth_parked: Vec<OrderRequest>,
@@ -251,6 +305,8 @@ impl Context {
             modify_versions: HashMap::new(),
             last_clord: HashMap::new(),
             recovered_keys: HashMap::new(),
+            server_ids: HashMap::new(),
+            order_ids: OrderIdGenerator::new(),
             cancel_clord: HashMap::new(),
             status_queries: std::collections::HashSet::new(),
             trail_limit_reported: HashMap::new(),
@@ -268,7 +324,6 @@ impl Context {
             combos: Default::default(),
             combo_send: None,
             api_client_id: 0,
-            next_what_if: 0,
             scale_us_lots: false,
             bracket_keys: HashMap::new(),
             bracket_next_child: HashMap::new(),
@@ -302,7 +357,9 @@ impl Context {
             account: AccountState::default(),
             clock: Clock::new(),
             next_order_id: {
-                // Epoch-based to avoid "Duplicate ID" across IB sessions
+                // The engine's own orders (not the API's): epoch-based
+                // keys, above the API's int range, so they never take an
+                // API order id. Their ClOrdIDs come from `order_ids`.
                 let secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -1216,13 +1273,47 @@ impl Context {
         self.book_peak = self.book_peak.max(self.open_orders.len());
     }
 
-    /// The server's id of an order, the id part of its ClOrdID: the order
-    /// id, or for an order of another session kept under its API order id,
-    /// the id the server holds it under (ibx#466).
+    /// The server's id of an order, the id part of its ClOrdID: the id
+    /// the server holds it under when the order is kept under another key
+    /// (an order of this session, or of another session kept under its API
+    /// order id, ibx#466), else the order id itself.
     pub(crate) fn server_id(&self, order_id: OrderId) -> OrderId {
-        self.recovered_keys.iter()
-            .find(|(_, key)| **key == order_id)
-            .map_or(order_id, |(&server, _)| server)
+        self.server_ids.get(&order_id).copied().unwrap_or(order_id)
+    }
+
+    /// The key an order is held under for the server's id of its ClOrdID.
+    pub(crate) fn key_of(&self, server_id: OrderId) -> OrderId {
+        self.recovered_keys.get(&server_id).copied().unwrap_or(server_id)
+    }
+
+    /// Hold the order of server id `server` under `key`.
+    pub(crate) fn bind_server_id(&mut self, key: OrderId, server: OrderId) {
+        if key == server { return; }
+        self.recovered_keys.insert(server, key);
+        self.server_ids.insert(key, server);
+    }
+
+    /// A new order goes out under a server id of its own, from the
+    /// reference's order id generator (`jclient.jv.l()`); its API order id
+    /// stays its key. An order already held, or already given a server id,
+    /// keeps its id.
+    pub(crate) fn assign_server_id(&mut self, key: OrderId) {
+        if self.open_orders.contains_key(&key) || self.server_ids.contains_key(&key) {
+            return;
+        }
+        let server = self.new_server_id();
+        self.bind_server_id(key, server);
+    }
+
+    /// The next id of the generator that names no order held: the
+    /// reference skips the ids it gave (`jclient.jv.b(String)@34-59`).
+    pub(crate) fn new_server_id(&mut self) -> OrderId {
+        loop {
+            let id = OrderId::from(self.order_ids.next());
+            if !self.recovered_keys.contains_key(&id) && !self.open_orders.contains_key(&id) {
+                return id;
+            }
+        }
     }
 
     /// The parent and OCA group of a held order, when known.
@@ -1341,6 +1432,9 @@ impl Context {
             while self.finished_order_ids.len() > FINISHED_ORDERS_MAX {
                 if let Some(old) = self.finished_order_ids.pop_front() {
                     self.finished_orders.remove(&old);
+                    if let Some(server) = self.server_ids.remove(&old) {
+                        self.recovered_keys.remove(&server);
+                    }
                 }
             }
         }
@@ -1882,6 +1976,45 @@ mod tests {
         let mut ctx = Context::new();
         // Should not panic when order doesn't exist
         ctx.update_order_status(999, OrderStatus::Cancelled);
+    }
+
+    // ibx#466: the reference's order id generator (`jfix.cy.a(String)`,
+    // `jclient.jv.b(String)`): a positive first id, then one up per id; at
+    // an id the reference does not take (0, the int bounds) it starts
+    // again from a new first id.
+    #[test]
+    fn order_ids_count_up_from_a_positive_first_id() {
+        let mut ids = OrderIdGenerator::new();
+        let first = ids.next();
+        assert!(first > 0, "{first}");
+        assert_eq!(ids.next(), first.wrapping_add(1));
+        for bound in [i32::MAX, i32::MIN, 0] {
+            ids.start_at(bound);
+            let again = ids.next();
+            assert!(again > 0 && again != i32::MAX, "{bound}: {again}");
+        }
+    }
+
+    // ibx#466: a new order is held under its API order id and gets a
+    // server id of the generator, kept while it lives; an order held, or
+    // one that has a server id, keeps its id. The generator skips the ids
+    // of the orders held.
+    #[test]
+    fn a_new_order_gets_a_server_id_that_names_no_order_held() {
+        let mut ctx = Context::new();
+        ctx.order_ids.start_at(1_000_000_001);
+        ctx.insert_order(Order::new(1_000_000_001, 0, Side::Buy, 1, 100, b'2', b'0', 0));
+        ctx.bind_server_id(9, 1_000_000_002);
+        ctx.assign_server_id(5);
+        assert_eq!(ctx.server_id(5), 1_000_000_003);
+        assert_eq!(ctx.key_of(1_000_000_003), 5);
+        ctx.assign_server_id(5);
+        assert_eq!(ctx.server_id(5), 1_000_000_003, "kept");
+        ctx.insert_order(Order::new(6, 0, Side::Buy, 1, 100, b'2', b'0', 0));
+        ctx.assign_server_id(6);
+        assert_eq!(ctx.server_id(6), 6, "an order held keeps its id");
+        assert_eq!((ctx.key_of(1_000_000_002), ctx.server_id(9)), (9, 1_000_000_002));
+        assert_eq!(ctx.key_of(77), 77);
     }
 
     #[test]

@@ -555,6 +555,10 @@ pub struct OrderState {
     /// listings (`jclient.jv.w()`).
     book_seqs: Mutex<HashMap<OrderId, u64>>,
     book_peak: std::sync::atomic::AtomicUsize,
+    /// The highest API order id (6121) the server's reports gave for each
+    /// API client (6119): the ids a client used in earlier sessions, as far
+    /// as the server's replays show them.
+    reported_order_ids: Mutex<HashMap<i64, OrderId>>,
 }
 
 impl OrderState {
@@ -576,7 +580,21 @@ impl OrderState {
             api_order_ids: Mutex::new(HashMap::new()),
             book_seqs: Mutex::new(HashMap::new()),
             book_peak: std::sync::atomic::AtomicUsize::new(0),
+            reported_order_ids: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Note an API order id a report gave for an API client (engine side).
+    #[doc(hidden)] pub fn note_reported_order_id(&self, client_id: i64, order_id: OrderId) {
+        let mut ids = self.reported_order_ids.lock().unwrap();
+        let highest = ids.entry(client_id).or_insert(0);
+        *highest = (*highest).max(order_id);
+    }
+
+    /// The highest API order id the server's reports gave for an API
+    /// client, 0 for none.
+    pub fn reported_order_id(&self, client_id: i64) -> OrderId {
+        self.reported_order_ids.lock().unwrap().get(&client_id).copied().unwrap_or(0)
     }
 
     /// The API order id the client sees for an order: the engine's key,

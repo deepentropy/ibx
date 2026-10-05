@@ -1270,6 +1270,17 @@ impl OrderRequest {
         }
     }
 
+    /// The order ids of the new orders the request makes: none for a
+    /// cancel or a replace, the three orders of a bracket.
+    pub fn new_order_ids(&self) -> Vec<OrderId> {
+        match self {
+            Self::SubmitBracket { parent_id, tp_id, sl_id, .. } => vec![*parent_id, *tp_id, *sl_id],
+            Self::SubmitWhatIf { request } => request.new_order_ids(),
+            _ if self.new_order_qty().is_some() => vec![self.order_id()],
+            _ => Vec::new(),
+        }
+    }
+
     /// The quantity of a new order, fixed-point (QTY_SCALE); None for a
     /// cancel or a replace. A bracket gives its legs' quantity.
     pub fn new_order_qty(&self) -> Option<Qty> {

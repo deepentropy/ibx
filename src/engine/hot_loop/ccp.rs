@@ -207,6 +207,20 @@ fn report_api_order_id(parsed: &std::collections::HashMap<u32, String>) -> Order
         .unwrap_or(0)
 }
 
+/// Note the API order id (6121) of a report for its API client (6119, 0
+/// when absent): the reference keeps the highest order id each client used
+/// (`jextend.H.c(int)`), and moves it for every order it shows the client
+/// (`jextend.dL.c(List, int, jclient.pe, jfix.ct, String, Runnable)@1039`).
+/// Only positive ids: the reference keeps negative ones apart.
+fn note_reported_order_id(parsed: &std::collections::HashMap<u32, String>, shared: &SharedState) {
+    let id = report_api_order_id(parsed);
+    if id <= 0 || id >= i32::MAX as OrderId {
+        return;
+    }
+    let client = parsed.get(&6119).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    shared.orders.note_reported_order_id(client, id);
+}
+
 /// The execution of a fill report, as stored for `req_executions`.
 fn report_execution(
     parsed: &std::collections::HashMap<u32, String>,
@@ -246,6 +260,9 @@ fn parent_order_id(parsed: &std::collections::HashMap<u32, String>, context: &Co
     let Ok(id) = id_part.parse::<OrderId>() else {
         return 0;
     };
+    if context.recovered_keys.contains_key(&id) {
+        return context.key_of(id);
+    }
     let same_id = |clord: &String| clord.split('.').next() == Some(id_part);
     if context.order(id).is_some() || context.last_clord.get(&id).is_some_and(same_id) {
         return id;
@@ -1285,6 +1302,10 @@ impl CcpState {
             return;
         }
 
+        // The API order id the report gives for its client: the order ids
+        // a client used, for its next valid id (ibx#466).
+        note_reported_order_id(parsed, shared);
+
         // A what-if reply goes to the preview, before anything reads the
         // frame as an order: by the ClOrdID the preview was sent under, or
         // by a positive preview flag, as the reference routes it (ibx#462).
@@ -1306,7 +1327,7 @@ impl CcpState {
             let base = stripped.split('.').next().unwrap_or(stripped);
             base.parse::<OrderId>().ok()
         }).unwrap_or(0);
-        let mut clord_id = context.recovered_keys.get(&server_id).copied().unwrap_or(server_id);
+        let mut clord_id = context.key_of(server_id);
 
         // An order this session does not hold, reported working: an order
         // of another session or client, put in the book so it can be
@@ -1336,9 +1357,9 @@ impl CcpState {
             // taken when no order of this session has it.
             let api_id = parsed.get(&6121).and_then(|s| s.parse::<OrderId>().ok())
                 .filter(|&id| id != 0 && id != server_id && context.order(id).is_none()
-                    && !context.recovered_keys.values().any(|&k| k == id));
+                    && !context.server_ids.contains_key(&id));
             if let Some(api_id) = api_id {
-                context.recovered_keys.insert(server_id, api_id);
+                context.bind_server_id(api_id, server_id);
                 clord_id = api_id;
             }
             let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -2306,14 +2327,16 @@ impl CcpState {
         log::warn!("CancelReject: clord={} type={} code={} reason={}",
             clord, reject_type, reason_code, reason);
 
-        let Some((oid, version)) = clord.split_once('.')
+        let Some((server, version)) = clord.split_once('.')
             .and_then(|(id, ver)| Some((id.parse::<OrderId>().ok()?, ver.parse::<u32>().ok()?)))
         else { return };
+        // The order held under the server's id of the ClOrdID.
+        let oid = context.key_of(server);
         if version == 0 || context.modify_versions.get(&oid) != Some(&version) {
             log::info!("CancelReject: {} is not the current version of order {}, ignored", clord, oid);
             return;
         }
-        let lowered = format!("{}.{}", oid, version - 1);
+        let lowered = format!("{}.{}", server, version - 1);
         context.modify_versions.insert(oid, version - 1);
         // A refused modify had set the order's ClOrdID on record.
         if context.last_clord.get(&oid).map(String::as_str) == Some(clord) {
@@ -4607,6 +4630,55 @@ mod tests {
 
     fn pipe_frame(text: &str) -> Vec<u8> {
         text.replace('|', "\x01").into_bytes()
+    }
+
+    // ibx#466: an order of this session is held under its API order id and
+    // goes out under a server id of the order id generator. Its reports
+    // come under the server id: they reach the order, with that id as the
+    // permId; a refused cancel lowers the order's version and asks the
+    // status under the server id.
+    #[test]
+    fn reports_under_the_server_id_reach_the_order_of_its_api_id() {
+        use crate::types::OrderStatus;
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        context.bind_server_id(42, 1_000_000_007);
+        let working = exec_report_frame(&[(11, "1000000007.0"), (39, "0"), (150, "0"), (100, "ARCA"), (6121, "42"), (6119, "0")]);
+        ccp.handle_exec_report(&working, &mut context, &shared, &None, "");
+        assert_eq!(context.order(42).unwrap().status, OrderStatus::Submitted);
+        assert!(context.order(1_000_000_007).is_none());
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!((updates[0].order_id, updates[0].perm_id), (42, 1_000_000_007));
+        assert_eq!(context.last_clord.get(&42).map(String::as_str), Some("1000000007.0"));
+
+        context.modify_versions.insert(42, 1);
+        context.cancel_clord.insert(42, "1000000007.1".to_string());
+        let mut reject = std::collections::HashMap::new();
+        for (t, v) in [(35u32, "9"), (11, "1000000007.1"), (41, "1000000007.0"), (434, "1"), (102, "0")] {
+            reject.insert(t, v.to_string());
+        }
+        ccp.handle_cancel_reject(&reject, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
+        assert_eq!(context.modify_versions.get(&42), Some(&0));
+        assert!(!context.cancel_clord.contains_key(&42));
+        assert!(context.status_queries.contains(&42));
+    }
+
+    // ibx#466: the API order id of each report counts for its client's
+    // next valid id (`jextend.H.c(int)`): the highest positive id per
+    // client id (6119, 0 when absent); none for a report without 6121.
+    #[test]
+    fn reports_note_the_highest_api_order_id_of_their_client() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        for (id, client) in [("68", Some("198")), ("57", Some("198")), ("12", None), ("-3", Some("7")), ("2147483647", Some("7"))] {
+            let mut report = exec_report_frame(&[(11, "1500000000.0"), (39, "4"), (150, "4"), (6121, id)]);
+            if let Some(c) = client { report.insert(6119, c.to_string()); }
+            ccp.handle_exec_report(&report, &mut context, &shared, &None, "");
+        }
+        let no_id = exec_report_frame(&[(11, "1500000001.0"), (39, "4"), (150, "4"), (6119, "5")]);
+        ccp.handle_exec_report(&no_id, &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.reported_order_id(198), 68);
+        assert_eq!(shared.orders.reported_order_id(0), 12);
+        assert_eq!(shared.orders.reported_order_id(7), 0, "negative ids and the unset value do not count");
+        assert_eq!(shared.orders.reported_order_id(5), 0);
     }
 
     // ibx#252, captured (ib-agent#192 C2b): the cancel of a child the

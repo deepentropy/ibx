@@ -11,11 +11,12 @@
 //! Session 2 connects, lists the open orders, calls `req_global_cancel` and
 //! requires a Cancelled status from the server for every listed order.
 //!
-//! The orders are told apart by permId. An order id above the int range
-//! (the Rust client's ids) is not sent to the server (no 6121), so a later
-//! session shows the order with order id 0, as the reference shows an
-//! order whose report has none (captured 01/10/2026); its permId is the
-//! id part of its ClOrdID, the order id of session 1.
+//! The order ids are the reference's (ibx#466): 32-bit, the next valid id
+//! the highest order id the client used + 1. The new order carries its API
+//! order id (6121), so session 2 lists it with the order id of session 1,
+//! and its next valid id is above it. Its permId is the server id it went
+//! out under, of the order id generator; the orders are told apart by
+//! permId too.
 //!
 //! This cancels EVERY open order on the paper account.
 //!
@@ -103,6 +104,7 @@ fn global_cancel_reaches_orders_from_an_earlier_session() {
     let client = connect_paper(&config);
     let mut probe = Probe { state: Arc::new(Mutex::new(State::default())) };
     let id = client.next_order_id();
+    assert!(id > 0 && id < i64::from(i32::MAX), "session 1: a 32-bit order id: {}", id);
     let spy = Contract {
         con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
         exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
@@ -119,13 +121,15 @@ fn global_cancel_reaches_orders_from_an_earlier_session() {
         .find(|(o, ..)| *o == id).map_or(0, |(_, p, _)| *p);
     client.disconnect();
     assert!(up, "session 1: order {} not accepted", id);
-    assert_eq!(perm_id, id, "session 1: the permId is the id part of the ClOrdID, the order id");
+    assert!(perm_id > 0, "session 1: the order has a permId");
     println!("  session 1: order {} (permId {}) working, disconnected", id, perm_id);
 
     // Session 2: the server lists it at connect; the global cancel must reach it.
     let client = connect_paper(&config);
     let mut probe = Probe { state: Arc::new(Mutex::new(State::default())) };
     pump(&client, &mut probe, 5, |_| false);
+    let next = client.next_order_id();
+    assert!(next > id, "session 2: the next order id {} is above the order {} of session 1", next, id);
     // The listing only (the replay's reports gave openOrder already).
     probe.state.lock().unwrap().open.clear();
     client.req_all_open_orders(&mut probe);
@@ -133,8 +137,8 @@ fn global_cancel_reaches_orders_from_an_earlier_session() {
     println!("  session 2: {} open order(s) listed: {:?}", open.len(), open);
     let listed: Vec<i64> = open.iter().map(|&(_, p)| p).collect();
     assert!(listed.contains(&perm_id), "session 2: order of permId {} from session 1 not listed", perm_id);
-    assert!(open.iter().any(|&(o, p)| p == perm_id && o == 0),
-        "session 2: the order of session 1 has no API order id on the server: order id 0");
+    assert!(open.iter().any(|&(o, p)| p == perm_id && o == id),
+        "session 2: the order of session 1 is listed with its order id {}", id);
 
     client.req_global_cancel().expect("req_global_cancel");
     let all = pump(&client, &mut probe, 20, |s| {

@@ -1,7 +1,5 @@
 //! Order placement, cancellation, execution replay, and algo parsing.
 
-use std::sync::atomic::Ordering;
-
 use crate::api::types::ExecutionFilter;
 use crate::api::wrapper::Wrapper;
 use crate::client_core::{ClientCore, ModifyPlan};
@@ -14,6 +12,7 @@ impl EClient {
 
     /// Place an order. Matches `placeOrder` in C++.
     pub fn place_order(&self, order_id: i64, contract: &Contract, order: &Order) -> Result<(), String> {
+        if !ClientCore::ids_fit("place_order", &[order_id, contract.con_id]) { return Ok(()); }
         // The reference's other names for an order type, under ibx's name
         // for every check and for the tracked order (ibx#469).
         let order = &*ClientCore::with_canonical_order_type(order);
@@ -109,6 +108,7 @@ impl EClient {
 
     /// Cancel an order. Matches `cancelOrder` in C++.
     pub fn cancel_order(&self, order_id: i64, _manual_order_cancel_time: &str) -> Result<(), String> {
+        if !ClientCore::ids_fit("cancel_order", &[order_id]) { return Ok(()); }
         self.send(ControlCommand::Order(OrderRequest::Cancel {
             order_id,
         }))
@@ -143,15 +143,23 @@ impl EClient {
         self.send(ControlCommand::Order(OrderRequest::GlobalCancel))
     }
 
-    /// Request next valid order ID. Matches `reqIds` in C++.
+    /// Request next valid order ID. Matches `reqIds` in C++: the highest
+    /// order id this client used + 1, as the reference computes it per
+    /// client id (1 when none), a 32-bit id. The ids of the client's earlier
+    /// sessions count as far as the server's replays of the logon show them
+    /// (orders with the client's id); right after the connect the answer
+    /// waits for the order replay of the logon. Nothing is reserved.
     pub fn req_ids(&self, wrapper: &mut impl Wrapper) {
-        let next_id = self.next_order_id.load(Ordering::Relaxed);
-        wrapper.next_valid_id(next_id);
+        ClientCore::wait_order_replay(&self.shared);
+        wrapper.next_valid_id(self.core.next_valid_id(&self.shared));
     }
 
-    /// Get the next order ID (local counter).
+    /// The next order id for a new order: the next valid id (see
+    /// [`req_ids`](EClient::req_ids)), or above the ids this method gave
+    /// before. Each call reserves the id it gives.
     pub fn next_order_id(&self) -> i64 {
-        self.next_order_id.fetch_add(1, Ordering::Relaxed)
+        ClientCore::wait_order_replay(&self.shared);
+        self.core.take_order_id(&self.shared)
     }
 
     // ── Open Orders ──

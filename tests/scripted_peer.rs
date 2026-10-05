@@ -160,17 +160,23 @@ fn session(shared: &Arc<SharedState>) -> (EClient, Peer, crossbeam_channel::Send
 
 // Paper 05/10/2026 (global_cancel_paper): an order a Rust client placed in
 // one session was not found among the open orders of the next session by
-// its order id. The Rust client's ids are above the int range, so the new
-// order carries no API order id (6121); the next session's logon replay
-// gives the order with none, and it is listed as the reference lists such
-// an order: order id 0, permId the id part of its ClOrdID (captured
-// 01/10/2026), which is the order id of the first session.
+// its order id, which was built from the clock, above the int range, so
+// the new order carried no API order id (6121). The order ids are now the
+// reference's (ibx#466): the next valid id is the highest order id the
+// client used + 1, 1 for a client with none; the new order goes out under
+// a server id of the order id generator, its API order id in 6121. The
+// next session's logon replay gives the order with its 6121: it is listed
+// with that order id and its permId (the server id), and the next valid id
+// of that session is above it.
 #[test]
-fn an_order_of_an_earlier_session_is_listed_by_its_perm_id() {
+fn an_order_of_an_earlier_session_keeps_its_order_id() {
     // Session 1: the new order as sent.
     let shared = Arc::new(SharedState::new());
     let (client, mut ccp, stop_tx, handle) = session(&shared);
-    let id = 1_791_194_572_000;
+    let mut ids = NextIds::default();
+    client.req_ids(&mut ids);
+    let id = client.next_order_id();
+    assert_eq!((ids.0.as_slice(), id), ([1].as_slice(), 1), "a client with no orders starts at 1");
     let spy = Contract {
         con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(),
         exchange: "SMART".into(), currency: "USD".into(), ..Default::default()
@@ -182,22 +188,26 @@ fn an_order_of_an_earlier_session_is_listed_by_its_perm_id() {
     client.place_order(id, &spy, &order).unwrap();
     let is_order = |m: &Vec<u8>| parse_fields(m).iter().any(|(t, v)| *t == 35 && v == "D");
     let sent = ccp.messages_until(Duration::from_secs(5), |ms| ms.iter().any(is_order));
+    client.req_ids(&mut ids);
+    assert_eq!(ids.0, [1, 2], "the placed id counts");
     stop_tx.send(ControlCommand::Shutdown).unwrap();
     handle.join().unwrap();
     let new_order = parse_fields(sent.iter().find(|m| is_order(m)).expect("the new order"));
     let tag = |t: u32| new_order.iter().find(|(k, _)| *k == t).map(|(_, v)| v.clone());
-    assert_eq!(tag(11).as_deref(), Some("1791194572000.0"));
-    assert_eq!(tag(6121), None, "an id above the int range is not sent");
+    let clord = tag(11).expect("a ClOrdID");
+    let perm: i64 = clord.strip_suffix(".0").and_then(|p| p.parse().ok()).expect("a server id, version 0");
+    assert!(perm > 0 && perm <= i64::from(i32::MAX), "a server id of the order id generator: {clord}");
+    assert_eq!(tag(6121).as_deref(), Some("1"), "the API order id is sent");
     assert_eq!(tag(6119).as_deref(), Some("0"));
 
     // Session 2: the logon replay gives it back, working, then its end.
     let shared = Arc::new(SharedState::new());
     let (client, mut ccp, stop_tx, handle) = session(&shared);
     ccp.send_fix(&[
-        (35, "8"), (11, "1791194572000.0"), (17, "140781.1791194600.0"), (150, "A"), (20, "3"), (39, "A"),
+        (35, "8"), (11, clord.as_str()), (17, "140781.1791194600.0"), (150, "A"), (20, "3"), (39, "A"),
         (167, "CS"), (55, "SPY"), (6210, "BEST"), (38, "1"), (44, "1"), (32, "0"), (31, "0.00"), (14, "0"),
         (151, "1"), (6, "0"), (54, "1"), (37, "00cf16ed.000225ed.6abde767.0001"), (1, "DUXXXXXXX"),
-        (40, "2"), (6119, "0"), (59, "1"), (6008, "756733"), (15, "USD"), (6088, "Socket"),
+        (40, "2"), (6121, "1"), (6119, "0"), (59, "1"), (6008, "756733"), (15, "USD"), (6088, "Socket"),
     ]);
     ccp.send_fix(&[(35, "8"), (11, "*"), (150, "0"), (20, "3"), (39, "0"), (55, "*"), (37, "*")]);
     let mut listing = Listing::default();
@@ -207,7 +217,10 @@ fn an_order_of_an_earlier_session_is_listed_by_its_perm_id() {
     }
     // The replay's report reaches this client (client 0, the order's).
     client.process_msgs(&mut listing);
-    assert_eq!(listing.open, [(0, id)], "the replayed report: order id 0 and its permId");
+    assert_eq!(listing.open, [(id, perm)], "the replayed report: its order id and its permId");
+    let mut ids = NextIds::default();
+    client.req_ids(&mut ids);
+    assert_eq!((ids.0.as_slice(), client.next_order_id()), ([2].as_slice(), 2), "above the replayed order's id");
     listing.open.clear();
     client.req_all_open_orders(&mut listing);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -218,5 +231,15 @@ fn an_order_of_an_earlier_session_is_listed_by_its_perm_id() {
     stop_tx.send(ControlCommand::Shutdown).unwrap();
     handle.join().unwrap();
     assert!(listing.end, "the listing ends");
-    assert_eq!(listing.open, [(0, id)], "listed with order id 0 and its permId");
+    assert_eq!(listing.open, [(id, perm)], "listed with its order id and its permId");
+}
+
+/// The ids of each nextValidId.
+#[derive(Default)]
+struct NextIds(Vec<i64>);
+
+impl ibx::api::wrapper::Wrapper for NextIds {
+    fn next_valid_id(&mut self, order_id: i64) {
+        self.0.push(order_id);
+    }
 }

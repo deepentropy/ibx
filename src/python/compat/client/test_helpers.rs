@@ -37,7 +37,6 @@ impl EClient {
         // Keep the command receiver: commands sent to the absent engine
         // must not fail as "Engine stopped".
         *self._test_control_rx.lock().unwrap() = Some(rx);
-        self.next_order_id.store(1000, Ordering::Relaxed);
         *self.connection_time.lock().unwrap() = Some(crate::client_core::connection_time_now());
         self.connected.store(true, Ordering::Release);
         Ok(())
@@ -254,6 +253,14 @@ impl EClient {
     #[doc(hidden)]
     fn _test_seed_instrument(&self, con_id: i64, instrument: u32) {
         self.core.con_id_to_instrument.lock().unwrap().insert(con_id, instrument);
+    }
+
+    /// An API order id a server report gave for an API client (ibx#466,
+    /// test-only).
+    #[doc(hidden)]
+    fn _test_note_reported_order_id(&self, client_id: i64, order_id: OrderId) -> PyResult<()> {
+        self.shared_state()?.orders.note_reported_order_id(client_id, order_id);
+        Ok(())
     }
 
     /// Set the smart combo conIds of the logon, tag 6611 (ibx#470,

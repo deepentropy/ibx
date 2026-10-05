@@ -148,7 +148,9 @@ fn combo_order_on_paper() {
     let mut check = |ok: bool, what: &str| {
         if ok { println!("    ok: {what}") } else { println!("    FAIL: {what}"); failures.push(what.into()) }
     };
-    let id = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() % 1_000_000) as i64 * 10;
+    // The client's next valid id, and the one after it for the second order
+    // (ibx#466).
+    let id = client.next_order_id();
     let working = |s: &State, id: i64| matches!(last_status(s, id).as_deref(), Some("PreSubmitted" | "Submitted"));
     let refused = |s: &State, id: i64| s.errors.iter().any(|(r, c, _)| *r == id && *c != 399);
 
@@ -159,8 +161,11 @@ fn combo_order_on_paper() {
     let setup = sent("c").iter().filter(|l| l.contains("SecDefReqMsgReqByConid")).count()
         + sent("U").iter().filter(|l| l.contains("|6040=7|")).count();
     check(setup >= 2, "the set-up requests went out (BAG definition, leg confirmation)");
-    let d = sent("D").into_iter().find(|l| l.contains(&format!("|11={id}.0|"))).unwrap_or_default();
+    // The 35=D by its API order id; its ClOrdID is the server id of the
+    // order (ibx#466).
+    let d = sent("D").into_iter().find(|l| l.contains(&format!("|6121={id}|"))).unwrap_or_default();
     println!("    35=D: {d}");
+    let server = d.split("|11=").nth(1).and_then(|r| r.split('.').next()).unwrap_or("none").to_string();
     for part in ["|167=BAG|", "|55=QQQ,SPY|", "|6079=2|", "|6080=756733|6081=1|6082=1|", "|6080=320227571|6081=1|6082=0|", "|6175=0|", "|6134=9|", "|6248=1|"] {
         check(d.contains(part), &format!("35=D has {part}"));
     }
@@ -176,7 +181,7 @@ fn combo_order_on_paper() {
         client.place_order(id, &combo(), &order(-50.10)).expect("modify");
         // The server's report of the replace (11 = the order's version 1,
         // 150=5), not ibx's own openOrder echo of the tracked order.
-        let replace = format!("|11={id}.1|");
+        let replace = format!("|11={server}.1|");
         let replaced = || received("8").into_iter()
             .find(|l| l.contains(&replace) && l.contains("|150=5|"));
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -193,7 +198,7 @@ fn combo_order_on_paper() {
         }
         check(report.as_deref().is_some_and(|l| ["|44=-50.1|", "|44=-50.10|"].iter().any(|p| l.contains(p))),
             "the server reports the replace with the new price");
-        check(sent("G").iter().any(|l| l.contains(&format!("|11={id}.1|")) && l.contains("|44=-50.10|") && !l.contains("|6079=")),
+        check(sent("G").iter().any(|l| l.contains(&replace) && l.contains("|44=-50.10|") && !l.contains("|6079=")),
             "35=G with the new price and no leg block");
         pump(&client, &mut probe, 2, |_| false);
         check(state.lock().unwrap().open.iter().any(|(o, _, ord)| *o == id && (ord.lmt_price - -50.10).abs() < 1e-9),
@@ -205,7 +210,7 @@ fn combo_order_on_paper() {
 
     // A second order on the same combo: no set-up request.
     let before = sent("c").len();
-    let id2 = id + 1;
+    let id2 = client.next_order_id();
     client.place_order(id2, &combo(), &order(-51.00)).expect("place_order");
     let up2 = pump(&client, &mut probe, 30, |s| working(s, id2) || refused(s, id2)) && working(&state.lock().unwrap(), id2);
     check(up2, "the second combo order works");

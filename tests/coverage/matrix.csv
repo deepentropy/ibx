@@ -63,7 +63,7 @@ rule,API-SESSION 3.2,Incoming (client to gateway),no test
 rule,API-SESSION 3.3,Outgoing (gateway to client),no test
 rule,API-SESSION 4,"Rate limit, nextValidId, managedAccounts, reqCurrentTime, setServerLogLevel",no test
 rule,API-SESSION 4.1,Message rate: two different read loops,no test
-rule,API-SESSION 4.2,nextValidId,no test
+rule,API-SESSION 4.2,nextValidId,src/client_core.rs::next_valid_id_is_the_highest_used_plus_one ; tests/scripted_peer.rs::an_order_of_an_earlier_session_keeps_its_order_id
 rule,API-SESSION 4.3,managedAccounts and the rest of the connect burst,no test
 rule,API-SESSION 4.4,reqCurrentTime (49) and reqCurrentTimeInMillis (105),no test
 rule,API-SESSION 4.5,setServerLogLevel (14),no test
@@ -711,7 +711,7 @@ error,323,'%s' : cause - %s,no test
 error,326,Unable connect as the client id is already in use. Retry with a unique client id.,no test
 error,327,Only API connections with clientId set to 0 can set the auto bind orders property.,no test
 error,328,Trailing stop orders can be attached to limit or stop-limit orders only.,no test
-error,329,Order modify failed. Cannot change to the new order type,src/api/client/tests.rs::modify_type_change_error_keeps_a_large_order_id
+error,329,Order modify failed. Cannot change to the new order type,src/api/client/tests.rs::modify_type_change_gets_329_and_a_side_change_105_first
 error,330,Only FA or STL customers can request managed accounts list.,no test
 error,331,Internal error. FA or STL does not have any managed accounts.,no test
 error,333,Invalid share allocation syntax.,no test

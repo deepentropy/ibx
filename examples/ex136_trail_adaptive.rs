@@ -130,10 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(Mutex::new(State::default()));
     let mut wrapper = ProbeWrapper { state: state.clone() };
 
-    let next_id = || -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64
-    };
+    // The client's next order id: 32-bit, above the ids it used.
+    let next_id = || client.next_order_id();
 
     // 1) TRAIL — Sell 1 AAPL @ trail $2.00
     let mut trail = Order::default();

@@ -177,23 +177,36 @@ fn disconnect_idempotent() {
 //  next_order_id / req_ids
 // ═══════════════════════════════════════════════════════════════════
 
+// ibx#466: 32-bit ids, as the reference's: a client with no order known
+// starts at 1; each next_order_id is one above the last.
 #[test]
 fn next_order_id_monotonic() {
     let (client, _rx, _shared) = test_client();
     let id1 = client.next_order_id();
     let id2 = client.next_order_id();
     let id3 = client.next_order_id();
-    assert!(id2 > id1);
-    assert!(id3 > id2);
+    assert_eq!((id1, id2, id3), (1, 2, 3));
 }
 
+// ibx#466: reqIds gives the highest order id the client used + 1, the ids
+// the server's reports gave for its client id included; it reserves
+// nothing.
 #[test]
 fn req_ids_calls_wrapper() {
-    let (client, _rx, _shared) = test_client();
+    let (client, rx, shared) = test_client();
     let mut w = RecordingWrapper::default();
     client.req_ids(&mut w);
-    assert_eq!(w.events.len(), 1);
-    assert!(w.events[0].starts_with("next_valid_id:"));
+    assert_eq!(w.events, ["next_valid_id:1"]);
+    shared.orders.note_reported_order_id(0, 68);
+    client.req_ids(&mut w);
+    client.req_ids(&mut w);
+    shared.market.set_instrument_count(1);
+    let lmt = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 1.0, ..Default::default() };
+    client.place_order(80, &spy(), &lmt).unwrap();
+    while rx.try_recv().is_ok() {}
+    client.req_ids(&mut w);
+    assert_eq!(w.events, ["next_valid_id:1", "next_valid_id:69", "next_valid_id:69", "next_valid_id:81"]);
+    assert_eq!(client.next_order_id(), 81);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -3811,16 +3824,16 @@ fn modify_type_change_gets_329_and_a_side_change_105_first() {
         let placed = Order {
             action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 200.0, ..Default::default()
         };
-        client.place_order(1790835066344, &spy(), &placed).unwrap();
+        client.place_order(57, &spy(), &placed).unwrap();
         while rx.try_recv().is_ok() {}
         let stp = Order {
             action: action.into(), total_quantity: 1.0, order_type: "STP".into(), aux_price: 195.0, ..Default::default()
         };
-        client.place_order(1790835066344, &spy(), &stp).unwrap();
+        client.place_order(57, &spy(), &stp).unwrap();
         assert!(rx.try_recv().is_err(), "{action}: nothing sent");
         let errors = shared.orders.drain_order_errors();
-        assert_eq!(errors.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(1790835066344, code)], "{action}");
-        assert_eq!(client.core.tracked_order(1790835066344).map(|o| o.order_type).as_deref(), Some("LMT"));
+        assert_eq!(errors.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(57, code)], "{action}");
+        assert_eq!(client.core.tracked_order(57).map(|o| o.order_type).as_deref(), Some("LMT"));
     }
 }
 
@@ -3852,20 +3865,21 @@ fn modify_order_type_lmt_to_stp() {
     assert_eq!(client.core.tracked_order_type(66).as_deref(), Some("LMT"));
 }
 
-// The refusal must carry the full order id: ibx ids do not fit in 32 bits.
+// ibx#285, ibx#466: the reference reads the order id as a 32-bit int; an
+// order or a cancel with an id outside that range does not decode there
+// and is dropped, with no error.
 #[test]
-fn modify_type_change_error_keeps_a_large_order_id() {
+fn an_order_id_outside_the_int_range_drops_the_request() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
-    let id: i64 = 1_790_166_425_204;
     let lmt = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: 1.0, ..Default::default() };
-    let stp = Order { action: "BUY".into(), total_quantity: 1.0, order_type: "STP".into(), aux_price: 2.0, ..Default::default() };
-    client.place_order(id, &spy(), &lmt).unwrap();
-    while rx.try_recv().is_ok() {}
-    client.place_order(id, &spy(), &stp).unwrap();
-    let mut w = RecordingWrapper::default();
-    client.process_msgs(&mut w);
-    assert!(w.events.iter().any(|e| e.starts_with(&format!("error:{}:329:", id))), "{:?}", w.events);
+    for id in [1_790_166_425_204, i64::from(i32::MAX) + 1, i64::from(i32::MIN) - 1] {
+        client.place_order(id, &spy(), &lmt).unwrap();
+        client.cancel_order(id, "").unwrap();
+    }
+    assert!(rx.try_recv().is_err(), "nothing sent");
+    assert!(shared.orders.drain_order_errors().is_empty());
+    assert!(client.core.tracked_order(1_790_166_425_204).is_none());
 }
 
 /// Place `first`, then resubmit `second` with the same id; return the replace.

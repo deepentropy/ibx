@@ -1,7 +1,7 @@
 """ibx#285: ids are signed and keep their value; a request with an id
 outside the reference's 32-bit range is dropped with no error."""
 
-from ibx import EClient, EWrapper
+from ibx import Contract, EClient, EWrapper, Order
 
 
 class Recorder(EWrapper):
@@ -24,6 +24,9 @@ class Recorder(EWrapper):
 
     def head_timestamp(self, req_id, head_timestamp):
         self.events.append(("head_timestamp", req_id, head_timestamp))
+
+    def next_valid_id(self, order_id):
+        self.events.append(("next_valid_id", order_id))
 
 
 def connected():
@@ -67,3 +70,40 @@ def test_ids_outside_the_reference_range_drop_the_request():
     c._test_dispatch_once()
     errors = [e for e in w.events if e[0] == "error"]
     assert errors == [("error", 5, 300)]
+
+
+def test_order_ids_are_the_highest_used_plus_one():
+    """ibx#466: 32-bit order ids, as the reference's: nextValidId is the
+    highest order id the client used + 1 (1 for none), the ids the server's
+    reports gave for its client id included; reqIds reserves nothing,
+    next_order_id reserves the id it gives."""
+    c, w = connected()
+    c.req_ids()
+    c._test_note_reported_order_id(0, 68)
+    c._test_note_reported_order_id(5, 500)
+    c.req_ids()
+    assert [e for e in w.events if e[0] == "next_valid_id"] == [("next_valid_id", 1), ("next_valid_id", 69)]
+    assert (c.next_order_id(), c.next_order_id()) == (69, 70)
+    w.events.clear()
+    c.req_ids()
+    assert w.events == [("next_valid_id", 69)]
+
+
+def test_order_ids_outside_the_reference_range_drop_the_request():
+    c, w = connected()
+    contract = Contract()
+    contract.con_id = 756733
+    contract.symbol = "SPY"
+    contract.sec_type = "STK"
+    contract.exchange = "SMART"
+    contract.currency = "USD"
+    order = Order()
+    order.action = "BUY"
+    order.total_quantity = 1
+    order.order_type = "LMT"
+    order.lmt_price = 1.0
+    for order_id in (2**31, -(2**31) - 1):
+        c.place_order(order_id, contract, order)
+        c.cancel_order(order_id, "")
+    c._test_dispatch_once()
+    assert [e for e in w.events if e[0] == "error"] == []

@@ -232,16 +232,22 @@ pub(crate) fn drain_and_send_orders(
         }
         // A what-if goes out under a ClOrdID of its own and stays out of
         // the order table: an order with the same id is left as it is
-        // (ibx#462). As the reference's preview copy, a new order id with
-        // version 0 (ibx#486, b1_462_whatif of 02/10/2026: 1288736441.0,
-        // 1288736443.0 for the orders 74 and 75).
+        // (ibx#462). As the reference's preview copy, a new id of the order
+        // id generator with version 0 (ibx#486, b1_462_whatif of
+        // 02/10/2026: 1288736441.0, 1288736443.0 for the orders 74 and 75).
         let held = what_if.then(|| (context.order(oid).copied(), context.modify_versions.get(&oid).copied(), context.book_peak));
         if what_if {
-            let clord = format!("{}.0", WHAT_IF_ID_BASE + u64::from(context.next_what_if));
-            context.next_what_if = context.next_what_if.wrapping_add(1);
+            let clord = format!("{}.0", context.new_server_id());
             let instrument = order_req.instrument().unwrap_or(0);
             context.what_ifs.insert(clord.clone(), (oid, instrument));
             context.what_if_send = Some(clord);
+        }
+        // A new order goes out under a server id of the reference's order
+        // id generator; its API order id is its key, sent in 6121.
+        if !what_if {
+            for id in order_req.new_order_ids() {
+                context.assign_server_id(id);
+            }
         }
         let result = match order_req {
             OrderRequest::SubmitLimit { order_id, instrument, side, qty, price } => {
@@ -249,7 +255,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, price, b'2', b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price_ref(price);
@@ -278,7 +284,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, price, b'4', b'0', stop_price,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price_ref(price);
@@ -310,7 +316,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, price, b'2', b'1', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price_ref(price);
@@ -351,7 +357,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, b'1', b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -380,7 +386,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, stop_price, b'3', b'0', stop_price,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let stop_str = format_price_ref(stop_price);
@@ -410,7 +416,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, stop_price, b'3', b'1', stop_price,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let stop_str = format_price_ref(stop_price);
@@ -444,7 +450,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, price, b'4', b'1', stop_price,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price_ref(price);
@@ -480,7 +486,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, price, b'2', b'3', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price_ref(price);
@@ -509,7 +515,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, price, b'2', b'4', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price_ref(price);
@@ -538,7 +544,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, b'P', b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let trail_str = format_price_ref(trail_amt);
@@ -578,7 +584,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, lmt_price.unwrap_or(lmt_offset), b'P', b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let offset_str = format_price_ref(lmt_offset);
@@ -624,7 +630,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, b'P', b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 // Per ib-agent#156 capture: percent-trail mirrors 99/211 as the
@@ -669,7 +675,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, b'5', b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -696,7 +702,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, price, b'B', b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price_ref(price);
@@ -725,7 +731,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, stop_price, b'J', b'0', stop_price,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let stop_str = format_price_ref(stop_price);
@@ -754,7 +760,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, price, b'K', b'0', stop_price,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price_ref(price);
@@ -789,7 +795,7 @@ pub(crate) fn drain_and_send_orders(
                 let (sec_type_str, destination) = context.market.order_routing(instrument);
                 // Order ids in the versioned form of every other order, so
                 // a cancel or a later child refers to what the server holds.
-                let clord = |id: OrderId| format!("{}.{}", id, context.modify_versions.get(&id).copied().unwrap_or(0));
+                let clord = |id: OrderId| format!("{}.{}", context.server_id(id), context.modify_versions.get(&id).copied().unwrap_or(0));
                 let parent_str = clord(parent_id);
                 let tp_str = clord(tp_id);
                 let sl_str = clord(sl_id);
@@ -885,7 +891,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, b'R', b'0', offset,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let offset_str = format_price_ref(offset);
@@ -918,7 +924,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, price, b'2', b'2', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price_ref(price);
@@ -971,7 +977,7 @@ pub(crate) fn drain_and_send_orders(
                 let mut fields: Vec<(u32, String)> = vec![
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
                     (fix::TAG_SENDING_TIME, now.clone()),
-                    (11, format!("{}.{}", order_id, ver)),
+                    (11, format!("{}.{}", context.server_id(order_id), ver)),
                 ];
                 if price > 0 { fields.push((99, format_price_ref(price).to_string())); }
                 fields.extend([
@@ -997,7 +1003,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, price, b'2', b'8', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let price_str = format_price_ref(price);
@@ -1026,7 +1032,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, b'K', b'8', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -1058,7 +1064,7 @@ pub(crate) fn drain_and_send_orders(
                 tracked.qty_fixed = qty;
                 context.insert_order(tracked);
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_qty(qty);
                 let price_str = format_price_ref(price);
@@ -1090,7 +1096,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, b'3', b'0', stop_price,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let stop_str = format_price_ref(stop_price);
@@ -1124,7 +1130,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, b'K', b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -1151,7 +1157,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, b'U', b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -1178,7 +1184,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, crate::types::ORD_STP_PRT, b'0', stop_price,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let stop_str = format_price_ref(stop_price);
@@ -1208,7 +1214,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, price_cap, crate::types::ORD_MIDPX, b'0', 0,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 let symbol = context.market.symbol(instrument).to_string();
@@ -1243,7 +1249,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MKT, b'0', offset,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 // The offset in both price fields, 0.00 when unset, and the
@@ -1275,7 +1281,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_MID, b'0', offset,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 // The offset in both price fields, 0.00 when unset, and the
@@ -1307,7 +1313,7 @@ pub(crate) fn drain_and_send_orders(
                     order_id, instrument, side, qty, 0, crate::types::ORD_SNAP_PRI, b'0', offset,
                 ));
                 let ver = *context.modify_versions.get(&order_id).unwrap_or(&0);
-                let clord_str = format!("{}.{}", order_id, ver);
+                let clord_str = format!("{}.{}", context.server_id(order_id), ver);
                 let side_str = fix_side(side);
                 let qty_str = format_uint(qty as u64);
                 // The offset in both price fields, 0.00 when unset, and the
@@ -1348,7 +1354,7 @@ pub(crate) fn drain_and_send_orders(
                 let mut fields: Vec<(u32, String)> = vec![
                     (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
                     (fix::TAG_SENDING_TIME, now.clone()),
-                    (11, format!("{}.{}", order_id, ver)),
+                    (11, format!("{}.{}", context.server_id(order_id), ver)),
                 ];
                 let (price_tags, type_tags) = pegged_tags(mid, price, offset);
                 fields.extend(price_tags);
@@ -1902,7 +1908,7 @@ const BRACKET_CHILD_OCA_TYPE: &str = "ReduceOnFillNonBlock";
 /// versioned form ibx sends.
 fn bracket_parent_link(context: &Context, parent_id: crate::types::OrderId) -> (String, String) {
     let link = context.last_clord.get(&parent_id).cloned().unwrap_or_else(|| {
-        format!("{}.{}", parent_id, context.modify_versions.get(&parent_id).copied().unwrap_or(0))
+        format!("{}.{}", context.server_id(parent_id), context.modify_versions.get(&parent_id).copied().unwrap_or(0))
     });
     let group = link.split('.').next().unwrap_or(&link).to_string();
     (link, group)
@@ -1956,8 +1962,8 @@ fn send_new_order(
     if (link.is_some() || oca_group.is_some()) && context.what_if_send.is_none() {
         let id_of = |v: &str| v.split('.').next().and_then(|i| i.parse::<crate::types::OrderId>().ok());
         if let Some(oid) = field(fields, 11).and_then(id_of) {
-            let parent = link.and_then(id_of)
-                .map(|p| context.recovered_keys.get(&p).copied().unwrap_or(p));
+            let oid = context.key_of(oid);
+            let parent = link.and_then(id_of).map(|p| context.key_of(p));
             context.set_links(oid, parent, oca_group);
         }
     }
@@ -1969,11 +1975,14 @@ fn send_new_order(
     let con_id = context.market.con_id(instrument).unwrap_or(0);
     let con_id_str = if con_id > 0 { con_id.to_string() } else { String::new() };
     let what_if = context.what_if_send.as_deref();
-    // The API order id, the id part of the order's own ClOrdID; it is an
-    // int in the API, so a larger id is left out.
+    // The API order id, the key of the order the ClOrdID names; it is an
+    // int in the API, so a larger id (an engine order) is left out.
     let order_id = fields.iter().find(|&&(t, _)| t == 11)
         .and_then(|&(_, v)| v.split('.').next())
-        .filter(|id| id.parse::<i32>().is_ok_and(|n| n >= 0));
+        .and_then(|id| id.parse::<crate::types::OrderId>().ok())
+        .map(|server| context.key_of(server))
+        .filter(|&id| i32::try_from(id).is_ok_and(|n| n >= 0))
+        .map(|id| id.to_string());
     let client_id = context.api_client_id.to_string();
     let stock = fields.iter().any(|&(t, v)| t == 167 && v == "STK");
     // An option's terms after its symbol, and its multiplier
@@ -2016,7 +2025,7 @@ fn send_new_order(
     // The price management flag, decided for the request before encoding;
     // never on the order types it does not go with (ibx#492).
     if context.price_mgmt_send && !crate::engine::price_mgmt::excluded_frame(&out) { out.push((8339, "1")); }
-    if let Some(id) = order_id { out.push((6121, id)); }
+    if let Some(id) = &order_id { out.push((6121, id)); }
     out.push((6119, &client_id));
     // A stock's multiplier, as the reference writes it; an option's terms.
     if stock { out.push((231, "1.00")); }
@@ -2177,11 +2186,6 @@ pub(crate) fn reference_rank(tag: u32) -> u16 {
         _ => u16::MAX,
     }
 }
-
-/// First order id of the what-if ClOrdIDs: above the 32-bit range of the
-/// API order ids (and of the reference's own ids), so a preview never
-/// takes the id of an order (ibx#462, ibx#486).
-const WHAT_IF_ID_BASE: u64 = 1 << 31;
 
 /// The adjustable-stop tags (ib-agent#49), shared by the plain and extended
 /// paths so both emit the same values in the same order.
@@ -3112,7 +3116,7 @@ fn send_order_ex(
     let mut fields: Vec<(u32, String)> = vec![
         (fix::TAG_MSG_TYPE, fix::MSG_NEW_ORDER.to_string()),
         (fix::TAG_SENDING_TIME, now.clone()),
-        (11, format!("{}.{}", order_id, ver)),
+        (11, format!("{}.{}", context.server_id(order_id), ver)),
         (1, account_id.to_string()),
         (55, symbol),
         (54, fix_side(side).to_string()),
@@ -3486,6 +3490,9 @@ fn condition_tags(conditions: &[OrderCondition]) -> Vec<(u32, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first server id the order id generator gives in these tests.
+    const FIRST: OrderId = 1_000_000_001;
     use crate::types::Order;
 
     fn order(oid: OrderId, filled: u32, status: OrderStatus) -> Order {
@@ -3519,6 +3526,7 @@ mod tests {
     /// Same as `wire_tags`, with a hook to set up the engine state first.
     fn wire_tags_with(setup: impl FnOnce(&mut Context), req: OrderRequest) -> Vec<(u32, String)> {
         let mut context = Context::new();
+        context.order_ids.start_at(FIRST as i32);
         context.market.register(265598);
         // A definition that keeps outside RTH for every type, so these
         // tests see the encoding only; the rule has its own tests (ibx#465).
@@ -3545,6 +3553,7 @@ mod tests {
         server.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
 
         let mut context = Context::new();
+        context.order_ids.start_at(FIRST as i32);
         context.market.register(265598);
         context.pending_orders.push(req);
         let shared = Arc::new(SharedState::new());
@@ -3575,9 +3584,10 @@ mod tests {
         out
     }
 
-    // ibx#311 ibx#329: the bracket children carry the parent's order id
-    // with its version, the parent's id as the OCA group, and cancel on
-    // fill. The bracket's own ids are versioned like every other order.
+    // ibx#311 ibx#329: the bracket children carry the parent's server id
+    // with its version, the parent's server id as the OCA group, and
+    // cancel on fill. The bracket's own ids are versioned like every other
+    // order, each under its own server id, its API order id in 6121.
     #[test]
     fn bracket_children_link_to_the_parent_like_the_reference() {
         let frames = wire_frames(OrderRequest::SubmitBracket {
@@ -3585,14 +3595,17 @@ mod tests {
             entry_price: 100 * P, take_profit: 110 * P, stop_loss: 90 * P,
         }, 3);
         assert_eq!(frames.len(), 3);
-        assert_eq!(tag(&frames[0], 11), Some("3.0"));
+        let server = |f: &Vec<(u32, String)>| tag(f, 11).and_then(|c| c.strip_suffix(".0")).unwrap().to_string();
+        let parent = server(&frames[0]);
+        assert_eq!(tag(&frames[0], 6121), Some("3"));
         for absent in [583, 6107, 6209] {
             assert!(tag(&frames[0], absent).is_none(), "parent sends no field {}", absent);
         }
-        for (f, id) in [(&frames[1], "4.0"), (&frames[2], "5.0")] {
-            assert_eq!(tag(f, 11), Some(id));
-            assert_eq!(tag(f, 6107), Some("3.0"));
-            assert_eq!(tag(f, 583), Some("3"));
+        for (f, id) in [(&frames[1], "4"), (&frames[2], "5")] {
+            assert_eq!(tag(f, 6121), Some(id));
+            assert_ne!(server(f), parent);
+            assert_eq!(tag(f, 6107), Some(format!("{parent}.0").as_str()));
+            assert_eq!(tag(f, 583), Some(parent.as_str()));
             assert_eq!(tag(f, 6209), Some("ReduceOnFillNonBlock"));
         }
     }
@@ -4059,7 +4072,8 @@ mod tests {
         let want = captured(reference, &[35, 40, 59, 6091, 100, 6210, 6008]);
         assert_eq!(ours_as(&ours, &want), want);
         assert_eq!(tag(&ours, 44).and_then(|v| v.parse::<f64>().ok()), Some(237.82));
-        assert_eq!(tag(&ours, 11), Some("2147483648.0"), "the preview's own ClOrdID");
+        assert_eq!(tag(&ours, 11), Some(format!("{FIRST}.0").as_str()), "the preview's own ClOrdID, of the order id generator");
+        assert_eq!(tag(&ours, 6121), Some("100"));
         assert_eq!(pos(&ours, 6091) + 1, pos(&ours, 15));
 
         // A MKT preview is a MKT order (captured in ib-agent#160), not a limit at 0.
@@ -4101,6 +4115,7 @@ mod tests {
         let mut conn = Some(Connection::new_mem(client));
         let shared = Arc::new(SharedState::new());
         let mut context = Context::new();
+        context.order_ids.start_at(FIRST as i32);
         context.market.register(265598);
         let working = Order::new(105, 0, Side::Buy, 1, 100 * P, b'2', b'0', 0);
         context.insert_order(working);
@@ -4110,7 +4125,8 @@ mod tests {
         let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
         assert_eq!(frames.len(), 1);
         assert_eq!(tag(&frames[0], 35), Some("D"), "a new preview, never a replace");
-        assert_eq!(tag(&frames[0], 11), Some("2147483648.0"));
+        assert_eq!(tag(&frames[0], 11), Some(format!("{FIRST}.0").as_str()));
+        assert_eq!(tag(&frames[0], 6121), Some("105"));
         assert!(tag(&frames[0], 41).is_none());
         let order = context.order(105).copied().expect("the working order is kept");
         assert_eq!((order.price, order.status), (100 * P, OrderStatus::PendingSubmit));
@@ -4122,9 +4138,10 @@ mod tests {
             order_type: "LMT".into(), lmt_price: 1.0, ..Default::default() }, 106);
         context.pending_orders.push(new_id);
         let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
-        assert_eq!(tag(&frames[0], 11), Some("2147483649.0"));
+        assert_eq!(tag(&frames[0], 11), Some(format!("{}.0", FIRST + 1).as_str()));
         assert!(context.order(106).is_none());
         assert!(context.modify_versions.get(&106).is_none());
+        assert!(!context.server_ids.contains_key(&106));
     }
 
     // A plain algo order (no attributes, DAY) is unchanged apart from the
@@ -4395,6 +4412,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn global_cancel_of(setup: impl FnOnce(&mut Context)) -> (Vec<Vec<(u32, String)>>, Vec<(i64, i64, String)>, Vec<OrderUpdate>) {
         let mut context = Context::new();
+        context.order_ids.start_at(FIRST as i32);
         context.market.register(265598);
         context.api_client_id = 7;
         setup(&mut context);
@@ -4417,7 +4435,7 @@ mod tests {
 
     fn replayed_on(ctx: &mut Context, key: OrderId, server: OrderId, version: u32, owner: i64, instrument: u32) {
         ctx.insert_order(Order { status: OrderStatus::PreSubmitted, ..Order::new(key, instrument, Side::Buy, 1, 100, b'2', b'0', 0) });
-        if key != server { ctx.recovered_keys.insert(server, key); }
+        ctx.bind_server_id(key, server);
         ctx.modify_versions.insert(key, version);
         ctx.last_clord.insert(key, format!("{server}.{version}"));
         ctx.book.get_mut(&key).unwrap().owner = Some(owner);
@@ -4519,10 +4537,12 @@ mod tests {
                 entry_price: 100 * P, take_profit: 110 * P, stop_loss: 90 * P,
             });
             drain_and_send_orders(&mut conn, ctx, "DU1", &mut HeartbeatState::new(), false, &shared);
+            // The OCA group is the parent's server id, as the reference's
+            // permId.
             let child = ctx.book.get(&52).cloned().unwrap();
-            assert_eq!((child.parent, child.oca_group.as_str()), (51, "51"));
+            assert_eq!((child.parent, child.oca_group), (51, FIRST.to_string()));
         });
-        assert_eq!(sent_ids(&frames), ["51.1"]);
+        assert_eq!(sent_ids(&frames), [format!("{FIRST}.1")]);
     }
 
     // The cancel of an order that waits to be sent: ApiCancelled, nothing
@@ -4872,9 +4892,9 @@ mod tests {
         assert!(rth_definition_reply(&mut context, &id, &reply));
         let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
         assert_eq!(frames.len(), 2, "{frames:?}");
-        assert_eq!(tag(&frames[0], 11), Some("50.0"));
+        assert_eq!(tag(&frames[0], 6121), Some("50"));
         assert_eq!(tag(&frames[0], 6433), None, "STP on a US stock: no outside RTH");
-        assert_eq!(tag(&frames[1], 11), Some("51.0"));
+        assert_eq!(tag(&frames[1], 6121), Some("51"));
         assert_eq!(tag(&frames[1], 6433), Some("1"), "LMT keeps it");
         let errors = shared.orders.drain_order_errors();
         assert_eq!(errors.len(), 1, "{errors:?}");
@@ -5564,6 +5584,8 @@ mod tests {
     fn new_order_is_the_captured_frame() {
         const LMT: &str = "35=D|11=7.0|44=337.93|1=DU1|6010=pm0925-fill-BUY|6122=c|6433=1|6121=7|6119=250|38=100|40=2|55=AAPL|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|6211=|6238=";
         let mut context = Context::new();
+        // The server id of the frame, from the order id generator.
+        context.order_ids.start_at(7);
         context.market.register(265598);
         context.set_symbol(0, "AAPL".to_string());
         context.rth_types.insert((265598, "BEST".to_string()), crate::engine::outside_rth::RthTypes {
@@ -6155,7 +6177,36 @@ mod tests {
         assert!(context.order(31).is_none() && context.order(32).is_none());
     }
 
-    // ibx#466: the API order id is an int; a larger order id is not sent.
+    // ibx#466: a new order goes out under a server id of the reference's
+    // order id generator, as the reference's ClOrdID is its permId
+    // (`jfix.cx.d()`, `jclient.jv.l()`), with its API order id in 6121; two
+    // orders get two ids. Its replace and its cancel go under the same
+    // server id.
+    #[test]
+    fn a_new_order_goes_out_under_a_server_id_of_the_generator() {
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
+        let shared = Arc::new(SharedState::new());
+        let mut context = Context::new();
+        context.order_ids.start_at(FIRST as i32);
+        context.market.register(265598);
+        context.pending_orders.push(limit_ex(7, Side::Buy, 100 * P, Default::default()));
+        context.pending_orders.push(limit_ex(8, Side::Buy, 100 * P, Default::default()));
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        let ids: Vec<_> = frames.iter().map(|f| (tag(f, 11).unwrap().to_string(), tag(f, 6121).unwrap().to_string())).collect();
+        assert_eq!(ids, [(format!("{FIRST}.0"), "7".to_string()), (format!("{}.0", FIRST + 1), "8".to_string())]);
+        assert!(context.order(7).is_some() && context.order(FIRST).is_none(), "held under the API order id");
+
+        context.pending_orders.push(modify_limit(7, 101 * P, Default::default()));
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 7 });
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        let ids: Vec<_> = frames.iter().map(|f| (tag(f, 35).unwrap(), tag(f, 11).unwrap(), tag(f, 41).unwrap())).collect();
+        let (v0, v1, v2) = (format!("{FIRST}.0"), format!("{FIRST}.1"), format!("{FIRST}.2"));
+        assert_eq!(ids, [("G", v1.as_str(), v0.as_str()), ("F", v2.as_str(), v1.as_str())]);
+    }
+
+    // ibx#466: the API order id is an int; a larger order id (an order of
+    // the engine's own interface, not of the API) is not sent.
     #[test]
     fn an_order_id_beyond_the_api_range_is_not_sent() {
         let tags = wire_tags(OrderRequest::SubmitMarket { order_id: 1_790_000_000_000, instrument: 0, side: Side::Buy, qty: 1 });
@@ -6461,9 +6512,9 @@ mod tests {
         }
         let text = String::from_utf8_lossy(&buf[..len]).replace('\x01', "|");
         let sent: Vec<&str> = text.split("|35=").skip(1)
-            .map(|f| if f.starts_with('c') { "c" } else { f.split("|11=").nth(1).and_then(|r| r.split('|').next()).unwrap_or("?") })
+            .map(|f| if f.starts_with('c') { "c" } else { f.split("|6121=").nth(1).and_then(|r| r.split('|').next()).unwrap_or("?") })
             .collect();
-        assert_eq!(sent, vec!["c", "14.0", "10.0", "11.0", "12.0", "13.0"]);
+        assert_eq!(sent, vec!["c", "14", "10", "11", "12", "13"]);
     }
 
     // An option order carries the option's terms after its symbol and its

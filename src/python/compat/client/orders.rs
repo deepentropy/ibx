@@ -1,7 +1,5 @@
 //! Order placement, cancellation, open orders, executions, completed orders.
 
-use std::sync::atomic::Ordering;
-
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
@@ -40,6 +38,7 @@ impl EClient {
         // After the checks above, which refuse an invalid order even with no
         // connection (ibx#115).
         if let Some(r) = self.not_connected(order_id) { return r; }
+        if !ClientCore::ids_fit("place_order", &[order_id, contract.con_id]) { return Ok(()); }
 
         let tx = self.tx()?;
 
@@ -161,6 +160,7 @@ impl EClient {
     #[pyo3(signature = (order_id, manual_order_cancel_time=""))]
     fn cancel_order(&self, py: Python<'_>, order_id: i64, manual_order_cancel_time: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        if !ClientCore::ids_fit("cancel_order", &[order_id]) { return Ok(()); }
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::Order(OrderRequest::Cancel { order_id }))?;
         let _ = manual_order_cancel_time;
@@ -176,19 +176,34 @@ impl EClient {
         send_cmd(py, &tx, ControlCommand::Order(OrderRequest::GlobalCancel))
     }
 
-    /// Request next valid order ID.
+    /// Request next valid order ID: the highest order id this client used
+    /// + 1, as the reference computes it per client id (1 when none), a
+    /// 32-bit id. The ids of the client's earlier sessions count as far as
+    /// the server's replays of the logon show them; right after the
+    /// connect the answer waits for the order replay of the logon. Nothing
+    /// is reserved.
     #[pyo3(signature = (num_ids=1))]
     fn req_ids(&self, py: Python<'_>, num_ids: i32) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        let next_id = self.next_order_id.load(Ordering::Relaxed);
+        let shared = self.shared_state()?;
+        let next_id = py.detach(|| {
+            ClientCore::wait_order_replay(&shared);
+            self.core.next_valid_id(&shared)
+        });
         self.wrapper.call_method1(py, "next_valid_id", (next_id,))?;
         let _ = num_ids;
         Ok(())
     }
 
-    /// Get the next order ID (local counter, auto-increments).
-    fn next_order_id(&self) -> i64 {
-        self.next_order_id.fetch_add(1, Ordering::Relaxed)
+    /// The next order id for a new order: the next valid id (see
+    /// ``req_ids``), or above the ids this method gave before. Each call
+    /// reserves the id it gives.
+    fn next_order_id(&self, py: Python<'_>) -> PyResult<i64> {
+        let shared = self.shared_state()?;
+        Ok(py.detach(|| {
+            ClientCore::wait_order_replay(&shared);
+            self.core.take_order_id(&shared)
+        }))
     }
 
     /// Request all open orders for this client.

@@ -83,6 +83,25 @@ fn frames(outbound: bool, msg_type: &str, clord: &str) -> Vec<Frame> {
         .collect()
 }
 
+/// The new orders sent for the API order id `id` (6121, ibx#466).
+fn new_orders(id: i64) -> Vec<Frame> {
+    let id = id.to_string();
+    wire().lines.lock().unwrap().iter()
+        .filter(|l| l.starts_with("WIRE>"))
+        .map(|l| parse_frame(l))
+        .filter(|f| field(f, 35) == Some("D") && field(f, 6121) == Some(id.as_str()))
+        .collect()
+}
+
+/// The ClOrdID of the order of API order id `id` at `version`: the server
+/// id its new order went out under, from the order id generator (ibx#466).
+fn clord_of(id: i64, version: u32) -> String {
+    let server = new_orders(id).first()
+        .and_then(|f| field(f, 11).and_then(|c| c.split('.').next()).map(str::to_string))
+        .unwrap_or_else(|| format!("no-new-order-{id}"));
+    format!("{server}.{version}")
+}
+
 /// The server's reply to `clord` with the given ExecType, if any.
 fn reply(clord: &str, exec_types: &[&str]) -> Option<Frame> {
     frames(false, "8", clord).into_iter()
@@ -237,7 +256,7 @@ fn adjustable_stop_brackets(paper: &mut Paper, base: i64) {
         paper.place(tp_id, &tp);
         let up = paper.wait_working(&[parent_id, stop_id, tp_id]);
         paper.check(up, &format!("{}: parent and both children accepted", label));
-        let sent = frames(true, "D", &format!("{}.0", stop_id));
+        let sent = frames(true, "D", &clord_of(stop_id, 0));
         paper.check(sent.first().and_then(|f| field(f, 6261)) == Some(code),
             &format!("{}: adjusted type code {} sent", label, code));
         if !up { continue; }
@@ -300,7 +319,7 @@ fn modifies(paper: &mut Paper, base: i64) {
         std::thread::sleep(Duration::from_millis(300));
         let rth = second.outside_rth;
         paper.place(id, &second);
-        let clord = format!("{}.1", id);
+        let clord = clord_of(id, 1);
         let c = clord.clone();
         paper.pump(15, |_| reply(&c, &["5"]).is_some());
         match reply(&clord, &["5"]) {
@@ -337,7 +356,7 @@ fn modifies(paper: &mut Paper, base: i64) {
         paper.place(id, &Order { action: "BUY".into(), ..stp(195.0) });
         let got = paper.pump(5, |s| s.errors.iter().any(|(r, c, _)| *r == id && *c == 329));
         paper.check(got, "modify LMT -> STP: error 329 on the right order id");
-        paper.check(frames(true, "G", &format!("{}.1", id)).is_empty(), "modify LMT -> STP: nothing sent");
+        paper.check(frames(true, "G", &clord_of(id, 1)).is_empty(), "modify LMT -> STP: nothing sent");
     } else {
         paper.fail("modify LMT -> STP: original order not accepted");
     }
@@ -352,7 +371,7 @@ fn fractional(paper: &mut Paper, id: i64) {
     paper.place(id, &order);
     let got = paper.pump(5, |s| s.errors.iter().any(|(r, c, _)| *r == id && *c == 10243));
     paper.check(got, "fractional: error 10243 on the right order id");
-    paper.check(frames(true, "D", &format!("{}.0", id)).is_empty(), "fractional: nothing sent");
+    paper.check(new_orders(id).is_empty(), "fractional: nothing sent");
 }
 
 /// ibx#318 ibx#405: algo children keep parent link, OCA group and tif; every
@@ -394,7 +413,7 @@ fn algos(paper: &mut Paper, base: i64) {
         paper.check(up, &format!("{}: parent and both children accepted", label));
         if !up { continue; }
         let tif_code = if tif == "GTC" { "1" } else { "0" };
-        let ack = reply(&format!("{}.0", algo_id), &["0", "A"]);
+        let ack = reply(&clord_of(algo_id, 0), &["0", "A"]);
         paper.check(ack.as_ref().and_then(|f| field(f, 59)) == Some(tif_code),
             &format!("{}: server confirms the time-in-force", label));
         paper.client.cancel_order(parent_id, "").ok();
@@ -433,7 +452,7 @@ fn algos(paper: &mut Paper, base: i64) {
     paper.place(id, &adaptive_stop);
     let up = paper.wait_working(&[id]);
     paper.check(up, "Adaptive STP accepted");
-    let clord = format!("{}.0", id);
+    let clord = clord_of(id, 0);
     let sent = frames(true, "D", &clord).into_iter().next();
     paper.check(sent.as_ref().is_some_and(|f| field(f, 40) == Some("3") && same_number(field(f, 99), 5000.0)
         && field(f, 44).is_none() && field(f, 18) == Some("e") && field(f, 847) == Some("Adaptive")),
@@ -466,7 +485,7 @@ fn conditions(paper: &mut Paper, base: i64) {
         paper.place(id, &order);
         let up = paper.wait_working(&[id]);
         paper.check(up, &format!("{}: accepted", label));
-        let ack = reply(&format!("{}.0", id), &["0", "A"]);
+        let ack = reply(&clord_of(id, 0), &["0", "A"]);
         let flag = |on: bool| if on { "1" } else { "0" };
         paper.check(ack.as_ref().and_then(|f| field(f, 6136)) == Some("1"),
             &format!("{}: server confirms the condition", label));
@@ -506,10 +525,9 @@ fn server_reject(paper: &mut Paper, id: i64) {
 /// the order goes out with the conId found, and the server takes it.
 ///
 /// Only the frames after the place call are read, each parsed: the 35=D
-/// is found by its ClOrdID (the order id before the dot; the API order id
-/// 6121 is left out of the frame for an id beyond the API's int range, as
-/// the reference, and this test's ids are), the lookup by its message
-/// type, request name and symbol, its answer by the lookup's 320.
+/// is found by its API order id (6121; its ClOrdID is the server id of the
+/// order, ibx#466), the lookup by its message type, request name and
+/// symbol, its answer by the lookup's 320.
 fn order_by_symbol(paper: &mut Paper, id: i64) {
     println!("  order by symbol (order {})", id);
     let by_symbol = Contract { con_id: 0, ..aapl() };
@@ -541,8 +559,8 @@ fn order_by_symbol_checks(lines: &[String], id: i64, symbol: &str, con_id: &str)
         .filter(|(_, (out, f))| *out && field(f, 35) == Some("c") && field(f, 55) == Some(symbol)
             && field(f, 320).is_some_and(|r| r.starts_with("FixSecDefReqBySymbol")))
         .map(|(n, _)| n).collect();
-    let clord_id = |f: &Frame| field(f, 11).and_then(|c| c.split('.').next()).and_then(|v| v.parse::<i64>().ok());
-    let new_order = lines.iter().position(|(out, f)| *out && field(f, 35) == Some("D") && clord_id(f) == Some(id));
+    let api_id = |f: &Frame| field(f, 6121).and_then(|v| v.parse::<i64>().ok());
+    let new_order = lines.iter().position(|(out, f)| *out && field(f, 35) == Some("D") && api_id(f) == Some(id));
     let answer = lookups.first().and_then(|&n| field(&lines[n].1, 320).map(str::to_string)).and_then(|rid| {
         lines.iter().position(|(out, f)| !*out && field(f, 35) == Some("d") && field(f, 320) == Some(rid.as_str()))
     });
@@ -556,15 +574,14 @@ fn order_by_symbol_checks(lines: &[String], id: i64, symbol: &str, con_id: &str)
 }
 
 // The checks of the order by symbol on the frame shapes the engine logs
-// (offline): an order id beyond the API's int range has no 6121 on the
-// wire, so the 35=D is found by its ClOrdID (the paper run of 05/10/2026
-// looked for 6121 and failed though ibx sent the lookup and the conId).
+// (offline): the 35=D is found by its API order id (6121), its ClOrdID
+// being the server id of the order (ibx#466).
 #[test]
 fn order_by_symbol_checks_read_the_logged_frames() {
-    let id = 1791194469804_i64;
+    let id = 612_i64;
     let lookup = "WIRE> seq=7 8=FIX.4.1|9=0120|35=c|34=000007|52=x|320=FixSecDefReqBySymbol3221225472|321=2|6088=Socket|55=AAPL|167=CS|100=BEST|15=USD|10=250|";
     let answer = "WIRE< ccp/fix 8=FIX.4.1|9=0100|35=d|34=000900|320=FixSecDefReqBySymbol3221225472|322=*|323=4|55=AAPL|167=STK|6008=265598|10=000|";
-    let order = format!("WIRE> seq=9 8=FIX.4.1|9=0215|35=D|34=000009|52=x|11={id}.0|44=100.00|1=DU1|6122=c|6119=0|38=1|40=2|55=AAPL|167=STK|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|10=096|");
+    let order = format!("WIRE> seq=9 8=FIX.4.1|9=0215|35=D|34=000009|52=x|11=1288736441.0|44=100.00|1=DU1|6122=c|6121={id}|6119=0|38=1|40=2|55=AAPL|167=STK|54=1|59=0|100=BEST|6210=BEST|6008=265598|6088=Socket|15=USD|10=096|");
     let ok = |lines: Vec<String>| order_by_symbol_checks(&lines, id, "AAPL", "265598").iter().all(|(ok, _)| *ok);
     assert!(ok(vec!["log line".into(), lookup.into(), answer.into(), order.clone()]));
     // The 35=D first, no answer, no conId, two lookups: each fails.
@@ -572,7 +589,7 @@ fn order_by_symbol_checks_read_the_logged_frames() {
     assert!(!ok(vec![lookup.into(), order.clone()]));
     assert!(!ok(vec![lookup.into(), answer.into(), order.replace("|6008=265598", "")]));
     assert!(!ok(vec![lookup.into(), lookup.into(), answer.into(), order.clone()]));
-    assert!(!ok(vec![lookup.into(), answer.into(), order.replace(&format!("11={id}.0"), "11=5.0")]));
+    assert!(!ok(vec![lookup.into(), answer.into(), order.replace(&format!("6121={id}"), "6121=5")]));
 }
 
 /// ibx#328: every new order carries the contract id after the secondary
@@ -607,7 +624,8 @@ fn order_paths_paper() {
     let mut paper = Paper {
         client, probe: Probe { state: state.clone() }, state, placed: Vec::new(), failures: Vec::new(),
     };
-    let base = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    // The client's next valid id: the ids above it are new (ibx#466).
+    let base = paper.client.next_order_id();
 
     adjustable_stop_brackets(&mut paper, base);
     modifies(&mut paper, base + 100);

@@ -20,6 +20,11 @@ use crate::api::types::{
 use crate::bridge::SharedState;
 use crate::types::*;
 
+/// The longest wait for the order replay of the logon before a next
+/// valid order id is given (`ClientCore::wait_order_replay`); the replay
+/// ends well within a second of the logon.
+pub const ORDER_REPLAY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The only market data type the engine delivers (1 = realtime, ibx#234).
 const MDT_REALTIME: i32 = 1;
 
@@ -1175,6 +1180,9 @@ pub struct ClientCore {
     /// (`jextend.bH.Z()@78`, `jextend.H.c(int)`): a new order at or below
     /// it is refused with 103 (ibx#462).
     pub highest_order_id: AtomicI64,
+    /// The next order id `take_order_id` hands out, at least the next
+    /// valid id.
+    pub reserved_order_id: AtomicI64,
 
     // Market data type callback tracking
     pub market_data_type: AtomicI32,
@@ -1388,12 +1396,10 @@ fn reported_trail_limit(order: &mut ApiOrder, reported: &ApiOrder) {
 }
 
 impl ClientCore {
-    /// The reference reads request ids, ticker ids and conIds as 32-bit
-    /// ints: a request with one outside that range does not decode there
-    /// and is dropped, with a log line and no error (ibx#285). False for
-    /// such a request. Order ids are not checked here: the order ids this
-    /// client hands out (next_valid_id) are wider, and an order id outside
-    /// the range is only left out of the order (ibx#466).
+    /// The reference reads request ids, ticker ids, order ids and conIds
+    /// as 32-bit ints: a request with one outside that range does not
+    /// decode there and is dropped, with a log line and no error (ibx#285).
+    /// False for such a request.
     pub fn ids_fit(request: &str, ids: &[i64]) -> bool {
         match ids.iter().find(|&&id| i32::try_from(id).is_err()) {
             None => true,
@@ -1455,6 +1461,7 @@ impl ClientCore {
             finished_orders: Mutex::new(HashSet::new()),
             silent_executions: Mutex::new(HashSet::new()),
             highest_order_id: AtomicI64::new(0),
+            reserved_order_id: AtomicI64::new(0),
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashSet::new()),
             delayed_reqs: Mutex::new(HashSet::new()),
@@ -3224,7 +3231,7 @@ impl ClientCore {
         }
         // A new id: above the highest placed one, unless the server knows
         // the order (one of an earlier session).
-        if order_id > 0 && order_id <= self.highest_order_id.load(Ordering::Acquire)
+        if order_id > 0 && order_id <= self.highest_used_order_id(shared)
             && shared.orders.get_order_info(order_id).is_none()
         {
             return duplicate();
@@ -3236,6 +3243,48 @@ impl ClientCore {
     /// ids of new orders (ibx#462).
     pub fn note_order_id(&self, order_id: OrderId) {
         self.highest_order_id.fetch_max(order_id, Ordering::AcqRel);
+    }
+
+    /// The highest order id this client used, as the reference keeps it
+    /// per client (`jextend.H`): the ids it placed, and the ids the
+    /// server's reports gave for its client id (the orders of its earlier
+    /// sessions the logon replay shows). 0 for none.
+    pub fn highest_used_order_id(&self, shared: &SharedState) -> OrderId {
+        let me = self.client_id.load(Ordering::Relaxed);
+        self.highest_order_id.load(Ordering::Acquire).max(shared.orders.reported_order_id(me))
+    }
+
+    /// The next valid order id, as the reference gives it in nextValidId
+    /// at the connect and to reqIds (`jextend.dK.aC()` = `jextend.H.c()`):
+    /// the highest order id the client used + 1, 1 when none. reqIds
+    /// reserves nothing (ibx#466).
+    pub fn next_valid_id(&self, shared: &SharedState) -> OrderId {
+        self.highest_used_order_id(shared) + 1
+    }
+
+    /// The next order id for a new order (`next_order_id`): the next
+    /// valid id, or above the ids handed out before, which it reserves.
+    pub fn take_order_id(&self, shared: &SharedState) -> OrderId {
+        let floor = self.next_valid_id(shared);
+        let mut current = self.reserved_order_id.load(Ordering::Acquire);
+        loop {
+            let id = current.max(floor);
+            match self.reserved_order_id.compare_exchange_weak(current, id + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return id,
+                Err(now) => current = now,
+            }
+        }
+    }
+
+    /// The reference sends nextValidId once the orders of the logon are
+    /// known (`jextend.dL.bp()@34-48` waits for the order list): wait for
+    /// the end of the order replay of the logon, so the ids of the earlier
+    /// sessions count, at most `ORDER_REPLAY_WAIT`.
+    pub fn wait_order_replay(shared: &SharedState) {
+        let deadline = std::time::Instant::now() + ORDER_REPLAY_WAIT;
+        while shared.orders.open_orders_held() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     /// Hold an open-order request from the logon, or from a lost auth link,
@@ -6260,6 +6309,35 @@ mod tests {
         core.update_order_fill(10, "Filled", 100.0, 0.0);
         core.reset();
         assert!(core.refusal_for_order_id(10, &lmt(101.0), &SharedState::new()).is_some());
+    }
+
+    // ibx#466: the next valid id is the reference's (`jextend.H.c()`): the
+    // highest order id the client used + 1, 1 for none; the ids of the
+    // server's reports for this client id count (the orders of its earlier
+    // sessions), those of other clients do not. reqIds reserves nothing;
+    // `take_order_id` reserves the id it gives.
+    #[test]
+    fn next_valid_id_is_the_highest_used_plus_one() {
+        let core = ClientCore::new();
+        let shared = SharedState::new();
+        core.client_id.store(198, Ordering::Relaxed);
+        assert_eq!(core.next_valid_id(&shared), 1, "no order known: the reference's start");
+        shared.orders.note_reported_order_id(198, 68);
+        shared.orders.note_reported_order_id(7, 500);
+        assert_eq!(core.next_valid_id(&shared), 69, "b1_416_time_condition of 02/10/2026: nextValidId 69");
+        assert_eq!(core.next_valid_id(&shared), 69, "nothing reserved");
+        assert_eq!((core.take_order_id(&shared), core.take_order_id(&shared)), (69, 70));
+        assert_eq!(core.next_valid_id(&shared), 69, "the ids handed out are not placed");
+        core.track_order(73, ApiContract::default(), lmt(100.0), 0);
+        assert_eq!(core.next_valid_id(&shared), 74);
+        assert_eq!(core.take_order_id(&shared), 74);
+        // An id at or below a reported one is no new id (103), unless the
+        // server holds that order.
+        let duplicate = Some((103, "Duplicate order id".to_string()));
+        let core = ClientCore::new();
+        core.client_id.store(198, Ordering::Relaxed);
+        assert_eq!(core.refusal_for_order_id(68, &lmt(100.0), &shared), duplicate);
+        assert!(core.refusal_for_order_id(69, &lmt(100.0), &shared).is_none());
     }
 
     // ibx#462, `jextend.bH.W()@222`: a new order id at or below the highest

@@ -10,7 +10,7 @@ mod test_helpers;
 #[cfg(feature = "test-support")]
 mod scenario;
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -50,7 +50,6 @@ pub struct EClient {
     pub(crate) shared: Mutex<Option<Arc<SharedState>>>,
     /// Set by connect(), cleared by disconnect().
     pub(crate) control_tx: Mutex<Option<Sender<ControlCommand>>>,
-    pub(crate) next_order_id: AtomicI64,
     pub(crate) _thread: Mutex<Option<thread::JoinHandle<()>>>,
     /// Set by connect(), cleared by disconnect().
     pub(crate) account_id: Mutex<Option<String>>,
@@ -100,7 +99,6 @@ impl EClient {
             wrapper,
             shared: Mutex::new(None),
             control_tx: Mutex::new(None),
-            next_order_id: AtomicI64::new(0),
             _thread: Mutex::new(None),
             account_id: Mutex::new(None),
             connected: AtomicBool::new(false),
@@ -184,11 +182,6 @@ impl EClient {
         let (mut hot_loop, control_tx) = gw.into_hot_loop_with_farms(shared.clone(), Some(event_tx), farm_conn, ccp_conn, hmds_conn, core_id);
         hot_loop.update_reconnect_auth(connect_host, connect_username, connect_password, connect_paper);
 
-        let start_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64 * 1000;
-
         let handle = thread::Builder::new()
             .name("ib-engine-hotloop".into())
             .spawn(move || {
@@ -199,7 +192,6 @@ impl EClient {
         *self.shared.lock().unwrap() = Some(shared);
         *self.control_tx.lock().unwrap() = Some(control_tx);
         *self.event_rx.lock().unwrap() = Some(event_rx);
-        self.next_order_id.store(start_id, Ordering::Relaxed);
         *self._thread.lock().unwrap() = Some(handle);
         *self.connection_time.lock().unwrap() = Some(crate::client_core::connection_time_now());
         self.connected.store(true, Ordering::Release);
@@ -216,7 +208,16 @@ impl EClient {
         // where connect_ack signals "socket ready" before run() is called.
         self.wrapper.call_method0(py, "connect_ack")?;
         self.wrapper.call_method1(py, "managed_accounts", (self.managed_accounts_text().as_str(),))?;
-        self.wrapper.call_method1(py, "next_valid_id", (start_id,))?;
+        // nextValidId once the orders of the logon are known, as the
+        // reference sends it (ibx#466).
+        let next_id = match self.shared.lock().unwrap().clone() {
+            Some(shared) => py.detach(|| {
+                ClientCore::wait_order_replay(&shared);
+                self.core.next_valid_id(&shared)
+            }),
+            None => 1,
+        };
+        self.wrapper.call_method1(py, "next_valid_id", (next_id,))?;
 
         Ok(())
     }

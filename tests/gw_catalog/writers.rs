@@ -385,14 +385,19 @@ fn frame_ids(requests: &[OrderRequest]) -> Vec<i64> {
     out
 }
 
-/// The order id of a message: its API order id (6121) on a new order, a
-/// what-if's ClOrdID being an id of its own (ibx#486); else the id part of
-/// its ClOrdID.
-fn frame_id(frame: &Fields) -> Option<i64> {
-    if let Some(id) = super::harness::field(frame, 6121).and_then(|v| v.parse().ok()) {
+/// The order id of a message: its API order id (6121) on a new order, the
+/// ClOrdID being the server's id of the order (ibx#466, ibx#486); else the
+/// API order id of the new order sent under the id part of its ClOrdID.
+fn frame_id(frame: &Fields, frames: &[Fields]) -> Option<i64> {
+    let api_id = |f: &Fields| super::harness::field(f, 6121).and_then(|v| v.parse().ok());
+    if let Some(id) = api_id(frame) {
         return Some(id);
     }
-    super::harness::field(frame, 11)?.split('.').next()?.parse().ok()
+    let server = |f: &Fields| super::harness::field(f, 11).and_then(|c| c.split('.').next()).map(str::to_string);
+    let id = server(frame)?;
+    frames.iter().filter(|f| super::harness::field(f, 35) == Some("D"))
+        .find(|f| server(f).as_deref() == Some(id.as_str()))
+        .and_then(api_id)
 }
 
 /// Run every case on one engine; the problems of each case.
@@ -415,7 +420,7 @@ fn run() -> Vec<(&'static str, Option<&'static str>, Vec<String>)> {
         // cancel-all cancels the earlier orders too).
         let find = |frames: &[Fields], used: &std::collections::HashSet<usize>, id: i64, msg: &str| {
             frames.iter().enumerate().position(|(n, f)| !used.contains(&n)
-                && frame_id(f) == Some(id) && super::harness::field(f, 35) == Some(msg))
+                && frame_id(f, frames) == Some(id) && super::harness::field(f, 35) == Some(msg))
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let frames = loop {

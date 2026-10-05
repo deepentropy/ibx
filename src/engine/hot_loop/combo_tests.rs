@@ -528,9 +528,12 @@ fn modify_of_the_first_combo_order_of_a_session_goes_out() {
     s.play(&first, is("c", "SecDefReqMsgReqByConid"), |_| false);
     s.run();
     let d = s.next_sent();
-    assert_eq!((tag(&d, 35), tag(&d, 11), tag(&d, 44)), (Some("D"), Some("28.0"), Some("-50.00")), "{d:?}");
+    // Under a server id of the order id generator, the API order id in
+    // 6121 (ibx#466).
+    let server = tag(&d, 11).and_then(|c| c.strip_suffix(".0")).unwrap().to_string();
+    assert_eq!((tag(&d, 35), tag(&d, 6121), tag(&d, 44)), (Some("D"), Some("28"), Some("-50.00")), "{d:?}");
     // The first report of the order (150=A), then the change at once.
-    s.ids.insert("1770530845".into(), "28".into());
+    s.ids.insert("1770530845".into(), server.clone());
     let first_report = std::cell::Cell::new(0);
     s.play(&reports, |f| tag(f, 35) == Some("8"), |f| {
         if tag(f, 35) == Some("8") { first_report.set(first_report.get() + 1); }
@@ -541,7 +544,8 @@ fn modify_of_the_first_combo_order_of_a_session_goes_out() {
     s.client.place_order(28, &spy_qqq("QQQ,SPY"), &order).unwrap();
     s.run();
     let g = s.next_sent();
-    assert_eq!((tag(&g, 35), tag(&g, 11), tag(&g, 41)), (Some("G"), Some("28.1"), Some("28.0")), "{g:?}");
+    let (new, orig) = (format!("{server}.1"), format!("{server}.0"));
+    assert_eq!((tag(&g, 35), tag(&g, 11), tag(&g, 41)), (Some("G"), Some(new.as_str()), Some(orig.as_str())), "{g:?}");
     assert_eq!(tag(&g, 44).map(|p| p.parse::<f64>().unwrap()), Some(-50.10), "{g:?}");
     assert!(tag(&g, 6079).is_none() && tag(&g, 6248) == Some("1") && tag(&g, 55) == Some("QQQ,SPY"), "{g:?}");
     s.assert_nothing_sent();
