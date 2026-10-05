@@ -1364,11 +1364,18 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
     control_tx.send(ControlCommand::Subscribe { con_id: 756733, symbol: "SPY".into(), exchange: String::new(), sec_type: String::new(), last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(), mode_9887: 0, snapshot: false, reply_tx: None }).unwrap();
     let join = run_hot_loop(hot_loop);
 
+    // The entry is placed below the bid, so it rests until the server has
+    // accepted the two children; then it is moved above the ask to fill.
+    // A parent that fills before the server accepts its children gets the
+    // children rejected ("Parent order is being cancelled"), a race of the
+    // paper server, seen with the same frames as the reference's.
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut tick_count = 0u32;
     let mut parent_id: Option<OrderId> = None;
     let mut tp_id: Option<OrderId> = None;
     let mut sl_id: Option<OrderId> = None;
+    let mut parent_working = false;
+    let mut entry_moved = false;
     let mut entry_filled = false;
     let mut tp_active = false;
     let mut sl_active = false;
@@ -1383,8 +1390,8 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
                 tick_count += 1;
                 if tick_count == 5 && parent_id.is_none() {
                     let q = shared.market.quote(inst_id);
-                    if q.ask <= 0 { continue; }
-                    let entry = q.ask + 1_00_000_000;
+                    if q.ask <= 0 || q.bid <= 0 { continue; }
+                    let entry = q.bid - 5_00_000_000;
                     let pid = next_order_id();
                     let tid = pid + 1;
                     let sid = pid + 2;
@@ -1392,7 +1399,7 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
                         parent_id: pid, tp_id: tid, sl_id: sid,
                         instrument: inst_id, side: Side::Buy, qty: 1,
                         entry_price: entry,
-                        take_profit: entry + 100_00_000_000,
+                        take_profit: q.ask + 100_00_000_000,
                         stop_loss: 1_000_000,
                     })).unwrap();
                     parent_id = Some(pid);
@@ -1407,14 +1414,11 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
             Ok(Event::OrderUpdate(update)) => {
                 match update.status {
                     OrderStatus::PreSubmitted | OrderStatus::Submitted => {
+                        if Some(update.order_id) == parent_id { parent_working = true; }
                         if Some(update.order_id) == tp_id { tp_active = true; }
                         if Some(update.order_id) == sl_id { sl_active = true; }
-                        if tp_active && sl_active && !cancel_sent {
-                            if let Some(t) = tp_id { control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: t })).unwrap(); }
-                            if let Some(s) = sl_id { control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: s })).unwrap(); }
-                            cancel_sent = true;
-                        }
                     }
+                    OrderStatus::Filled if Some(update.order_id) == parent_id => { entry_filled = true; }
                     OrderStatus::Cancelled => {
                         cancelled_count += 1;
                         if cancelled_count >= 2 {
@@ -1429,6 +1433,25 @@ pub(super) fn phase_bracket_fill_cascade(conns: Conns) -> Conns {
                 }
             }
             _ => {}
+        }
+        // Every order of the bracket accepted: move the entry above the ask.
+        if parent_working && tp_active && sl_active && !entry_moved {
+            let q = shared.market.quote(inst_id);
+            if q.ask > 0 {
+                if let Some(pid) = parent_id {
+                    control_tx.send(ControlCommand::Order(OrderRequest::Modify {
+                        order_id: pid, new_order_id: pid, qty: 1,
+                        kind: OrderKind::Limit { price: q.ask + 1_00_000_000 }, tif: b'0', attrs: OrderAttrs::default(),
+                    })).unwrap();
+                    entry_moved = true;
+                }
+            }
+        }
+        // The entry filled with both children working: cancel the children.
+        if entry_filled && tp_active && sl_active && !cancel_sent {
+            if let Some(t) = tp_id { control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: t })).unwrap(); }
+            if let Some(s) = sl_id { control_tx.send(ControlCommand::Order(OrderRequest::Cancel { order_id: s })).unwrap(); }
+            cancel_sent = true;
         }
     }
     let _ = done;
