@@ -1046,7 +1046,7 @@ impl FarmState {
     ) {
         let Some(body) = find_body_after_tag(msg, b"35=G") else { return };
         let rx_farm = self.rx_farm;
-        let blocks: Vec<(u32, Option<i32>, Vec<u8>)> = crate::control::generic_values::blocks(body, |tag| {
+        let blocks = crate::control::generic_values::blocks(body, |tag| {
             if self.exchange_map_subs.iter().any(|s| s.farm == rx_farm && s.server_tag == Some(tag)) {
                 Some(626)
             } else if self.news.iter().any(|e| e.live && e.farm == rx_farm && e.tag == Some(tag)) {
@@ -1054,12 +1054,12 @@ impl FarmState {
             } else {
                 self.generic.iter().find(|e| e.farm == rx_farm && e.tag == Some(tag)).map(|e| e.code)
             }
-        }).into_iter().map(|(t, c, p)| (t, c, p.to_vec())).collect();
+        });
         for (tag, code, payload) in blocks {
             match code {
-                Some(626) => self.handle_exchange_map(tag, &payload, sink, shared, hb),
-                Some(292) => self.handle_tick_news(tag, &payload, shared, event_tx),
-                Some(code) => self.handle_generic_block(tag, code, &payload, context, shared),
+                Some(626) => self.handle_exchange_map(tag, payload, sink, shared, hb),
+                Some(292) => self.handle_tick_news(tag, payload, shared, event_tx),
+                Some(code) => self.handle_generic_block(tag, code, payload, context, shared),
                 None => log::warn!("Generic tick for server tag {} of no known request: dropped", tag),
             }
         }
