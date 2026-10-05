@@ -3328,11 +3328,18 @@ fn algo_fields(algo: &crate::types::OrderAlgo) -> Fields {
         }
         OrderAlgo::Params(params) => {
             let (algo_name, param_strs) = build_algo_tags(params);
-            // Tag 849 (maxPctVol) for algos that use it
+            // Tag 849 (maxPctVol) for algos that use it, only when it was
+            // given: the reference writes the parameters the order has, and
+            // the server refused the 849=0 ibx sent for a Vwap without it
+            // ("Invalid value in field # 849", paper 05/10/2026). A value of
+            // 0 is refused before (441, its minimum is 0.01), so 0 here is a
+            // parameter not given.
             match params {
                 AlgoParams::Vwap { max_pct_vol, .. }
                 | AlgoParams::ArrivalPx { max_pct_vol, .. }
-                | AlgoParams::ClosePx { max_pct_vol, .. } => fields.push((849, format!("{}", max_pct_vol))),
+                | AlgoParams::ClosePx { max_pct_vol, .. } if *max_pct_vol != 0.0 => {
+                    fields.push((849, format!("{}", max_pct_vol)))
+                }
                 _ => {}
             }
             fields.push((847, algo_name.to_string()));
@@ -5531,6 +5538,22 @@ mod tests {
             assert!(mine.len() > 10, "{captured}");
             assert_eq!(mine, theirs, "{captured}");
         }
+    }
+
+    // ibx#263: 849 (maxPctVol) goes out only when the order has it; a Vwap
+    // without it got "Invalid value in field # 849" from the server for the
+    // 849=0 ibx sent (paper 05/10/2026).
+    #[test]
+    fn max_pct_vol_only_when_given() {
+        let vwap = |max_pct_vol: f64| wire_tags(OrderRequest::SubmitAlgo { order_id: 1, instrument: 0, side: Side::Buy, qty: 1,
+            price: px(237.82),
+            algo: AlgoParams::Vwap { max_pct_vol, no_take_liq: false, allow_past_end_time: true,
+                start_time: "09:00:00".into(), end_time: String::new() },
+            tif: b'0', attrs: Default::default() });
+        let without = vwap(0.0);
+        assert_eq!(tag(&without, 849), None, "{without:?}");
+        assert_eq!(tag(&without, 847), Some("Vwap"));
+        assert_eq!(tag(&vwap(0.1), 849), Some("0.1"));
     }
 
     // ibx#466 (captured 25/09/2026, paper, AAPL, account masked): a new
