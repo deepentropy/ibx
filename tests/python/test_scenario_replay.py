@@ -332,3 +332,16 @@ def test_callback_objects_have_the_official_attribute_names():
     r.realizedPNL, r.yield_ = 1.5, 0.25
     # yieldRedemptionDate is an int (YYYYMMDD), 0 when none, as the official API's.
     assert (r.realized_pnl, r.yield_amount, r.execId, r.commissionAndFees, r.yieldRedemptionDate) == (1.5, 0.25, "", 0.0, 0)
+
+
+# Generic ticks (05/10/2026, ibx#450): AAPL with sixteen generic ticks, SPY
+# with mdoff, 233 and 236, an invalid list (321), EUR.USD with 233 on the cash
+# farm, MNQ with 588 on the futures farm: the entries on the wire and every
+# API tick of the blocks, as the Rust test.
+def test_generic_ticks():
+    out = replay("20261005/b2_generic", farms=["cashfarm", "usfuture"])
+    theirs = assert_same(out)
+    assert out["frames_compared"] > 10
+    for prefix in ("tickGeneric|9620|46|", "tickSize|9620|87|", "tickString|9620|59|", "tickString|9621|48|",
+                   "tickSize|9625|86|"):
+        assert any(l.startswith(prefix) for l in theirs), prefix

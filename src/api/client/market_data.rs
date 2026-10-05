@@ -18,15 +18,21 @@ impl EClient {
     ///
     /// `generic_tick_list` is checked as the reference checks it: a list
     /// with an unknown tick, or one not legal for the security type, is
-    /// refused with error 321 (ibx#450). It is NOT transmitted to the
-    /// gateway, with one exception: the news tick, "292" (every subscribed
-    /// news source) or "292:CODE1+CODE2", subscribes the contract's
-    /// headlines, delivered as `tick_news` (ibx#458); a derivative contract
-    /// or a code that is not a subscribed source ends the request with
-    /// error 10094. Other generic tick types (RTVolume and friends) have no
-    /// emission path, and `tick_generic` fires only for a snapshot's halted
-    /// state, 49 (ibx#234, ibx#446). Delayed data cannot be requested
-    /// either — see `req_market_data_type`.
+    /// refused with error 321 (ibx#450). Each generic tick valid for the
+    /// contract is its own farm entry, shared by the requests of the
+    /// contract, and its values come as the reference's ticks
+    /// (`control::generic_values`): option volume 29/30 (100), open
+    /// interest 27/28 (101), average option volume 87 (105), implied and
+    /// historical volatility 24 (106) and 23 (104), misc stats 21 and
+    /// 15-20 (165), auction 34-36 and 61 (225), RTVolume 48 (233) and RT
+    /// trade volume 77 (375), shortable 46 and 89 (236), trade count, rate
+    /// and volume rate 54-56 (293-295), last RTH trade 57 (318), dividends
+    /// 59 (456), futures open interest 86 (588). The other legal ticks are
+    /// accepted and not sent. The news tick, "292" (every subscribed news
+    /// source) or "292:CODE1+CODE2", subscribes the contract's headlines,
+    /// delivered as `tick_news` (ibx#458); a derivative contract or a code
+    /// that is not a subscribed source ends the request with error 10094.
+    /// `mdoff` keeps the top of book ticks from the request.
     ///
     /// Several request ids may ask for one contract, as with the
     /// reference (ibx#444): they share its subscription, a request that
@@ -173,7 +179,7 @@ impl EClient {
         if let Some(cancel) = self.core.unregister_mkt_data(&self.shared, req_id) {
             // The subscription ends with the last request of the contract;
             // its news entries go with it (ibx#458, ibx#444).
-            if let Some(command) = cancel.command() {
+            for command in cancel.commands() {
                 self.send(command)?;
             }
         } else {

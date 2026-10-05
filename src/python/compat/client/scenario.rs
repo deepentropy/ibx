@@ -60,21 +60,27 @@ impl EClient {
     /// client is attached to an engine on in-memory links, `driver` makes
     /// the requests and gives the callbacks. `name` is a scenario
     /// (`20260926/lmt_cancel`) or, with `codec=True`, a codec fixture.
-    /// Options: `until`, `skip_seqs`, `skip_orders`, `compare` (frame kinds).
+    /// Options: `until`, `skip_seqs`, `skip_orders`, `compare` (frame kinds),
+    /// `farms` (other market data farms played on the farm link).
     /// Returns a dict: `frame_error`, `frames_compared`, `ours`, `theirs`
     /// (callback lines), `unsent`, `not_made`.
     #[doc(hidden)]
-    #[pyo3(signature = (name, driver, codec=false, until=None, skip_seqs=Vec::new(), skip_orders=Vec::new(), compare=None))]
+    #[pyo3(signature = (name, driver, codec=false, until=None, skip_seqs=Vec::new(), skip_orders=Vec::new(), compare=None, farms=Vec::new()))]
     #[allow(clippy::too_many_arguments)]
     fn _test_replay_scenario<'py>(
         &self, py: Python<'py>, name: &str, driver: Bound<'py, PyAny>, codec: bool, until: Option<u64>,
-        skip_seqs: Vec<u64>, skip_orders: Vec<i64>, compare: Option<Vec<String>>,
+        skip_seqs: Vec<u64>, skip_orders: Vec<i64>, compare: Option<Vec<String>>, farms: Vec<String>,
     ) -> PyResult<Bound<'py, PyDict>> {
         if self.connected.load(Ordering::Acquire) {
             return Err(PyRuntimeError::new_err("Already connected"));
         }
         let scenario = if codec { load_codec(name) } else { load_scenario(name) };
         let mut opts = Options::default().skip_seqs(&skip_seqs).skip_orders(&skip_orders);
+        if !farms.is_empty() {
+            // Test-only: the farm names live as long as the process.
+            let farms: Vec<&'static str> = farms.into_iter().map(|f| &*Box::leak(f.into_boxed_str())).collect();
+            opts = opts.farms(&farms);
+        }
         if let Some(u) = until {
             opts = opts.until(u);
         }

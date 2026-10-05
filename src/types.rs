@@ -2008,6 +2008,16 @@ pub enum ControlCommand {
     /// still use (ibx#444): its share of the news entry with this provider
     /// key goes; the entry is cancelled when no request uses it.
     UnsubscribeNews { instrument: InstrumentId, providers: String },
+    /// The generic ticks of a market data request (ibx#450), request codes,
+    /// given after its `Subscribe` / `SubscribeBySymbol`: each one the
+    /// contract does not have yet is an entry on the farm of the contract's
+    /// route, at once or once its top of book is acknowledged
+    /// (`control::generic_values`). The entries are cancelled with the
+    /// request (`Unsubscribe`).
+    SubscribeGeneric { instrument: InstrumentId, con_id: i64, exchange: String, sec_type: String, codes: Vec<i32> },
+    /// A request with generic ticks left an instrument other requests still
+    /// use (ibx#450): the entries no request needs any more are cancelled.
+    UnsubscribeGeneric { instrument: InstrumentId, codes: Vec<i32> },
     /// Subscribe to whole-account P&L via CCP (6040=142).
     SubscribePnl { req_id: i64, account: String },
     /// Cancel P&L subscription.

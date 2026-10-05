@@ -114,7 +114,7 @@ impl EClient {
         if let Some(cancel) = self.core.unregister_mkt_data(&shared, req_id) {
             // The subscription ends with the last request of the contract;
             // its news entries go with it (ibx#458, ibx#444).
-            if let Some(command) = cancel.command() {
+            for command in cancel.commands() {
                 let tx = self.tx()?;
                 send_cmd(py, &tx, command)?;
             }

@@ -295,6 +295,9 @@ pub struct Options {
     /// for the definitions the reference had before this one (see
     /// [`Options::replies_from`]).
     pub replies: Vec<Rec>,
+    /// Other market data farms of the recording played on the farm link
+    /// (see [`Options::farms`]).
+    pub farms: Vec<&'static str>,
 }
 
 impl Default for Options {
@@ -309,6 +312,7 @@ impl Default for Options {
             frame_mask: |_| {},
             skip_frame: |_| false,
             replies: Vec::new(),
+            farms: Vec::new(),
         }
     }
 }
@@ -358,6 +362,17 @@ impl Options {
 
     pub fn frame_mask(mut self, mask: fn(&mut Fields)) -> Self {
         self.frame_mask = mask;
+        self
+    }
+
+    /// Play the market data frames of these farms of the recording (the
+    /// cash farm, the futures farm, ...) on the farm link: ibx's engine
+    /// without the logon's routing table sends every market data request
+    /// to its primary farm. Their server tags must not meet the primary
+    /// farm's in the recording; their session frames (logon, heartbeats)
+    /// are left out.
+    pub fn farms(mut self, farms: &[&'static str]) -> Self {
+        self.farms = farms.to_vec();
         self
     }
 }
@@ -423,6 +438,7 @@ fn session_notice(line: &str) -> bool {
 /// A callback line with its session values masked:
 /// - the end of a historical request made with no end time is the time it
 ///   was made (`now` holds those requests);
+/// - the time in an RTVolume text (48, 77) is the time the block was read;
 /// - the class name a 321 "Error validating request" names is the class of
 ///   the request as the API client encoded it: a protobuf client (the
 ///   recordings) gets other letters than the one ibx gives
@@ -431,6 +447,15 @@ pub fn session_values(line: &str, now: &HashSet<String>) -> String {
     let f: Vec<&str> = line.split('|').collect();
     if f[0] == "historicalDataEnd" && f.len() > 1 && now.contains(f[1]) {
         return format!("historicalDataEnd|{}|{{start}}|{{now}}", f[1]);
+    }
+    // The RTVolume time is the time the reference read the block
+    // (`generictick.aB`, `jutils.d1.r()`, ibx#450): a session value.
+    if f[0] == "tickString" && matches!(f.get(2), Some(&"48") | Some(&"77")) && f.len() == 4 {
+        let mut parts: Vec<&str> = f[3].split(';').collect();
+        if parts.len() == 6 {
+            parts[2] = "{time}";
+            return format!("tickString|{}|{}|{}", f[1], f[2], parts.join(";"));
+        }
     }
     if f[0] == "error" && f.get(2) == Some(&"321")
         && let Some(a) = line.find("Error validating request.-'")
@@ -591,6 +616,18 @@ pub fn run(sc: &Scenario, opts: &Options, links: &mut Links, driver: &mut dyn Dr
 }
 
 impl Run<'_> {
+    /// The link of a recorded connection, with the other farms played on
+    /// the farm link.
+    fn link(&self, conn: &str) -> Option<Link> {
+        Link::of(conn).or_else(|| self.opts.farms.contains(&conn).then_some(Link::Farm))
+    }
+
+    /// A recorded market data frame of the farm link (the primary farm, or
+    /// one of [`Options::farms`]).
+    fn on_farm_link(&self, r: &Rec) -> bool {
+        r.conn == "usfarm" || self.opts.farms.contains(&r.conn.as_str())
+    }
+
     fn go(&mut self) {
         while self.at < self.recs.len() {
             let r = self.recs[self.at].clone();
@@ -733,7 +770,7 @@ impl Run<'_> {
 
     /// A frame the reference sent.
     fn reference_sent(&mut self, r: &Rec) {
-        let Some(link) = Link::of(&r.conn) else { return };
+        let Some(link) = self.link(&r.conn) else { return };
         let gw = r.fields();
         let Some(kd) = kind(link, &gw) else { return };
         if self.before_the_scenario(kd, &gw) {
@@ -840,7 +877,7 @@ impl Run<'_> {
             SUBSCRIPTION | HISTORICAL => {
                 // The frame of ibx of the same rank.
                 let same = |f: &Fields| msg_type(f) == msg_type(gw) && tag(f, 6040) == tag(gw, 6040) && tag(f, 6036) == tag(gw, 6036);
-                let rank = self.recs[..self.at].iter().filter(|r| Link::of(&r.conn) == Some(link) && r.leg == "fix_out")
+                let rank = self.recs[..self.at].iter().filter(|r| self.link(&r.conn) == Some(link) && r.leg == "fix_out")
                     .filter(|r| same(&r.fields())).count();
                 if let Some(ours) = self.sent(link).iter().filter(|f| same(f)).nth(rank.saturating_sub(1)).cloned() {
                     self.learn(kd, gw, &ours);
@@ -918,10 +955,14 @@ impl Run<'_> {
         if matches!(r.msg.as_str(), "0" | "1") {
             return;
         }
-        let Some(link) = Link::of(&r.conn) else {
+        let Some(link) = self.link(&r.conn) else {
             self.out.unsent.push((r.seq, r.conn.clone()));
             return;
         };
+        // Another farm's session frames: its logon is not replayed.
+        if link == Link::Farm && r.conn != "usfarm" && !matches!(r.msg.as_str(), "Q" | "L" | "P" | "G" | "3" | "Y" | "Z") {
+            return;
+        }
         match link {
             Link::Ccp if r.raw.starts_with(b"8=FIX") => {
                 self.pair_orders();
@@ -969,7 +1010,7 @@ impl Run<'_> {
                 self.send(link, &rebuild_binary(&r.raw, &body));
             }
             Link::Farm => {
-                for o in self.recs[..self.at].iter().filter(|o| o.is("fix_out", "usfarm", "V")).cloned().collect::<Vec<_>>() {
+                for o in self.recs[..self.at].iter().filter(|o| o.leg == "fix_out" && o.msg == "V" && self.on_farm_link(o)).cloned().collect::<Vec<_>>() {
                     self.pair_farm(&o.fields());
                 }
                 match r.msg.as_str() {
@@ -986,7 +1027,10 @@ impl Run<'_> {
                     }
                     "3" => {
                         let mut f = r.fields();
-                        let ours = tag(&f, 262).and_then(|v| self.ids.farm.get(v).cloned());
+                        // 262 may be a `;` list of the rejected ids.
+                        let ours = tag(&f, 262).and_then(|v| {
+                            v.split(';').map(|id| self.ids.farm.get(id).cloned()).collect::<Option<Vec<String>>>()
+                        }).map(|ids| ids.join(";"));
                         match ours {
                             Some(id) => {
                                 for (t, v) in f.iter_mut() { if *t == 262 { *v = id.clone(); } }

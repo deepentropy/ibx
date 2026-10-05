@@ -1,0 +1,56 @@
+{"type":"header","format":"four-leg-api/1","source":"20261005/b2_rtbars.jsonl","scenario":"b2_rtbars","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
+{"seq":16634,"leg":"api_out","msg_name":"START_API","request":{"clientId":198}}
+{"seq":16635,"leg":"api_in","msg_name":"MANAGED_ACCTS","callbacks":[["managedAccounts","DUXXXXXXX"]]}
+{"seq":16636,"leg":"api_in","msg_name":"NEXT_VALID_ID","callbacks":[["nextValidId",105]]}
+{"seq":16637,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfuture",""]]}
+{"seq":16638,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:cashfarm",""]]}
+{"seq":16639,"leg":"api_out","msg_name":"REQ_REAL_TIME_BARS","request":{"reqId":9640,"contract":{"conId":0,"symbol":"AAPL","secType":"STK","exchange":"SMART","currency":"USD"},"barSize":5,"whatToShow":"TRADES","useRTH":true}}
+{"seq":16640,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfarm",""]]}
+{"seq":16641,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2106,"HMDS data farm connection is OK:cashhmds",""]]}
+{"seq":16642,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2106,"HMDS data farm connection is OK:ushmds",""]]}
+{"seq":16643,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2158,"Sec-def data farm connection is OK:secdefil",""]]}
+{"seq":16644,"leg":"api_out","msg_name":"REQ_REAL_TIME_BARS","request":{"reqId":9641,"contract":{"conId":0,"symbol":"AAPL","secType":"STK","exchange":"SMART","currency":"USD"},"barSize":5,"whatToShow":"TRADES","useRTH":true}}
+{"seq":16645,"leg":"api_out","msg_name":"REQ_REAL_TIME_BARS","request":{"reqId":9642,"contract":{"conId":0,"symbol":"AAPL","secType":"STK","exchange":"SMART","currency":"USD"},"barSize":5,"whatToShow":"MIDPOINT","useRTH":true}}
+{"seq":16647,"leg":"api_out","msg_name":"REQ_REAL_TIME_BARS","request":{"reqId":9643,"contract":{"conId":0,"symbol":"AXTI","secType":"STK","exchange":"SMART","currency":"USD"},"barSize":5,"whatToShow":"TRADES","useRTH":true}}
+{"seq":16761,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9640,1791220130,333.77,333.79,333.71,333.78,"2404","333.7429450915141",34]]}
+{"seq":16762,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9641,1791220130,333.77,333.79,333.71,333.78,"2404","333.7429450915141",34]]}
+{"seq":16763,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9642,1791220130,333.78,333.78,333.725,333.76,"-1","-1",-1]]}
+{"seq":16764,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9643,1791220130,84.87,84.87,84.87,84.87,"100","84.87",1]]}
+{"seq":16836,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9642,1791220135,333.76,333.76,333.72,333.73,"-1","-1",-1]]}
+{"seq":16837,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9640,1791220135,333.76,333.76,333.7,333.73,"4644","333.7300064599483",55]]}
+{"seq":16838,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9641,1791220135,333.76,333.76,333.7,333.73,"4644","333.7300064599483",55]]}
+{"seq":16850,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9643,1791220135,84.89,84.92,84.89,84.92,"900","84.90555555555556",8]]}
+{"seq":16862,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9640,1791220140,333.72,333.78,333.72,333.74,"2706","333.7511751662971",39]]}
+{"seq":16863,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9641,1791220140,333.72,333.78,333.72,333.74,"2706","333.7511751662971",39]]}
+{"seq":16864,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9642,1791220140,333.73,333.77,333.725,333.73,"-1","-1",-1]]}
+{"seq":16876,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9643,1791220140,84.88,84.92,84.88,84.92,"200","84.90000000000001",2]]}
+{"seq":16937,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2108,"Market data farm connection is inactive but should be available upon demand.usfuture",""]]}
+{"seq":16938,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2108,"Market data farm connection is inactive but should be available upon demand.usfuture",""]]}
+{"seq":16941,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2108,"Market data farm connection is inactive but should be available upon demand.cashfarm",""]]}
+{"seq":16942,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2108,"Market data farm connection is inactive but should be available upon demand.cashfarm",""]]}
+{"seq":16997,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9640,1791220145,333.74,333.75,333.68,333.72,"4049","333.7064830822425",61]]}
+{"seq":16998,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9641,1791220145,333.74,333.75,333.68,333.72,"4049","333.7064830822425",61]]}
+{"seq":17022,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9642,1791220145,333.73,333.735,333.67,333.69,"-1","-1",-1]]}
+{"seq":17058,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9643,1791220145,84.92,84.92,84.92,84.92,"0","84.92",0]]}
+{"seq":17077,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9642,1791220150,333.69,333.725,333.675,333.715,"-1","-1",-1]]}
+{"seq":17078,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9640,1791220150,333.7,333.73,333.66,333.72,"6933","333.7046934948796",69]]}
+{"seq":17079,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9641,1791220150,333.7,333.73,333.66,333.72,"6933","333.7046934948796",69]]}
+{"seq":17091,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9643,1791220150,84.92,84.92,84.92,84.92,"0","84.92",0]]}
+{"seq":17168,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9640,1791220155,333.71,333.72,333.65,333.65,"2564","333.6882176287052",41]]}
+{"seq":17169,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9641,1791220155,333.71,333.72,333.65,333.65,"2564","333.6882176287052",41]]}
+{"seq":17170,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9642,1791220155,333.715,333.72,333.665,333.665,"-1","-1",-1]]}
+{"seq":17182,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9643,1791220155,84.88,84.88,84.84,84.84,"300","84.86333333333333",3]]}
+{"seq":17194,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9642,1791220160,333.665,333.73,333.66,333.68,"-1","-1",-1]]}
+{"seq":17206,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9640,1791220160,333.67,333.73,333.66,333.68,"6102","333.6880612913799",74]]}
+{"seq":17207,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9641,1791220160,333.67,333.73,333.66,333.68,"6102","333.6880612913799",74]]}
+{"seq":17208,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9643,1791220160,84.885,84.885,84.885,84.885,"100","84.885",1]]}
+{"seq":17209,"leg":"api_out","msg_name":"CANCEL_REAL_TIME_BARS","request":{"reqId":9640}}
+{"seq":17284,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9641,1791220165,333.69,333.7,333.66,333.7,"1800","333.6805722222222",22]]}
+{"seq":17285,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9642,1791220165,333.68,333.7,333.675,333.7,"-1","-1",-1]]}
+{"seq":17297,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9643,1791220165,84.885,84.885,84.885,84.885,"0","84.885",0]]}
+{"seq":17309,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9642,1791220170,333.7,333.775,333.68,333.74,"-1","-1",-1]]}
+{"seq":17310,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9641,1791220170,333.7,333.78,333.67,333.74,"8013","333.7312217646325",69]]}
+{"seq":17311,"leg":"api_in","msg_name":"REAL_TIME_BARS","callbacks":[["realtimeBar",9643,1791220170,84.885,84.885,84.885,84.885,"500","84.885",4]]}
+{"seq":17354,"leg":"api_out","msg_name":"CANCEL_REAL_TIME_BARS","request":{"reqId":9641}}
+{"seq":17355,"leg":"api_out","msg_name":"CANCEL_REAL_TIME_BARS","request":{"reqId":9642}}
+{"seq":17356,"leg":"api_out","msg_name":"CANCEL_REAL_TIME_BARS","request":{"reqId":9643}}

@@ -378,3 +378,33 @@ fn dump_all_scenarios() {
         dump(name, &o);
     }
 }
+
+// ── Generic ticks (ibx#450) ──
+
+// AAPL with sixteen generic ticks, SPY with mdoff, 233 and 236, an
+// invalid list, EUR.USD with 233 (not valid for a currency pair: nothing
+// sent) on the cash farm, MNQ with 588 on the futures farm, in the
+// session (05/10/2026): the entries of the ticks that go at once after the
+// top of book, the others with the exchange map entry at the
+// acknowledgement, their cancels; the API ticks of each block.
+#[test]
+fn generic_ticks() {
+    let o = check("20261005/b2_generic", Options::default().farms(&["cashfarm", "usfuture"]));
+    assert!(o.frames_compared > 10, "{}", o.frames_compared);
+}
+
+// ── Market data errors (ibx#444) ──
+
+// Two request ids on AAPL at once; 7203 on the Tokyo farm without its
+// subscription: 354 with the contract named, with type 1, with 233 (its
+// entry cancelled with the top of book), 10167 and delayed data with type
+// 3, then type 1 again (05/10/2026). The reference had AAPL's exchange map
+// from earlier in its session: the map's frames and the exchange letters
+// are left out.
+#[test]
+fn market_data_errors() {
+    // The cancel of the last request: the client left before its answer.
+    check("20261005/b2_mkt_errors", Options::default().farms(&["jfarm"]).skip_frame(exchange_map).skip_seqs(&[18512])
+        .keep(|l| !l.starts_with("tickString|9650|32|") && !l.starts_with("tickString|9650|33|")
+            && !l.starts_with("tickString|9651|32|") && !l.starts_with("tickString|9651|33|")));
+}

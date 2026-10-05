@@ -996,25 +996,44 @@ fn news_key_covers(key: &str, provider: &str) -> bool {
     key.is_empty() || key.split(',').any(|code| code.eq_ignore_ascii_case(provider))
 }
 
+/// The generic ticks of a market data request (ibx#450): request codes,
+/// and the exchange and security type it was asked with.
+#[derive(Debug, Clone)]
+pub struct MdGeneric {
+    pub codes: Vec<i32>,
+    pub exchange: String,
+    pub sec_type: String,
+}
+
 /// What the engine is told when a market data request ends (ibx#444).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MdCancel {
     /// The last request of the instrument: its subscription ends.
     Instrument(InstrumentId),
     /// Other requests still use the instrument: only this request's share
-    /// of its news entry goes, when it had the news tick.
-    Shared { instrument: InstrumentId, news: Option<String> },
+    /// of its news entry goes, when it had the news tick, and of its
+    /// generic tick entries (ibx#450).
+    Shared { instrument: InstrumentId, news: Option<String>, generic: Vec<i32> },
     /// A request waiting for a market data line (101): nothing was sent.
     Waiting,
 }
 
 impl MdCancel {
-    /// The command for the engine, if any.
-    pub fn command(self) -> Option<ControlCommand> {
+    /// The commands for the engine.
+    pub fn commands(self) -> Vec<ControlCommand> {
         match self {
-            MdCancel::Instrument(instrument) => Some(ControlCommand::Unsubscribe { instrument }),
-            MdCancel::Shared { instrument, news } => news.map(|providers| ControlCommand::UnsubscribeNews { instrument, providers }),
-            MdCancel::Waiting => None,
+            MdCancel::Instrument(instrument) => vec![ControlCommand::Unsubscribe { instrument }],
+            MdCancel::Shared { instrument, news, generic } => {
+                let mut out: Vec<ControlCommand> = Vec::new();
+                if !generic.is_empty() {
+                    out.push(ControlCommand::UnsubscribeGeneric { instrument, codes: generic });
+                }
+                if let Some(providers) = news {
+                    out.push(ControlCommand::UnsubscribeNews { instrument, providers });
+                }
+                out
+            }
+            MdCancel::Waiting => Vec::new(),
         }
     }
 }
@@ -1037,6 +1056,11 @@ pub struct MdWaiting {
 
 /// Error 101 of the reference (`jextend.d7.e`).
 pub const MD_MAX_TICKERS: (i64, &str) = (101, "Max number of tickers has been reached");
+
+/// The text of 354 for a refused top of book (captured 05/10/2026), before
+/// what is appended to it.
+pub const MD_NOT_SUBSCRIBED: &str = "Requested market data is not subscribed. Check API status by selecting the Account menu \
+    then under Management choose Market Data Subscription Manager and/or availability of delayed data.";
 
 /// A callback for a market data request beside its ticks (ibx#444).
 #[derive(Debug, Clone, PartialEq)]
@@ -1076,6 +1100,9 @@ pub struct ClientCore {
     /// The market data requests whose generic tick list has `mdoff`: no
     /// top of book ticks (ibx#444).
     pub md_top_off: Mutex<HashSet<i64>>,
+    /// The generic ticks of each market data request (ibx#450): a request
+    /// gets the API ticks of those only.
+    pub md_generic: Mutex<HashMap<i64, MdGeneric>>,
     /// Streaming requests that got 101 and wait for a line, oldest first
     /// (ibx#444).
     pub md_waiting: Mutex<Vec<MdWaiting>>,
@@ -1421,6 +1448,7 @@ impl ClientCore {
             md_out: Mutex::new(Vec::with_capacity(64)),
             md_news: Mutex::new(HashMap::new()),
             md_top_off: Mutex::new(HashSet::new()),
+            md_generic: Mutex::new(HashMap::new()),
             md_waiting: Mutex::new(Vec::new()),
             md_delayed_known: Mutex::new(HashSet::new()),
             instrument_params: Mutex::new(HashMap::new()),
@@ -1480,6 +1508,7 @@ impl ClientCore {
         *self.md_reader.lock().unwrap() = md_stream::MdReader::new();
         self.md_joins_waiting.store(0, Ordering::Release);
         self.md_news.lock().unwrap().clear();
+        self.md_generic.lock().unwrap().clear();
         self.instrument_params.lock().unwrap().clear();
         self.instrument_news.lock().unwrap().clear();
         self.md_joins.lock().unwrap().clear();
@@ -1669,9 +1698,28 @@ impl ClientCore {
         // off for the request, as the reference's `generictick.bq.a(String)`
         // (ibx#444).
         let top_off = generic_tick_list.to_ascii_lowercase().contains("mdoff");
+        // Its other generic ticks (ibx#450), request codes; the news tick
+        // has its own entry.
+        let generic: Vec<i32> = if snapshot {
+            Vec::new()
+        } else {
+            crate::control::generic_tick::parse(generic_tick_list, sec_type).unwrap_or_default()
+                .into_iter().map(|t| t.code).filter(|&c| c != 292).collect()
+        };
+        let send_generic = |instrument: InstrumentId| {
+            if !generic.is_empty() {
+                self.md_generic.lock().unwrap().insert(req_id, MdGeneric {
+                    codes: generic.clone(), exchange: exchange.to_string(), sec_type: sec_type.to_string(),
+                });
+                let _ = control_tx.send(ControlCommand::SubscribeGeneric {
+                    instrument, con_id, exchange: exchange.to_string(), sec_type: sec_type.to_string(), codes: generic.clone(),
+                });
+            }
+        };
         let attach = |instrument: InstrumentId, had_data: bool| {
             if self.attach_md_request(shared, req_id, instrument, snapshot, sec_type, exchange, news_key.clone(), had_data, top_off) {
                 send_news(instrument);
+                send_generic(instrument);
             }
             Ok(Some(instrument))
         };
@@ -2097,10 +2145,11 @@ impl ClientCore {
         self.tick_req_params_sent.lock().unwrap().remove(&req_id);
         self.md_joins.lock().unwrap().retain(|(r, _)| *r != req_id);
         let news = self.md_news.lock().unwrap().remove(&req_id);
+        let generic = self.md_generic.lock().unwrap().remove(&req_id).map(|g| g.codes).unwrap_or_default();
         self.md_top_off.lock().unwrap().remove(&req_id);
         self.end_snapshot(req_id);
         if !last {
-            return Some(MdCancel::Shared { instrument, news });
+            return Some(MdCancel::Shared { instrument, news, generic });
         }
         // No step of the contract is queued any more (ibx#446).
         shared.market.md_events.listen(instrument, false);
@@ -2142,12 +2191,14 @@ impl ClientCore {
             // None left: they were cancelled, which freed the slot.
             let Some(reqs) = self.instrument_to_req.lock().unwrap().remove(&from) else { continue };
             for req_id in reqs {
+                // Its generic ticks go to the contract it joins (ibx#450).
+                if let Some(MdGeneric { codes, exchange, sec_type }) = self.md_generic.lock().unwrap().get(&req_id).cloned() {
+                    commands.push(ControlCommand::SubscribeGeneric { instrument: into, con_id: 0, exchange, sec_type, codes });
+                }
                 if !self.join_md_observers(shared, req_id, into, false, None, Some(at)) {
                     // Refused (10168): the request is gone.
                     self.req_to_instrument.lock().unwrap().insert(req_id, into);
-                    if let Some(command) = self.drop_mkt_data(shared, req_id, false).and_then(MdCancel::command) {
-                        commands.push(command);
-                    }
+                    commands.extend(self.drop_mkt_data(shared, req_id, false).map(MdCancel::commands).unwrap_or_default());
                 }
             }
             commands.push(ControlCommand::Unsubscribe { instrument: from });
@@ -2164,7 +2215,18 @@ impl ClientCore {
                 }
             }
             let keeps_news = matches!(reject, crate::bridge::MdReject::NotSubscribed { .. });
+            // The parameters the contract's record kept from an earlier
+            // subscription go first (ibx#444).
+            let kept = match &reject {
+                crate::bridge::MdReject::NotSubscribed { kept_params, .. } => kept_params.clone(),
+                _ => None,
+            };
             for req_id in self.md_requests_of(reject.instrument()) {
+                if let Some((min_tick, bbo_exchange, permissions)) = kept.clone()
+                    && self.tick_req_params_sent.lock().unwrap().insert(req_id)
+                {
+                    notices.push(MdNotice::TickReqParams { req_id, min_tick, bbo_exchange, permissions });
+                }
                 if !gone {
                     self.set_delayed(req_id);
                     notices.push(MdNotice::MarketDataType { req_id, market_data_type: 3 });
@@ -2173,9 +2235,7 @@ impl ClientCore {
                     notices.push(MdNotice::Error { req_id, code: MD_TOP_REJECTED.0, text: MD_TOP_REJECTED.1.to_string() });
                 } else {
                     notices.push(MdNotice::Error { req_id, code, text: text.to_string() });
-                    if let Some(command) = self.drop_mkt_data(shared, req_id, false).and_then(MdCancel::command) {
-                        commands.push(command);
-                    }
+                    commands.extend(self.drop_mkt_data(shared, req_id, false).map(MdCancel::commands).unwrap_or_default());
                 }
             }
         }
@@ -2775,21 +2835,30 @@ impl ClientCore {
     /// whether the subscription is gone (ibx#444, ibx#447). The texts are the
     /// reference's; for 354 and 10089 on this path any contract suffix the
     /// reference adds is not captured.
-    pub fn md_reject_error(reject: &crate::bridge::MdReject) -> (i64, &str, bool) {
+    pub fn md_reject_error(reject: &crate::bridge::MdReject) -> (i64, String, bool) {
         use crate::bridge::MdReject;
         match reject {
             MdReject::Delayed { .. } =>
-                (10167, "Requested market data is not subscribed. Displaying delayed market data.", false),
-            MdReject::NotSubscribed { needs_api_subscription: true, .. } =>
-                (10089, "Requested market data requires additional subscription for API. See link in 'Market Data Connections' dialog for more details.", true),
-            // The reference appends the text to the sentence after its
-            // period, without a space (`jextend.ac.a(String,String)`).
-            MdReject::NotSubscribed { delayed_available: true, .. } =>
-                (354, "Requested market data is not subscribed.Delayed market data is available.", true),
-            MdReject::NotSubscribed { .. } => (354, "Requested market data is not subscribed.", true),
+                (10167, "Requested market data is not subscribed. Displaying delayed market data.".into(), false),
+            // The farm's refusal of the top of book: the message, the
+            // "delayed available" sentence appended after its period
+            // without a space (`jextend.ac.a(String,String)`), then the
+            // contract and "/TOP/ALL" (the market data type and the quote;
+            // captured 05/10/2026: "...availability of delayed data.Delayed
+            // market data is available.7203 TSEJ (7203.T) /TOP/ALL").
+            MdReject::NotSubscribed { needs_api_subscription, delayed_available, description, .. } => {
+                let (code, base) = if *needs_api_subscription {
+                    (10089, "Requested market data requires additional subscription for API. See link in 'Market Data Connections' dialog for more details.")
+                } else {
+                    (354, MD_NOT_SUBSCRIBED)
+                };
+                let delayed = if *delayed_available { "Delayed market data is available." } else { "" };
+                let suffix = if description.is_empty() { String::new() } else { format!("{description}/TOP/ALL") };
+                (code, format!("{base}{delayed}{suffix}"), true)
+            }
             MdReject::NoSecurityDefinition { .. } =>
-                (200, crate::engine::hot_loop::ccp::NO_SECURITY_DEFINITION, true),
-            MdReject::NewsRefused { text, .. } => (10094, text.as_str(), true),
+                (200, crate::engine::hot_loop::ccp::NO_SECURITY_DEFINITION.into(), true),
+            MdReject::NewsRefused { text, .. } => (10094, text.clone(), true),
         }
     }
 

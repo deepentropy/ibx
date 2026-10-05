@@ -242,6 +242,20 @@ struct BulletinStore {
     day: Option<jiff::civil::Date>,
 }
 
+/// The API ticks of one generic tick block of a contract (ibx#450), for the
+/// requests that asked that tick: `at` is the market data queue position
+/// when it was read, so the requests get it between the steps of the farm
+/// messages around it.
+#[derive(Debug, Clone)]
+pub struct GenericTicks {
+    pub at: u64,
+    pub instrument: InstrumentId,
+    /// The request code of the tick (233 and 375 go to the requests of
+    /// either).
+    pub code: i32,
+    pub ticks: Vec<crate::control::generic_values::GenTick>,
+}
+
 /// Lock-free quotes, TBT streams, real-time bars, depth updates, and news ticks.
 pub struct MarketDataState {
     quotes: Box<[SeqQuote; MAX_INSTRUMENTS]>,
@@ -256,6 +270,9 @@ pub struct MarketDataState {
     real_time_bars: Mutex<Vec<(ReqId, RealTimeBar)>>,
     depth_updates: Mutex<Vec<DepthUpdate>>,
     tick_news: Mutex<Vec<TickNews>>,
+    /// The API ticks of generic tick blocks (ibx#450), with their place in
+    /// `md_events`.
+    generic_ticks: Mutex<Vec<GenericTicks>>,
     news_bulletins: Mutex<BulletinStore>,
     /// Subscriptions the market data server rejected (ibx#444, ibx#447).
     md_rejects: Mutex<Vec<MdReject>>,
@@ -285,15 +302,22 @@ pub struct TickReqParams {
 
 /// A top-of-book subscription the server rejected, and what the client
 /// reports for it (ibx#444, ibx#447).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MdReject {
     /// Delayed data enabled and available: the subscription went on with
     /// delayed data (marketDataType 3 and error 10167).
     Delayed { instrument: InstrumentId },
     /// The subscription stopped: error 354 (with the "delayed available"
     /// text when the server says so) or 10089 (an API subscription is
-    /// needed).
-    NotSubscribed { instrument: InstrumentId, delayed_available: bool, needs_api_subscription: bool },
+    /// needed). `description`: the contract as the error names it
+    /// (`jclient.dy.cU()`), empty when not known (ibx#444).
+    /// `kept_params`: the request parameters (minimum tick, BBO exchange,
+    /// permissions) the contract's record kept from an earlier subscription,
+    /// which the requests get before the error (captured 05/10/2026).
+    NotSubscribed {
+        instrument: InstrumentId, delayed_available: bool, needs_api_subscription: bool, description: String,
+        kept_params: Option<(f64, String, i64)>,
+    },
     /// A subscription given without a conId whose lookup found no single
     /// contract: error 200, the subscription is gone (ibx#278).
     NoSecurityDefinition { instrument: InstrumentId },
@@ -326,6 +350,7 @@ impl MarketDataState {
             real_time_bars: Mutex::new(Vec::with_capacity(64)),
             depth_updates: Mutex::new(Vec::with_capacity(64)),
             tick_news: Mutex::new(Vec::with_capacity(32)),
+            generic_ticks: Mutex::new(Vec::new()),
             news_bulletins: Mutex::new(BulletinStore::default()),
             md_rejects: Mutex::new(Vec::new()),
             md_merges: Mutex::new(Vec::new()),
@@ -432,6 +457,17 @@ impl MarketDataState {
         self.tick_news.lock().unwrap().drain(..).collect()
     }
 
+    /// The generic tick blocks decoded before queue position `head`
+    /// (ibx#450); the later ones stay.
+    pub fn take_generic_ticks(&self, head: u64) -> Vec<GenericTicks> {
+        let mut q = self.generic_ticks.lock().unwrap();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let n = q.iter().take_while(|g| g.at <= head).count();
+        q.drain(..n).collect()
+    }
+
     pub fn drain_news_bulletins(&self) -> Vec<NewsBulletin> {
         self.news_bulletins.lock().unwrap().queue.drain(..).collect()
     }
@@ -484,6 +520,10 @@ impl MarketDataState {
     /// Remove all buffered depth updates for a given req_id (called on cancel).
     #[doc(hidden)] pub fn purge_depth_updates(&self, req_id: ReqId) {
         self.depth_updates.lock().unwrap().retain(|u| u.req_id != req_id);
+    }
+
+    #[doc(hidden)] pub fn push_generic_ticks(&self, ticks: GenericTicks) {
+        self.generic_ticks.lock().unwrap().push(ticks);
     }
 
     #[doc(hidden)] pub fn push_tick_news(&self, news: TickNews) {

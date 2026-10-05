@@ -171,6 +171,8 @@ struct Retired {
     end: u64,
     st: StreamState,
     snap: Option<PlainSnapshot>,
+    /// Its generic ticks (ibx#450).
+    generic: Vec<i32>,
 }
 
 /// The reader's side of the queue: the instruments' records, and the
@@ -298,10 +300,12 @@ fn stream_pass(st: &mut StreamState, m: &Mirror, pass: Pass, out: &mut Out) {
             continue;
         }
         match idx {
-            // A price comes with its size.
-            field::BID => { out.price(TICK_BID, idx, bid_auto); out.size(TICK_BID_SIZE, field::BID_SIZE); }
-            field::ASK => { out.price(TICK_ASK, idx, ask_auto); out.size(TICK_ASK_SIZE, field::ASK_SIZE); }
-            field::LAST => { out.price(TICK_LAST, idx, false); out.size(TICK_LAST_SIZE, field::LAST_SIZE); }
+            // A price comes with its size; the delayed sender does not send
+            // that size again on its own (captured 05/10/2026, 7203 on
+            // delayed data: 66 and 69, 67 and 70, 68 and 71, once each).
+            field::BID => { out.price(TICK_BID, idx, bid_auto); out.size(TICK_BID_SIZE, field::BID_SIZE); if delayed { todo[field::BID_SIZE] = false; } }
+            field::ASK => { out.price(TICK_ASK, idx, ask_auto); out.size(TICK_ASK_SIZE, field::ASK_SIZE); if delayed { todo[field::ASK_SIZE] = false; } }
+            field::LAST => { out.price(TICK_LAST, idx, false); out.size(TICK_LAST_SIZE, field::LAST_SIZE); if delayed { todo[field::LAST_SIZE] = false; } }
             field::BID_SIZE => out.size(TICK_BID_SIZE, idx),
             field::ASK_SIZE => out.size(TICK_ASK_SIZE, idx),
             field::LAST_SIZE => out.size(TICK_LAST_SIZE, idx),
@@ -481,8 +485,9 @@ impl ClientCore {
             return;
         }
         let end = shared.market.md_events.head();
-        if cancelled && !st.ended && end > shared.market.md_events.tail() {
-            self.md_reader.lock().unwrap().retired.push(Retired { req_id, instrument, end, st, snap });
+        let generic = self.md_generic.lock().unwrap().get(&req_id).map(|g| g.codes.clone()).unwrap_or_default();
+        if cancelled && !st.ended && (end > shared.market.md_events.tail() || !generic.is_empty()) {
+            self.md_reader.lock().unwrap().retired.push(Retired { req_id, instrument, end, st, snap, generic });
         }
     }
 
@@ -497,16 +502,23 @@ impl ClientCore {
         let head = queue.head();
         let tail = queue.tail();
         let snapshots = self.snapshot_count.load(Ordering::Acquire) > 0;
-        if head == tail && !snapshots && self.md_joins_waiting.load(Ordering::Acquire) == 0 {
+        // The generic tick blocks read before the queue's end (ibx#450).
+        let generic = shared.market.take_generic_ticks(head);
+        if head == tail && !snapshots && self.md_joins_waiting.load(Ordering::Acquire) == 0 && generic.is_empty() {
             return;
         }
+        let mut generic = generic.into_iter().peekable();
         let observers = self.instrument_to_req.lock().unwrap();
         let mut reader = self.md_reader.lock().unwrap();
         let mut streams = self.last_quotes.lock().unwrap();
         let mut snaps = self.snapshot_reqs.lock().unwrap();
         let MdReader { mirrors, resets, retired } = &mut *reader;
         let mut d = Drain { core: self, shared, out, streams: &mut streams, snaps: &mut snaps };
-        let mut step = |seq: u64| {
+        let mut step = |seq: u64, g: Option<&crate::bridge::GenericTicks>| {
+            if let Some(g) = g {
+                d.generic(g, observers.get(&g.instrument).map_or(&[][..], Vec::as_slice), retired);
+                return;
+            }
             let ev = queue.read(seq);
             let instrument = ev.instrument;
             let Some(m) = mirrors.get_mut(instrument as usize) else { return };
@@ -526,7 +538,10 @@ impl ClientCore {
                 }
             }
             m.apply(&ev);
-            for &req_id in reqs {
+            // The newest request first, as the reference notifies the
+            // subscribers of a record (captured 05/10/2026, two AAPL
+            // requests: each step went to the second one, then the first).
+            for &req_id in reqs.iter().rev() {
                 d.step(req_id, instrument, m, &ev, seq);
             }
             for r in retired.iter_mut().filter(|r| r.instrument == instrument && seq < r.end && seq >= r.st.start) {
@@ -536,9 +551,13 @@ impl ClientCore {
             }
         };
         // Message by message: its book updates after its other steps, as
-        // the reference applies them once it read the message.
+        // the reference applies them once it read the message; the generic
+        // tick blocks between the messages they came between (ibx#450).
         let mut start = tail;
         while start < head {
+            while let Some(g) = generic.next_if(|g| g.at <= start) {
+                step(start, Some(&g));
+            }
             let mut end = start + 1;
             let mut books = false;
             let mut others = false;
@@ -554,16 +573,19 @@ impl ClientCore {
                 for quotes in [false, true] {
                     for seq in start..end {
                         if (queue.step_at(seq).0 == MdStep::Quote) == quotes {
-                            step(seq);
+                            step(seq, None);
                         }
                     }
                 }
             } else {
                 for seq in start..end {
-                    step(seq);
+                    step(seq, None);
                 }
             }
             start = end;
+        }
+        for g in generic {
+            step(head, Some(&g));
         }
         queue.release(head);
         retired.clear();
@@ -642,6 +664,39 @@ struct Drain<'a> {
 }
 
 impl Drain<'_> {
+    /// The API ticks of a generic tick block (ibx#450) to the requests of
+    /// the instrument that asked that tick (RTVolume and RT trade volume:
+    /// either), made before the block came; a cancelled request gets the
+    /// blocks that came before its cancel.
+    fn generic(&mut self, g: &crate::bridge::GenericTicks, reqs: &[i64], retired: &[Retired]) {
+        use crate::control::generic_values::{GenTick, RT_TRADE_VOLUME, RT_VOLUME};
+        let asked = |codes: &[i32]| {
+            codes.contains(&g.code)
+                || (matches!(g.code, RT_VOLUME | RT_TRADE_VOLUME) && codes.iter().any(|c| matches!(*c, RT_VOLUME | RT_TRADE_VOLUME)))
+        };
+        let wanted: Vec<i64> = {
+            let generic = self.core.md_generic.lock().unwrap();
+            let live = reqs.iter().rev().copied()
+                .filter(|r| self.streams.get(r).is_none_or(|st| st.start <= g.at && !st.ended))
+                .filter(|r| generic.get(r).is_some_and(|g| asked(&g.codes)));
+            let gone = retired.iter()
+                .filter(|r| r.instrument == g.instrument && g.at < r.end && r.st.start <= g.at && asked(&r.generic))
+                .map(|r| r.req_id);
+            live.chain(gone).collect()
+        };
+        for req_id in wanted {
+            for t in &g.ticks {
+                let tick = match t.clone() {
+                    GenTick::Price(tick_type, value) => MdTick::Price { tick_type, value, can_auto_execute: false },
+                    GenTick::Size(tick_type, value) => MdTick::Size { tick_type, value },
+                    GenTick::Generic(tick_type, value) => MdTick::Generic { tick_type, value },
+                    GenTick::Text(tick_type, value) => MdTick::Text { tick_type, value },
+                };
+                self.out.push(MdOut::Tick(req_id, tick));
+            }
+        }
+    }
+
     /// The join step of a request whose place in the queue is reached.
     fn join_if_due(&mut self, req_id: i64, instrument: InstrumentId, m: &Mirror, seq: u64) {
         let st = self.streams.entry(req_id).or_default();
@@ -815,6 +870,7 @@ mod tests {
     // ibx#444, ibx#446: a request without a conId joins the subscription of
     // the contract the engine found at the moment it found it: the quote as
     // it was then, then the later steps, even when the client reads later.
+    // A step goes to the newest request first (captured 05/10/2026).
     #[test]
     fn a_symbol_only_request_joins_where_the_engine_found_its_contract() {
         let (core, shared) = (ClientCore::new(), SharedState::new());
@@ -828,7 +884,7 @@ mod tests {
         assert_eq!(poll(&core, &shared), [
             "mdt:1:1", "price:1:1:100", "size:1:0:1", "price:1:2:101", "size:1:3:1", "size:1:0:1", "size:1:3:1",
             "mdt:2:1", "price:2:1:100", "size:2:0:1", "price:2:2:101", "size:2:3:1", "size:2:0:1", "size:2:3:1",
-            "price:1:1:99", "size:1:0:1", "price:2:1:99", "size:2:0:1",
+            "price:2:1:99", "size:2:0:1", "price:1:1:99", "size:1:0:1",
         ]);
     }
 }

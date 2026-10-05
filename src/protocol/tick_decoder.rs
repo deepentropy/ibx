@@ -234,6 +234,11 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) -> bool {
         };
 
         let mut has_more = 1u64;
+        // The type of the block's last entry: on a quote tag, a time base
+        // after a close is the close date, not a time (`jmdclient.bl.a(...)`
+        // types 20/21 of a quote block, `@2611-2900`; captured 05/10/2026,
+        // 7203 on delayed data).
+        let mut prev_type: Option<u64> = None;
         while has_more == 1 {
             if reader.remaining() < 8 {
                 // The block announced one more entry that is not there.
@@ -300,9 +305,10 @@ pub fn decode_ticks_35p_into(body: &[u8], ticks: &mut Vec<RawTick>) -> bool {
                 server_tag,
                 tick_type,
                 magnitude,
-                stats_block,
+                stats_block: stats_block || (tick_type == O_TIMESTAMP_BASE && prev_type == Some(O_CLOSE_PRICE)),
                 first: ticks.len() == block_start,
             });
+            prev_type = Some(tick_type);
         }
     }
     false

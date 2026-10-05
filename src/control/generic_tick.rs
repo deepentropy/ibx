@@ -2,8 +2,8 @@
 //! (ibx#450): the parse, the ticks legal for each security type, and the
 //! text of the 321 that refuses a list.
 //!
-//! Only the request side: which generic ticks go to the farm and how their
-//! values come back is not done here (the news tick, 292, has its own path).
+//! The request side only: the ticks on the wire and their values are in
+//! `generic_values` (the news tick, 292, has its own path).
 
 /// The security types a generic tick is legal for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

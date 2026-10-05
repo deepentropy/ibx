@@ -966,14 +966,14 @@ fn market_data_rejects_are_reported() {
     }
     shared.market.push_md_reject(crate::bridge::MdReject::Delayed { instrument: 0 });
     shared.market.push_md_reject(crate::bridge::MdReject::NotSubscribed {
-        instrument: 1, delayed_available: false, needs_api_subscription: false });
+        instrument: 1, delayed_available: false, needs_api_subscription: false, description: String::new(), kept_params: None });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     let at = |e: &str| w.events.iter().position(|x| x == e);
     let mdt = at("market_data_type:5:3").expect("type 3");
     let delayed = at("error:5:10167:Requested market data is not subscribed. Displaying delayed market data.").expect("10167");
     assert!(mdt < delayed, "{:?}", w.events);
-    assert!(at("error:6:354:Requested market data is not subscribed.").is_some(), "{:?}", w.events);
+    assert!(at(&format!("error:6:354:{}", crate::client_core::MD_NOT_SUBSCRIBED)).is_some(), "{:?}", w.events);
     assert!(client.core.req_to_instrument.lock().unwrap().contains_key(&5));
     assert!(client.core.delayed_reqs.lock().unwrap().contains(&5), "its ticks are delayed ones");
     assert_eq!(crate::client_core::delayed_tick_type(1), 66);
@@ -5836,7 +5836,8 @@ fn empty_quote_side_goes_out_as_minus_one() {
 // trade's time as 88 and a halted state as 90 (when its bits change, then
 // in each step until the next book update, as 49), and no exchanges. The
 // status comes with the trade's price step, after its time step: the time
-// step has no halted state yet.
+// step has no halted state yet. A size goes with its price only, not again
+// on its own (captured 05/10/2026, ibx#444: 7203 on delayed data).
 #[test]
 fn delayed_stream_sends_88_and_90_and_no_exchanges() {
     use crate::md_events::MdStep;
@@ -5852,9 +5853,8 @@ fn delayed_stream_sends_88_and_90_and_no_exchanges() {
         .filter(|e| !e.starts_with("mdt:") && !e.starts_with("params:")).collect();
     assert_eq!(ticks, vec![
         "string:1:88:1790921446",
-        "price:1:68:766.59:-", "size:1:71:80", "size:1:71:80", "generic:1:90:1",
-        "price:1:66:766.24:-", "size:1:69:800", "price:1:67:766.34:-", "size:1:70:1000",
-        "size:1:69:800", "size:1:70:1000", "generic:1:90:1",
+        "price:1:68:766.59:-", "size:1:71:80", "generic:1:90:1",
+        "price:1:66:766.24:-", "size:1:69:800", "price:1:67:766.34:-", "size:1:70:1000", "generic:1:90:1",
     ]);
     assert!(!w.events.iter().any(|e| e.contains(":32:") || e.contains(":33:") || e.contains(":45:") || e.contains(":49:")),
         "{:?}", w.events);
@@ -6568,13 +6568,13 @@ fn a_top_reject_keeps_the_news_of_a_request() {
     client.req_mkt_data(1, &aapl_stk(), "mdoff,292", false, false).unwrap();
     client.req_mkt_data(2, &aapl_stk(), "", false, false).unwrap();
     shared.market.push_md_reject(crate::bridge::MdReject::NotSubscribed {
-        instrument: 5, delayed_available: true, needs_api_subscription: false,
+        instrument: 5, delayed_available: true, needs_api_subscription: false, description: String::new(), kept_params: None,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert_eq!(w.events, [
-        "error:1:2117:Requested top market data is not subscribed. Subscription-independent ticks are still active.292; ",
-        "error:2:354:Requested market data is not subscribed.Delayed market data is available.",
+        "error:1:2117:Requested top market data is not subscribed. Subscription-independent ticks are still active.292; ".to_string(),
+        format!("error:2:354:{}Delayed market data is available.", crate::client_core::MD_NOT_SUBSCRIBED),
     ]);
     assert_eq!(client.core.instrument_to_req.lock().unwrap().get(&5), Some(&vec![1]));
     client.cancel_mkt_data(1).unwrap();
@@ -6678,11 +6678,11 @@ fn a_contract_known_delayed_available_gives_10168_or_goes_delayed() {
     let engine = line_engine(rx);
     client.req_mkt_data(1, &aapl_stk(), "", false, false).unwrap();
     shared.market.push_md_reject(crate::bridge::MdReject::NotSubscribed {
-        instrument: 10, delayed_available: true, needs_api_subscription: false,
+        instrument: 10, delayed_available: true, needs_api_subscription: false, description: String::new(), kept_params: None,
     });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
-    assert_eq!(w.events, ["error:1:354:Requested market data is not subscribed.Delayed market data is available."]);
+    assert_eq!(w.events, [format!("error:1:354:{}Delayed market data is available.", crate::client_core::MD_NOT_SUBSCRIBED)]);
 
     let mut w = RecordingWrapper::default();
     client.req_mkt_data(2, &aapl_stk(), "", false, false).unwrap();

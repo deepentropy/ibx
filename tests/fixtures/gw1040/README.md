@@ -32,7 +32,7 @@ it always comes after the `fix_in` that caused it.
 - Check before adding a file: no match for `\b(DU|DF|U|F)[0-9]{6,8}\b` (outside `8349` signatures), no MAC address,
   no username.
 
-## Files (28/09/2026; depth slices 02/10/2026; combos 03/10/2026; global cancel 04/10/2026)
+## Files (28/09/2026; depth slices 02/10/2026; combos 03/10/2026; global cancel 04/10/2026; 05/10/2026)
 
 | Folder | Session | Scenarios |
 |---|---|---|
@@ -50,6 +50,7 @@ it always comes after the `fix_in` that caused it.
 | `20260930` | RTH | i105_combo_fill: a SMART stock combo bought and sold, its set-up, the fill of the combo and of each leg |
 | `20261002` | pre-open | b1_432_hist_ticks: historical ticks of AAPL and EUR.USD (start, end, both, no zone, refusals, AGGTRADES); b1_429_keep_up_to_date: four keepUpToDate requests, their updates, cancels and refusals; b1_431_hist_format: formatDate 1 and 2 bars, historicalDataEnd strings, head timestamps, cancel of an unknown request |
 | `20261002` | pre-open | b1_cleanup: reqAllOpenOrders and reqPositions, both answered from the gateway's state (no frame) |
+| `20261005` | RTH | b2_generic: generic ticks (AAPL with sixteen of them, SPY with mdoff, an invalid list, EUR.USD with 233 on the cash farm, MNQ with 588 on the futures farm); b2_mkt_errors: two ids on AAPL, 7203 refused (354 with type 1, with 233, 10167 and delayed data with type 3, type 1 again); b2_tbt: tick-by-tick types, past ticks, ignoreSize, EUR.USD on the cash farm, an unknown type; b2_rtbars: real-time bars shared by four requests, empty bars, the cancel of one; b2_trail: plain TRAIL orders and their trail stop prices |
 | `20261001` | RTH | global_cancel_replayed: 8 orders of earlier sessions in the logon replay (150=A 20=3 39=A), then reqAllOpenOrders, reqGlobalCancel (8 cancels tagged ALL, in the book's order) and reqAllOpenOrders of client 193 (slice: the replay's order reports and the API connection; the scenario connections in between left out) |
 
 ## Decoded API side (`<name>.api.jsonl`, ibx#487)

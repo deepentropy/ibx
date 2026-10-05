@@ -548,6 +548,44 @@ impl HotLoop {
             let msgs = self.farm.start_news(sub.instrument, sub.con_id, &sub.sec_type, &providers, id);
             self.send_farm_messages(msgs);
         }
+        // The generic ticks of its requests, after its top of book
+        // (ibx#450).
+        let waiting: Vec<farm::GenericWaiting> = {
+            let mut out = Vec::new();
+            self.farm.generic_waiting.retain(|w| {
+                if w.instrument != sub.instrument { return true; }
+                out.push(w.clone());
+                false
+            });
+            out
+        };
+        for w in waiting {
+            let primary = self.context.listing_exchanges.get(&sub.con_id).cloned().unwrap_or_default();
+            let msgs = self.farm.start_generic(sub.instrument, sub.con_id, &sub.exchange, &sub.sec_type, &primary, &w.codes, id);
+            self.send_farm_messages(msgs);
+        }
+    }
+
+    /// The generic ticks of a request (ibx#450): after its top of book when
+    /// that waits (a lookup, a round lot, an aggregate group); else at
+    /// once, on the farm of the contract's route.
+    fn subscribe_generic(&mut self, instrument: InstrumentId, con_id: i64, exchange: String, sec_type: String, codes: Vec<i32>) {
+        let waits = self.context.lot_parked.iter().chain(&self.context.lot_ready).chain(&self.context.md_resolved)
+            .chain(self.context.md_lookups.iter().map(|(_, s, _)| s))
+            .any(|s| s.instrument == instrument);
+        let con_id = if con_id > 0 { con_id } else { self.context.market.con_id(instrument).unwrap_or(0) };
+        if waits || con_id <= 0 {
+            self.farm.generic_waiting.push(farm::GenericWaiting { instrument, codes });
+            return;
+        }
+        let sub = farm::MdSubscribe {
+            con_id, symbol: String::new(), exchange: exchange.clone(), sec_type: sec_type.clone(), last_trade_date: String::new(),
+            strike: 0.0, right: String::new(), multiplier: String::new(), instrument, mode_9887: 0, snapshot: false,
+        };
+        let Some(id) = self.md_route(&sub) else { return };
+        let primary = self.context.listing_exchanges.get(&con_id).cloned().unwrap_or_default();
+        let msgs = self.farm.start_generic(instrument, con_id, &exchange, &sec_type, &primary, &codes, id);
+        self.send_farm_messages(msgs);
     }
 
     /// The news ticks waiting for the top of book of an instrument, in the
@@ -605,8 +643,10 @@ impl HotLoop {
                 }
             }
         }
-        // The news entry of the request goes with it, after its top of
-        // book, as the reference's cancels (ibx#458).
+        // Its generic tick entries, then its news entry, after its top of
+        // book, as the reference's cancels (ibx#450, ibx#458).
+        let msgs = self.farm.stop_generic(instrument);
+        self.send_farm_messages(msgs);
         let msgs = self.farm.stop_news(instrument);
         self.send_farm_messages(msgs);
     }
@@ -1453,6 +1493,13 @@ impl HotLoop {
                 }
                 ControlCommand::UnsubscribeNews { instrument, providers } => {
                     let msgs = self.farm.release_news(instrument, &providers);
+                    self.send_farm_messages(msgs);
+                }
+                ControlCommand::SubscribeGeneric { instrument, con_id, exchange, sec_type, codes } => {
+                    self.subscribe_generic(instrument, con_id, exchange, sec_type, codes);
+                }
+                ControlCommand::UnsubscribeGeneric { instrument, codes } => {
+                    let msgs = self.farm.release_generic(instrument, &codes);
                     self.send_farm_messages(msgs);
                 }
                 ControlCommand::UpdateParam { key, value } => {
@@ -4528,9 +4575,10 @@ mod tests {
             } else {
                 assert!(farm_messages_sent(&mut s1).is_empty());
                 assert_eq!(rejects, [crate::bridge::MdReject::NotSubscribed {
-                    instrument: jp, delayed_available: true, needs_api_subscription: false }]);
-                assert!(engine.farm.instrument_md_reqs.is_empty());
-                assert!(engine.farm.md_req_to_instrument.is_empty());
+                    instrument: jp, delayed_available: true, needs_api_subscription: false, description: String::new(), kept_params: None }]);
+                // The rejected entries stay until the request ends, whose
+                // cancel covers them (captured 05/10/2026).
+                assert_eq!(engine.farm.instrument_md_reqs[0].1.len(), 2);
             }
         }
     }

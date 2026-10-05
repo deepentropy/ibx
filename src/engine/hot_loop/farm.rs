@@ -235,6 +235,35 @@ pub(crate) struct NewsEntry {
     pub(crate) refs: u32,
 }
 
+/// A generic tick entry of a contract (ibx#450): its own request id on the
+/// farm of the contract's route, shared by the requests that asked it, as
+/// the reference keeps one per tick in the contract's record
+/// (`generictick.bp`).
+#[derive(Debug, Clone)]
+pub(crate) struct GenericEntry {
+    /// 0 while it waits for the top of book's acknowledgement.
+    pub(crate) farm_req: u32,
+    pub(crate) instrument: InstrumentId,
+    pub(crate) farm: FarmId,
+    /// Its request code (264).
+    pub(crate) code: i32,
+    pub(crate) con_id: String,
+    pub(crate) exchange: String,
+    pub(crate) sec_type: String,
+    /// The server tag of its ack.
+    pub(crate) tag: Option<u32>,
+    /// The requests that use it.
+    pub(crate) refs: u32,
+}
+
+/// A generic tick request of an instrument whose top of book has not gone
+/// out yet (a lookup, a round lot): it goes after it (ibx#450).
+#[derive(Debug, Clone)]
+pub(crate) struct GenericWaiting {
+    pub(crate) instrument: InstrumentId,
+    pub(crate) codes: Vec<i32>,
+}
+
 /// One entry of a depth request (#452): a book on an exchange, or one
 /// half of a top-of-book pair for a SmartDepth component without a book.
 #[derive(Debug, Clone)]
@@ -486,6 +515,19 @@ pub(crate) struct FarmState {
     /// The API subscriptions a refusal named since the last data
     /// permission change (ibx#421, the reference's `jextend.F.d`).
     pub(crate) refused_api_subscriptions: Vec<String>,
+    /// Generic tick entries of the contracts (ibx#450).
+    pub(crate) generic: Vec<GenericEntry>,
+    /// Generic tick requests waiting for their top of book to go out.
+    pub(crate) generic_waiting: Vec<GenericWaiting>,
+    /// The generic tick fields of each contract, as its record keeps them.
+    generic_records: std::collections::HashMap<InstrumentId, crate::control::generic_values::GenericRecord>,
+    /// The contracts whose top of book was acknowledged: their generic
+    /// ticks go at once.
+    top_confirmed: Vec<InstrumentId>,
+    /// The last request parameters of each contract (conId): minimum tick,
+    /// BBO exchange, permissions. The reference's record of the contract
+    /// keeps them after its requests ended (ibx#444).
+    pub(crate) con_params: std::collections::HashMap<i64, (f64, String, i64)>,
 }
 
 impl FarmState {
@@ -514,6 +556,11 @@ impl FarmState {
             news: Vec::new(),
             news_waiting: Vec::new(),
             refused_api_subscriptions: Vec::new(),
+            generic: Vec::new(),
+            generic_waiting: Vec::new(),
+            generic_records: std::collections::HashMap::new(),
+            top_confirmed: Vec::new(),
+            con_params: std::collections::HashMap::new(),
         }
     }
 
@@ -660,9 +707,7 @@ impl FarmState {
             b"UT" | b"UM" | b"RL" => super::ccp::handle_account_update(msg, context, shared),
             b"UP" => super::ccp::handle_portfolio_message(msg, context, shared, event_tx),
             b"Y" | b"Z" => self.handle_depth(msg, farm_conn, shared),
-            b"G" => if !self.handle_exchange_map(msg, farm_conn, shared, hb) {
-                self.handle_tick_news(msg, shared, event_tx)
-            },
+            b"G" => self.handle_generic_frame(msg, farm_conn, context, shared, event_tx, hb),
             b"3" => self.handle_md_reject(msg, context, shared, farm_conn, hb),
             b"T" => {
                 // The routing table, when it came after the logon (#445).
@@ -814,6 +859,13 @@ impl FarmState {
             log::info!("News ack: server_tag {} -> instrument {} ({})", server_tag, e.instrument, e.providers);
             return;
         }
+        // A generic tick entry's ack (ibx#450): its tag carries the tick's
+        // blocks.
+        if let Some(e) = self.generic.iter_mut().find(|e| e.farm_req != 0 && e.farm == rx_farm && e.farm_req == req_id) {
+            e.tag = Some(server_tag);
+            log::info!("Generic tick {} ack: server_tag {} -> instrument {}", e.code, server_tag, e.instrument);
+            return;
+        }
 
         // A depth entry: its tag, price tick and size increment (#451).
         if self.depth_ack(req_id, server_tag, min_tick, parts.get(8).and_then(|v| v.parse::<f64>().ok()), shared) {
@@ -847,9 +899,14 @@ impl FarmState {
         if bid_ask && min_tick.is_finite() && min_tick > 0.0 {
             context.market.set_min_tick(instrument, min_tick);
         }
+        // The top of book is confirmed: the generic ticks that waited for it
+        // go, with the exchange map entry when its key is new, in one
+        // message (ibx#450, ibx#441; captured 05/10/2026).
+        let generic = self.confirm_top(instrument);
+        let map = self.observe_exchange_map(instrument, parts.get(5).copied(), context, shared);
+        self.send_after_ack(&generic, map, sink, hb);
         // A regulatory snapshot (ibx#446): its permission and BBO exchange
         // go to its fetcher, never as tickReqParams.
-        self.observe_exchange_map(instrument, parts.get(5).copied(), sink, context, shared, hb);
         if self.snapshot_reqs.iter().any(|(id, _)| *id == req_id) {
             let permissions = parts.get(4).and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0);
             let bbo = parts.get(5).map(|s| s.trim().to_string()).unwrap_or_default();
@@ -866,6 +923,9 @@ impl FarmState {
         if bid_ask {
             let sec_type = context.market.order_routing(instrument).0;
             if let Some(params) = tick_req_params(instrument, min_tick, &parts, &sec_type) {
+                if let Some(con_id) = context.market.con_id(instrument) {
+                    self.con_params.insert(con_id, (params.min_tick, params.bbo_exchange.clone(), params.snapshot_permissions as i64));
+                }
                 shared.market.push_tick_req_params(params);
             }
         }
@@ -880,17 +940,15 @@ impl FarmState {
         &mut self,
         instrument: InstrumentId,
         code: Option<&str>,
-        sink: &mut dyn FixSink,
         context: &Context,
         shared: &SharedState,
-        hb: &mut HeartbeatState,
-    ) {
-        let Some(code) = code.map(str::trim) else { return };
+    ) -> Option<ExchangeMapSub> {
+        let code = code.map(str::trim)?;
         if code == "ffffffff" {
-            return;
+            return None;
         }
         let (sec_type, exchange) = context.market.order_routing(instrument);
-        let Some(sec_type_id) = crate::types::sec_type_id(&sec_type) else { return };
+        let sec_type_id = crate::types::sec_type_id(&sec_type)?;
         shared.reference.observe_exchange_map_at(instrument, code, sec_type_id, shared.market.md_events.position());
         // Asked once per key; again only when the farm that was asked it
         // was lost before the map came.
@@ -898,9 +956,9 @@ impl FarmState {
         if code.is_empty() || !waiting
             || self.exchange_map_subs.iter().any(|s| s.code == code && s.sec_type_id == sec_type_id)
         {
-            return;
+            return None;
         }
-        let Some(con_id) = context.market.con_id(instrument) else { return };
+        let con_id = context.market.con_id(instrument)?;
         let sub = ExchangeMapSub {
             req_id: self.next_md_req_id,
             farm: self.rx_farm,
@@ -914,9 +972,7 @@ impl FarmState {
         };
         self.next_md_req_id += 1;
         log::info!("Starting to observe the exchange map {}:{} (instrument {}, id {})", code, sec_type, instrument, sub.req_id);
-        if self.send_exchange_map_request(&sub, "1", sink, hb) {
-            self.exchange_map_subs.push(sub);
-        }
+        Some(sub)
     }
 
     /// Subscribe ("1") or cancel ("2") an exchange map, as the reference
@@ -929,46 +985,127 @@ impl FarmState {
     /// 28/09/2026) or when the request was cancelled before the map came
     /// (rth_order_types of 28/09/2026, QQQ).
     fn send_exchange_map_request(&self, sub: &ExchangeMapSub, action: &str, sink: &mut dyn FixSink, hb: &mut HeartbeatState) -> bool {
-        let id = sub.req_id.to_string();
-        let ts = chrono_free_timestamp();
-        let mut tags = vec![
-            (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ),
-            (fix::TAG_SENDING_TIME, &*ts),
-            (263, action),
-            (146, "1"),
-            (262, id.as_str()),
-            (6008, sub.con_id.as_str()),
-            (207, sub.exchange.as_str()),
-            (167, sub.sec_type.as_str()),
-            (264, EXCHANGE_MAP_TICK),
-        ];
-        if self.top_snapshot(sub.instrument) == Some(false) {
-            tags.push((6088, "Socket"));
-        }
-        let sent = sink.send_comp(&tags);
+        let mut tags = md_message_head(action, 1);
+        tags.extend(self.exchange_map_entry(sub));
+        let sent = sink.send_comp(&borrow_tags(&tags));
         if sent && sub.farm == PRIMARY_MD {
             hb.last_farm_sent = Instant::now();
         }
         sent
     }
 
-    /// A 35=G generic tick frame that carries an exchange map (ibx#441):
-    /// the map is kept for its key and the subscription cancelled. False
-    /// when the frame is not for an exchange map subscription.
-    fn handle_exchange_map(&mut self, msg: &[u8], sink: &mut dyn FixSink, shared: &SharedState, hb: &mut HeartbeatState) -> bool {
-        let Some(body) = find_body_after_tag(msg, b"35=G\x01") else { return false };
-        let Some(tag) = body.get(2..6).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])) else { return false };
+    /// The entry of an exchange map subscription.
+    fn exchange_map_entry(&self, sub: &ExchangeMapSub) -> Vec<(u32, String)> {
+        let mut tags = vec![
+            (262, sub.req_id.to_string()),
+            (6008, sub.con_id.clone()),
+            (207, sub.exchange.clone()),
+            (167, sub.sec_type.clone()),
+            (264, EXCHANGE_MAP_TICK.to_string()),
+        ];
+        if self.top_snapshot(sub.instrument) == Some(false) {
+            tags.push((6088, "Socket".into()));
+        }
+        tags
+    }
+
+    /// The message after a top of book acknowledgement: the generic tick
+    /// entries that waited for it, then the exchange map entry (ibx#450;
+    /// captured 05/10/2026, AAPL: ten generic entries then 626 in one
+    /// 35=V). Nothing when there is neither.
+    fn send_after_ack(&mut self, generic: &[usize], map: Option<ExchangeMapSub>, sink: &mut dyn FixSink, hb: &mut HeartbeatState) {
+        if generic.is_empty() && map.is_none() {
+            return;
+        }
+        let farm = generic.first().map(|&i| self.generic[i].farm).or(map.as_ref().map(|m| m.farm)).unwrap_or(PRIMARY_MD);
+        let mut tags = md_message_head("1", generic.len() + map.is_some() as usize);
+        for &i in generic {
+            tags.extend(generic_entry(&self.generic[i], true));
+        }
+        if let Some(m) = &map {
+            tags.extend(self.exchange_map_entry(m));
+        }
+        if sink.send_comp(&borrow_tags(&tags)) {
+            if let Some(m) = map {
+                self.exchange_map_subs.push(m);
+            }
+            if farm == PRIMARY_MD {
+                hb.last_farm_sent = Instant::now();
+            }
+        }
+    }
+
+    /// A 35=G generic tick frame (ibx#450): a bit count, then blocks of a
+    /// 32-bit server tag, a length and the payload (`jmdclient.br.a(byte[])`).
+    /// Each block goes to what its tag is: an exchange map subscription
+    /// (ibx#441), a news entry (ibx#458) or a generic tick entry. A tag of
+    /// nothing known ends the reading (its block's length is not known).
+    fn handle_generic_frame(
+        &mut self, msg: &[u8], sink: &mut dyn FixSink, context: &Context, shared: &SharedState,
+        event_tx: &Option<Sender<Event>>, hb: &mut HeartbeatState,
+    ) {
+        let Some(body) = find_body_after_tag(msg, b"35=G") else { return };
+        let rx_farm = self.rx_farm;
+        let blocks: Vec<(u32, Option<i32>, Vec<u8>)> = crate::control::generic_values::blocks(body, |tag| {
+            if self.exchange_map_subs.iter().any(|s| s.farm == rx_farm && s.server_tag == Some(tag)) {
+                Some(626)
+            } else if self.news.iter().any(|e| e.live && e.farm == rx_farm && e.tag == Some(tag)) {
+                Some(292)
+            } else {
+                self.generic.iter().find(|e| e.farm == rx_farm && e.tag == Some(tag)).map(|e| e.code)
+            }
+        }).into_iter().map(|(t, c, p)| (t, c, p.to_vec())).collect();
+        for (tag, code, payload) in blocks {
+            match code {
+                Some(626) => self.handle_exchange_map(tag, &payload, sink, shared, hb),
+                Some(292) => self.handle_tick_news(tag, &payload, shared, event_tx),
+                Some(code) => self.handle_generic_block(tag, code, &payload, context, shared),
+                None => log::warn!("Generic tick for server tag {} of no known request: dropped", tag),
+            }
+        }
+    }
+
+    /// A whole 35=G frame for the exchange map tests: true when it carried
+    /// the map of a subscription.
+    #[cfg(test)]
+    fn handle_exchange_map_frame(&mut self, msg: &[u8], sink: &mut dyn FixSink, shared: &SharedState, hb: &mut HeartbeatState) -> bool {
+        let before = self.exchange_map_subs.len();
+        self.handle_generic_frame(msg, sink, &Context::new(), shared, &None, hb);
+        self.exchange_map_subs.len() < before
+    }
+
+    /// An exchange map block (ibx#441): the map is kept for its key and
+    /// the subscription cancelled.
+    fn handle_exchange_map(&mut self, tag: u32, payload: &[u8], sink: &mut dyn FixSink, shared: &SharedState, hb: &mut HeartbeatState) {
         let rx_farm = self.rx_farm;
         let Some(pos) = self.exchange_map_subs.iter().position(|s| s.farm == rx_farm && s.server_tag == Some(tag)) else {
-            return false;
+            return;
         };
         let sub = self.exchange_map_subs.remove(pos);
-        let text = body.get(6).and_then(|&len| body.get(7..7 + len as usize)).map(exchange_map_text).unwrap_or_default();
-        let map = parse_exchange_map(&text);
+        let map = parse_exchange_map(&exchange_map_text(payload));
         log::info!("Exchange map {}:{}: {} exchanges", sub.code, sub.sec_type_id, map.len());
         shared.reference.set_exchange_map_at(&sub.code, sub.sec_type_id, map, shared.market.md_events.position());
         self.send_exchange_map_request(&sub, "2", sink, hb);
-        true
+    }
+
+    /// A generic tick block (ibx#450): its values go into the contract's
+    /// record, and the API ticks of the fields that changed to the
+    /// requests that asked the tick, at their place among the farm
+    /// messages.
+    fn handle_generic_block(&mut self, tag: u32, code: i32, payload: &[u8], context: &Context, shared: &SharedState) {
+        let rx_farm = self.rx_farm;
+        let Some(instrument) = self.generic.iter().find(|e| e.farm == rx_farm && e.tag == Some(tag)).map(|e| e.instrument) else {
+            return;
+        };
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        let ctx = crate::control::generic_values::DecodeCtx { min_tick: context.market.min_tick(instrument), now_ms };
+        let rec = self.generic_records.entry(instrument).or_default();
+        let ticks = crate::control::generic_values::decode(code, payload, rec, ctx);
+        if !ticks.is_empty() {
+            shared.market.push_generic_ticks(crate::bridge::GenericTicks {
+                at: shared.market.md_events.position(), instrument, code, ticks,
+            });
+        }
     }
 
     fn handle_ticker_setup(&mut self, msg: &[u8], context: &mut Context) {
@@ -1100,6 +1237,135 @@ impl FarmState {
             out.push((farm, news_message(&self.news[i], true)));
         }
         out
+    }
+
+    /// Start the generic ticks of a request on `farm` (ibx#450): request
+    /// codes, of a contract of this security type, asked on `exchange`,
+    /// listed on `primary`. A tick the contract has already is shared; a
+    /// tick that is not sent or not valid for the contract is left out; the
+    /// others are new entries, in request code order: those that go at
+    /// once, and all of them once the top of book was acknowledged, are in
+    /// the returned message; the others wait for that acknowledgement.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_generic(
+        &mut self, instrument: InstrumentId, con_id: i64, exchange: &str, sec_type: &str, primary: &str,
+        codes: &[i32], farm: FarmId,
+    ) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        use crate::control::generic_values as gv;
+        let mut codes: Vec<i32> = codes.iter().map(|&c| if c == 104 { gv::HISTORICAL_VOLATILITY } else { c }).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        let confirmed = self.top_confirmed.contains(&instrument);
+        let mut now: Vec<usize> = Vec::new();
+        for code in codes {
+            if !gv::sent(code) || !gv::valid_for(code, sec_type) {
+                log::info!("Generic tick {} not sent for a {} contract", code, sec_type);
+                continue;
+            }
+            if let Some(e) = self.generic.iter_mut().find(|e| e.instrument == instrument && e.code == code) {
+                e.refs += 1;
+                continue;
+            }
+            let routing = routing_exchange(exchange, sec_type);
+            self.generic.push(GenericEntry {
+                farm_req: 0, instrument, farm, code, con_id: con_id.to_string(),
+                exchange: gv::entry_exchange(code, sec_type, routing, primary).to_string(),
+                sec_type: fix_sec_type(sec_type).to_string(), tag: None, refs: 1,
+            });
+            if gv::at_once(code) || confirmed {
+                let i = self.generic.len() - 1;
+                self.generic[i].farm_req = self.next_md_req_id;
+                self.next_md_req_id += 1;
+                now.push(i);
+            }
+        }
+        if now.is_empty() {
+            return Vec::new();
+        }
+        let mut msg = md_message_head("1", now.len());
+        for &i in &now {
+            msg.extend(generic_entry(&self.generic[i], true));
+        }
+        vec![(farm, msg)]
+    }
+
+    /// The top of book of an instrument was acknowledged (ibx#450): its
+    /// generic tick entries that waited for it get their request ids, in
+    /// request code order; their indexes.
+    fn confirm_top(&mut self, instrument: InstrumentId) -> Vec<usize> {
+        if !self.top_confirmed.contains(&instrument) {
+            self.top_confirmed.push(instrument);
+        }
+        let mut waiting: Vec<usize> = (0..self.generic.len())
+            .filter(|&i| self.generic[i].instrument == instrument && self.generic[i].farm_req == 0)
+            .collect();
+        waiting.sort_by_key(|&i| self.generic[i].code);
+        for &i in &waiting {
+            self.generic[i].farm_req = self.next_md_req_id;
+            self.next_md_req_id += 1;
+        }
+        waiting
+    }
+
+    /// A request with generic ticks left an instrument other requests use
+    /// (ibx#450): the entries no request needs any more are cancelled.
+    pub(crate) fn release_generic(&mut self, instrument: InstrumentId, codes: &[i32]) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        use crate::control::generic_values as gv;
+        let codes: Vec<i32> = codes.iter().map(|&c| if c == 104 { gv::HISTORICAL_VOLATILITY } else { c }).collect();
+        for e in self.generic.iter_mut().filter(|e| e.instrument == instrument && codes.contains(&e.code)) {
+            e.refs = e.refs.saturating_sub(1);
+        }
+        self.cancel_generic(|e| e.instrument == instrument && e.refs == 0)
+    }
+
+    /// Forget the generic ticks of an instrument (its last request went)
+    /// and build the cancels of its entries on the wire (ibx#450).
+    pub(crate) fn stop_generic(&mut self, instrument: InstrumentId) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        self.generic_waiting.retain(|w| w.instrument != instrument);
+        self.top_confirmed.retain(|i| *i != instrument);
+        self.generic_records.remove(&instrument);
+        self.cancel_generic(|e| e.instrument == instrument)
+    }
+
+    /// Remove the entries `which` takes; the cancel of those on the wire,
+    /// one message per farm, in descending request code order as the
+    /// reference's (captured 05/10/2026).
+    fn cancel_generic(&mut self, which: impl Fn(&GenericEntry) -> bool) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        let mut gone: Vec<GenericEntry> = Vec::new();
+        self.generic.retain(|e| {
+            if which(e) {
+                gone.push(e.clone());
+                false
+            } else {
+                true
+            }
+        });
+        gone.retain(|e| e.farm_req != 0);
+        gone.sort_by_key(|e| std::cmp::Reverse(e.code));
+        let mut farms: Vec<FarmId> = gone.iter().map(|e| e.farm).collect();
+        farms.sort_unstable();
+        farms.dedup();
+        farms.into_iter().map(|farm| {
+            let mine: Vec<&GenericEntry> = gone.iter().filter(|e| e.farm == farm).collect();
+            let mut msg = md_message_head("2", mine.len());
+            for e in mine {
+                msg.extend(generic_entry(e, false));
+            }
+            (farm, msg)
+        }).collect()
+    }
+
+    /// A farm's connection was lost (ibx#450): its generic tick entries
+    /// are off the wire; they go again once their top of book is
+    /// acknowledged again.
+    pub(crate) fn generic_farm_lost(&mut self, farm: FarmId) {
+        let mut lost: Vec<InstrumentId> = Vec::new();
+        for e in self.generic.iter_mut().filter(|e| e.farm == farm) {
+            e.farm_req = 0;
+            e.tag = None;
+            lost.push(e.instrument);
+        }
+        self.top_confirmed.retain(|i| !lost.contains(i));
     }
 
     /// `subscribe_top` to the primary farm, from the fields of a
@@ -1279,6 +1545,7 @@ impl FarmState {
         // An exchange map not received yet is asked again at the next
         // acknowledgement of its code (ibx#441).
         self.exchange_map_subs.retain(|s| s.farm != farm);
+        self.generic_farm_lost(farm);
         let lost: Vec<MdEntry> = self.md_entries.iter().filter(|e| e.farm == farm).cloned().collect();
         self.md_entries.retain(|e| e.farm != farm);
         for e in &lost {
@@ -1355,15 +1622,16 @@ impl FarmState {
                 self.subscribe_top(&sub, self.rx_farm, farm_conn, hb);
                 shared.market.push_md_reject(crate::bridge::MdReject::Delayed { instrument });
             } else {
-                // The subscription stops: nothing is left to cancel.
-                if let Some(idx) = self.instrument_md_reqs.iter().position(|(id, _)| *id == instrument) {
-                    let (_, reqs) = self.instrument_md_reqs.remove(idx);
-                    self.md_req_to_instrument.retain(|(r, _)| !reqs.contains(r));
-                    self.md_entries.retain(|e| !reqs.contains(&e.req_id));
-                }
+                // The subscription stops; its entries stay with the
+                // contract's record until its request ends, which cancels
+                // them (captured 05/10/2026: 354, then 263=2 of the rejected
+                // entries and of the generic ones).
                 self.md_resub_info.retain(|(id, ..)| *id != instrument);
+                let con_id = context.market.con_id(instrument);
+                let description = con_id.and_then(|c| context.depth_descriptions.get(&c).cloned()).unwrap_or_default();
+                let kept_params = con_id.and_then(|c| self.con_params.get(&c).cloned());
                 shared.market.push_md_reject(crate::bridge::MdReject::NotSubscribed {
-                    instrument, delayed_available, needs_api_subscription,
+                    instrument, delayed_available, needs_api_subscription, description, kept_params,
                 });
             }
         }
@@ -1413,8 +1681,12 @@ impl FarmState {
         // dropped, as the reference does: it can never bind to the contract
         // that reuses this slot (ibx#289).
         self.md_req_to_instrument.retain(|(r, _)| !reqs.contains(r));
-        let entries: Vec<MdEntry> = self.md_entries.iter().filter(|e| reqs.contains(&e.req_id)).cloned().collect();
+        let mut entries: Vec<MdEntry> = self.md_entries.iter().filter(|e| reqs.contains(&e.req_id)).cloned().collect();
         self.md_entries.retain(|e| !reqs.contains(&e.req_id));
+        // By request type, the newest entry first: a subscription asked
+        // again with delayed data cancels its delayed and rejected entries
+        // as 442 delayed, 442, 443 delayed, 443 (captured 05/10/2026).
+        entries.sort_by_key(|e| (e.req_type, std::cmp::Reverse(e.req_id)));
 
         let mut out: Vec<(FarmId, Vec<(u32, String)>)> = Vec::new();
         let mut farms: Vec<FarmId> = entries.iter().map(|e| e.farm).collect();
@@ -2077,49 +2349,68 @@ impl FarmState {
         log::info!("Farm reconnected");
     }
 
-    /// News headlines (ibx#458): `35=G` holds a bit count, then blocks of
-    /// a 32-bit server tag, a 16-bit length and the payload, decoded as the
-    /// reference's news reader. A tag of no news entry is dropped (#292).
-    fn handle_tick_news(&mut self, msg: &[u8], shared: &SharedState, event_tx: &Option<Sender<Event>>) {
-        let Some(body) = find_body_after_tag(msg, b"35=G\x01") else { return };
-        if body.len() < 2 { return; }
-        let bits = u16::from_be_bytes([body[0], body[1]]) as usize;
-        let mut rest = &body[2..(2 + bits / 8).min(body.len())];
-        while rest.len() >= 6 {
-            let server_tag = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]);
-            let len = u16::from_be_bytes([rest[4], rest[5]]) as usize;
-            let end = (6 + len).min(rest.len());
-            let payload = &rest[6..end];
-            rest = &rest[end..];
-            let farm = self.rx_farm;
-            let Some(pos) = self.news.iter().position(|e| e.live && e.farm == farm && e.tag == Some(server_tag)) else {
-                log::warn!("News tick for server tag {} of no known request: dropped", server_tag);
-                return;
-            };
-            let instrument = self.news[pos].instrument;
-            for item in decode_news(payload) {
-                // A removal (7 or more) gives no headline; an article the
-                // client already has, from this entry or another of the
-                // contract, is not given again.
-                let known = self.news.iter().any(|e| e.instrument == instrument && e.seen.contains(&item.article_id));
-                if item.action >= 7 || known || !self.news[pos].seen.insert(item.article_id.clone()) {
-                    log::debug!("News {} {} not given (action {})", item.provider_code, item.article_id, item.action);
-                    continue;
-                }
-                let (headline, extra_data) = split_headline(&item.raw_headline);
-                let news = crate::types::TickNews {
-                    instrument,
-                    provider_code: item.provider_code,
-                    article_id: item.article_id,
-                    headline,
-                    timestamp: item.time as i64 * 1000,
-                    extra_data,
-                };
-                shared.market.push_tick_news(news.clone());
-                emit(event_tx, Event::News(news));
+    /// A news block (ibx#458): its headlines, decoded as the reference's
+    /// news reader.
+    fn handle_tick_news(&mut self, server_tag: u32, payload: &[u8], shared: &SharedState, event_tx: &Option<Sender<Event>>) {
+        let farm = self.rx_farm;
+        let Some(pos) = self.news.iter().position(|e| e.live && e.farm == farm && e.tag == Some(server_tag)) else {
+            return;
+        };
+        let instrument = self.news[pos].instrument;
+        for item in decode_news(payload) {
+            // A removal (7 or more) gives no headline; an article the
+            // client already has, from this entry or another of the
+            // contract, is not given again.
+            let known = self.news.iter().any(|e| e.instrument == instrument && e.seen.contains(&item.article_id));
+            if item.action >= 7 || known || !self.news[pos].seen.insert(item.article_id.clone()) {
+                log::debug!("News {} {} not given (action {})", item.provider_code, item.article_id, item.action);
+                continue;
             }
+            let (headline, extra_data) = split_headline(&item.raw_headline);
+            let news = crate::types::TickNews {
+                instrument,
+                provider_code: item.provider_code,
+                article_id: item.article_id,
+                headline,
+                timestamp: item.time as i64 * 1000,
+                extra_data,
+            };
+            shared.market.push_tick_news(news.clone());
+            emit(event_tx, Event::News(news));
         }
     }
+}
+
+/// The head of a market data message (35=V) of `n` entries.
+fn md_message_head(action: &str, n: usize) -> Vec<(u32, String)> {
+    vec![
+        (fix::TAG_MSG_TYPE, fix::MSG_MARKET_DATA_REQ.to_string()),
+        (fix::TAG_SENDING_TIME, chrono_free_timestamp().to_string()),
+        (263, action.to_string()),
+        (146, n.to_string()),
+    ]
+}
+
+fn borrow_tags(tags: &[(u32, String)]) -> Vec<(u32, &str)> {
+    tags.iter().map(|(t, v)| (*t, v.as_str())).collect()
+}
+
+/// A generic tick entry as the reference writes it (captured 05/10/2026):
+/// `262|6008|207|167|264={code}|6088=Socket|9830=1`, the streaming-client
+/// mark only in a subscribe.
+fn generic_entry(e: &GenericEntry, subscribe: bool) -> Vec<(u32, String)> {
+    let mut tags = vec![
+        (262, e.farm_req.to_string()),
+        (6008, e.con_id.clone()),
+        (207, e.exchange.clone()),
+        (167, e.sec_type.clone()),
+        (264, e.code.to_string()),
+    ];
+    if subscribe {
+        tags.push((6088, "Socket".into()));
+    }
+    tags.push((9830, "1".into()));
+    tags
 }
 
 /// The text of an exchange map tick (ibx#441): a 4-byte length, then that
@@ -2327,10 +2618,13 @@ pub(crate) fn depth_refusal(api_subscription: bool, suffix: &str) -> (i64, Strin
     }
 }
 
-/// The contract as a depth refusal names it (#452,
-/// `jclient.dy.cU()`): a stock is its symbol, then its primary exchange
-/// with the market after a dot (`AAPL NASDAQ.NMS`). None for the other
-/// security types, whose descriptions are not read yet.
+/// The contract as a refusal names it (#452, ibx#444,
+/// `jclient.dy.cU()`, `dy.a(boolean,FormatHint,boolean)`): a stock is its
+/// symbol, then its primary exchange with the market after a dot (`AAPL
+/// NASDAQ.NMS`), then its local symbol in parentheses and a space when it
+/// differs from the symbol (`7203 TSEJ (7203.T) `, captured 05/10/2026).
+/// None for the other security types, whose descriptions are not read
+/// yet.
 pub(crate) fn depth_description(def: &crate::control::contracts::ContractDefinition) -> Option<String> {
     use crate::control::contracts::SecurityType;
     if def.sec_type != SecurityType::Stock {
@@ -2344,7 +2638,11 @@ pub(crate) fn depth_description(def: &crate::control::contracts::ContractDefinit
         place.push('.');
         place.push_str(&def.primary_suffix);
     }
-    Some(format!("{} {}", def.symbol, place).trim().to_string())
+    let mut text = format!("{} {}", def.symbol, place).trim().to_string();
+    if !def.local_symbol.is_empty() && def.local_symbol != def.symbol {
+        text.push_str(&format!(" ({}) ", def.local_symbol));
+    }
+    Some(text)
 }
 
 #[cfg(test)]
@@ -2712,7 +3010,7 @@ mod tests {
         farm.send_mktdata_unsubscribe(id, &mut None, &mut hb);
         let ack = format!("8=O\x0135=Q\x0112708,{map_id},0.01,0,0,9c,,0,1");
         farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
-        assert!(farm.handle_exchange_map(&exchange_map_frame(12708, EXCH_MAP_9C), &mut sink, &shared, &mut hb));
+        assert!(farm.handle_exchange_map_frame(&exchange_map_frame(12708, EXCH_MAP_9C), &mut sink, &shared, &mut hb));
         let cancel = sink.0.last().unwrap();
         assert!(cancel.iter().any(|(t, v)| *t == 263 && v == "2") && !has_source(cancel), "{cancel:?}");
     }
@@ -2745,7 +3043,7 @@ mod tests {
         // Its ack, then the map.
         let ack = format!("8=O\x0135=Q\x0112708,{map_id},0.01,0,0,9c,,0,1");
         farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
-        assert!(farm.handle_exchange_map(&exchange_map_frame(12708, EXCH_MAP_9C), &mut sink, &shared, &mut hb));
+        assert!(farm.handle_exchange_map_frame(&exchange_map_frame(12708, EXCH_MAP_9C), &mut sink, &shared, &mut hb));
         assert_eq!(wire(&sink.0[1]), format!(
             "35=V|263=2|146=1|262={map_id}|6008=265598|207=BEST|167=CS|264=626|6088=Socket|"));
         let map = shared.reference.instrument_exchange_map(id).unwrap();
@@ -2756,12 +3054,62 @@ mod tests {
         assert!(map.windows(2).all(|w| w[0].bit_number < w[1].bit_number), "sorted by bit");
         assert!(farm.exchange_map_subs.is_empty());
         // Another tag's 35=G is not a map.
-        assert!(!farm.handle_exchange_map(&exchange_map_frame(12708, EXCH_MAP_9C), &mut sink, &shared, &mut hb));
+        assert!(!farm.handle_exchange_map_frame(&exchange_map_frame(12708, EXCH_MAP_9C), &mut sink, &shared, &mut hb));
         // A new subscription of the contract asks nothing more.
         farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "", id, 0, &mut None, &mut hb);
         let ack = format!("8=O\x0135=Q\x01178,{},0.01,0,3,9c,,1,1", farm.next_md_req_id - 2);
         farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
         assert_eq!(sink.0.len(), 2);
+    }
+
+    // ibx#450, captured 05/10/2026 (AAPL, b2_generic): the generic ticks
+    // that go at once in a message after the top of book, in request code
+    // order; the others at the top's acknowledgement, with the exchange map
+    // entry last, in one message; 104 is 512; 411 is not valid for a stock;
+    // the auction goes to the primary exchange. A block of a tick gives its
+    // API ticks; the cancel is in descending code order, without 6088.
+    #[test]
+    fn generic_ticks_at_once_then_at_the_acknowledgement() {
+        let shared = SharedState::new();
+        let mut farm = FarmState::new();
+        let mut context = Context::new();
+        let mut hb = HeartbeatState::new();
+        let mut sink = RecordingSink(Vec::new());
+        let id = context.market.register(265598);
+        context.market.set_routing(id, "STK", "SMART");
+        farm.send_mktdata_subscribe(265598, "AAPL", "SMART", "STK", "", 0.0, "", "", id, 0, &mut None, &mut hb);
+        let wire = |m: &Vec<(u32, String)>| m.iter().filter(|(t, _)| *t != fix::TAG_SENDING_TIME)
+            .map(|(t, v)| format!("{t}={v}|")).collect::<String>();
+        let entry = |id: u32, exch: &str, code: i32| format!("262={id}|6008=265598|207={exch}|167=CS|264={code}|6088=Socket|9830=1|");
+        let msgs = farm.start_generic(id, 265598, "SMART", "STK", "NASDAQ", &[456, 236, 101, 225, 104, 411], PRIMARY_MD);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(wire(&msgs[0].1), format!("35=V|263=1|146=2|{}{}", entry(3, "BEST", 101), entry(4, "BEST", 456)));
+        let ack = "8=O\x0135=Q\x01827,1,0.01,0,3,9c,,1,1";
+        farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
+        assert_eq!(sink.0.iter().map(wire).collect::<Vec<_>>(), [format!(
+            "35=V|263=1|146=4|{}{}{}262=8|6008=265598|207=BEST|167=CS|264=626|6088=Socket|",
+            entry(5, "NASDAQ", 225), entry(6, "BEST", 236), entry(7, "BEST", 512))]);
+        // The shortable block of frame 9080 on the tag of its ack.
+        let ack = "8=O\x0135=Q\x011839,6,0.01,0,0,9c,,0,1";
+        farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
+        let mut msg = b"8=O\x019=0035\x0135=G\x01".to_vec();
+        msg.extend_from_slice(&[0x00, 0x68, 0x00, 0x00, 0x07, 0x2f, 0x08, 0x00, 0x00, 0x00, 0x03, 0x0b, 0x56, 0x6f, 0x50]);
+        farm.handle_generic_frame(&msg, &mut sink, &context, &shared, &None, &mut hb);
+        let got = shared.market.take_generic_ticks(u64::MAX);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].instrument, got[0].code), (id, 236));
+        use crate::control::generic_values::GenTick;
+        assert_eq!(got[0].ticks, [GenTick::Generic(46, 3.0), GenTick::Size(89, 190213968.0)]);
+        // A second request with 236 shares the entry; its release cancels
+        // nothing.
+        assert!(farm.start_generic(id, 265598, "SMART", "STK", "NASDAQ", &[236], PRIMARY_MD).is_empty());
+        assert!(farm.release_generic(id, &[236]).is_empty());
+        let cancels = farm.stop_generic(id);
+        assert_eq!(cancels.len(), 1);
+        let codes: Vec<&str> = cancels[0].1.iter().filter(|(t, _)| *t == 264).map(|(_, v)| v.as_str()).collect();
+        assert_eq!(codes, ["512", "456", "236", "225", "101"]);
+        assert!(!cancels[0].1.iter().any(|(t, _)| *t == 6088));
+        assert!(farm.generic.is_empty());
     }
 
     // ibx#441: the "no exchange" code of a currency pair is ignored: no key,
