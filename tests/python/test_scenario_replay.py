@@ -421,8 +421,9 @@ def test_real_time_bars_shared():
 
 
 # Plain TRAIL orders: openOrder shows the stop price each report gives
-# (05/10/2026, ibx#491).
+# (05/10/2026, ibx#491). The reqOpenOrders are left out, as in the Rust test
+# (the book's order goes by permId).
 def test_plain_trail_follows_the_server():
-    out = replay("20261005/b2_trail", compare=["order"])
+    out = replay("20261005/b2_trail", compare=["order"], skip_seqs=[s + k for s in (15585, 15768, 15964, 16182, 16349, 16522) for k in range(6)])
     theirs = assert_same(out)
     assert any("trailStopPrice=775.06" in l for l in theirs)

@@ -437,8 +437,12 @@ fn real_time_bars_shared() {
 }
 
 // Plain TRAIL orders, by amount and by percent: openOrder shows the stop
-// price each report gives (6117), as the market moves (ibx#491).
+// price each report gives, as the market moves (ibx#491). The six
+// reqOpenOrders are left out: their order is the book's, by permId, and
+// ibx's permIds are its own (the listing: src/api/client/tests.rs
+// `open_orders_show_the_reported_contract_and_trail_stop`).
 #[test]
 fn plain_trail_follows_the_server() {
-    check("20261005/b2_trail", orders());
+    let listings: Vec<u64> = [15585u64, 15768, 15964, 16182, 16349, 16522].iter().flat_map(|&s| s..=s + 5).collect();
+    check("20261005/b2_trail", orders().skip_seqs(&listings));
 }

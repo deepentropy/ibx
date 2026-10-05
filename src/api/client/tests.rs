@@ -5457,6 +5457,27 @@ fn open_order_listings_go_in_the_books_order_by_client() {
     assert_eq!(mine.iter().map(|(_, t, _)| t.order.perm_id).collect::<Vec<_>>(), [1790863660514062]);
 }
 
+// reqOpenOrders of a plain TRAIL order placed by symbol (captured
+// 05/10/2026, b2_trail): the contract the server reported (its conId) and
+// the stop price of its last report (ibx#491).
+#[test]
+fn open_orders_show_the_reported_contract_and_trail_stop() {
+    use crate::bridge::RichOrderInfo;
+    let (client, _rx, shared) = test_client();
+    let by_symbol = Contract { symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+    let placed = Order { order_id: 103, order_type: "TRAIL".into(), aux_price: 1.0, total_quantity: 1.0, ..Default::default() };
+    client.core.open_orders.lock().unwrap().insert(103, crate::client_core::TrackedOrder {
+        contract: by_symbol, order: placed.clone(), status: "PreSubmitted".into(), filled: 0.0, remaining: 1.0,
+        instrument: 0, last_fill_price: 0.0,
+    });
+    let reported = Order { trail_stop_price: 775.06, ..placed };
+    let order_state = crate::api::types::OrderState { status: "PreSubmitted".into(), ..Default::default() };
+    shared.orders.push_order_info(103, RichOrderInfo { contract: spy(), order: reported, order_state, last_exec: Default::default() });
+    let listed = client.core.open_orders_listing(&shared, crate::client_core::OpenOrdersRequest::Open);
+    assert_eq!(listed.len(), 1);
+    assert_eq!((listed[0].1.contract.con_id, listed[0].1.order.trail_stop_price), (756733, 775.06));
+}
+
 // An execution of another client's order is kept for reqExecutions, with
 // no live callback and no commission report (`jextend.ba.a(dq, aQ)`).
 #[test]

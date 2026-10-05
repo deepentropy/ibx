@@ -2862,3 +2862,168 @@ fn api_stops_all_or_none_live() {
         assert!(w.statuses.iter().any(|(id, s)| id == oid && s == "Cancelled"), "{label} ({oid}) not cancelled");
     }
 }
+
+// ── Regular-hours checks of 05/10/2026 (ibx#450, ibx#444, ibx#455, ibx#454, ibx#491) ──
+
+#[derive(Default)]
+struct B2Wrapper {
+    start: Option<Instant>,
+    events: Vec<(u128, String)>,
+    details: Vec<(i64, i64)>,
+}
+
+impl B2Wrapper {
+    fn at(&mut self, what: String) {
+        let ms = self.start.map(|s| s.elapsed().as_millis()).unwrap_or(0);
+        self.events.push((ms, what));
+    }
+    fn has(&self, prefix: &str) -> bool {
+        self.events.iter().any(|(_, e)| e.starts_with(prefix))
+    }
+}
+
+impl Wrapper for B2Wrapper {
+    fn error(&mut self, req_id: i64, code: i64, text: &str, _: &str) { self.at(format!("error {req_id} {code} {text}")); }
+    fn tick_price(&mut self, req_id: i64, tt: i32, p: f64, _: &TickAttrib) { self.at(format!("price {req_id} {tt} {p}")); }
+    fn tick_size(&mut self, req_id: i64, tt: i32, s: f64) { self.at(format!("size {req_id} {tt} {s}")); }
+    fn tick_string(&mut self, req_id: i64, tt: i32, v: &str) { self.at(format!("string {req_id} {tt} {v}")); }
+    fn tick_generic(&mut self, req_id: i64, tt: i32, v: f64) { self.at(format!("generic {req_id} {tt} {v}")); }
+    fn tick_req_params(&mut self, req_id: i64, min_tick: f64, bbo: &str, perms: i64) {
+        self.at(format!("params {req_id} {min_tick} {bbo} {perms}"));
+    }
+    fn market_data_type(&mut self, req_id: i64, t: i32) { self.at(format!("mdt {req_id} {t}")); }
+    fn tick_by_tick_all_last(
+        &mut self, req_id: i64, tt: i32, time: i64, price: f64, size: f64, _: &TickAttribLast, ex: &str, _: &str,
+    ) {
+        self.at(format!("tbt {req_id} {tt} {time} {price} {size} {ex}"));
+    }
+    fn real_time_bar(&mut self, req_id: i64, time: i64, _: f64, _: f64, _: f64, close: f64, volume: f64, _: f64, count: i32) {
+        self.at(format!("bar {req_id} {time} {close} {volume} {count}"));
+    }
+    fn open_order(&mut self, order_id: i64, c: &Contract, o: &Order, s: &OrderState) {
+        self.at(format!("open {order_id} {} {} {} {}", c.con_id, o.order_type, o.trail_stop_price, s.status));
+    }
+    fn contract_details(&mut self, req_id: i64, d: &ContractDetails) { self.details.push((req_id, d.contract.con_id)); }
+}
+
+/// In regular hours, on paper, as the gateway in its captures of
+/// 05/10/2026:
+/// - AAPL with sixteen generic ticks: open interest 27/28, implied
+///   volatility 24, dividends 59, shortable 46/89, trade count / rate /
+///   volume rate 54-56, RTVolume 48; SPY "mdoff,233,236": 48 and 46, no
+///   top of book; "999": 321; EUR.USD "233": no error; MNQ front month
+///   "588": 86.
+/// - 7203 with type 1: 354 ending "7203 TSEJ (7203.T) /TOP/ALL"; type 3:
+///   marketDataType 3 then 10167; type 1 again: the request parameters,
+///   then 354.
+/// - Tick-by-tick Last and 5-second bars of AAPL given by symbol: data.
+/// - A plain TRAIL BUY 1 SPY, trail 1.00 (it fills only if the price rises
+///   1.00 within 40 s): openOrder shows the server's stop price; cancelled
+///   at the end.
+/// The log shows the generic entries: 101, 106, 233, 375, 456 after the top
+/// of book; the others with 626 at its acknowledgement.
+/// Run with: cargo test --test rust_api_gt api_b2_regular_hours_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_b2_regular_hours_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = B2Wrapper::default();
+    let pump = |client: &EClient, w: &mut B2Wrapper, secs: u64| {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(secs) {
+            client.process_msgs(w);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    pump(&client, &mut w, 3);
+    w.events.clear();
+    w.start = Some(Instant::now());
+    let by_symbol = |symbol: &str, sec_type: &str, exchange: &str, currency: &str| Contract {
+        symbol: symbol.into(), sec_type: sec_type.into(), exchange: exchange.into(), currency: currency.into(),
+        ..Default::default()
+    };
+    // Generic ticks.
+    client.req_mkt_data(9620, &by_symbol("AAPL", "STK", "SMART", "USD"),
+        "100,101,104,105,106,165,225,233,236,293,294,295,318,375,411,456", false, false).unwrap();
+    pump(&client, &mut w, 20);
+    client.cancel_mkt_data(9620).unwrap();
+    client.req_mkt_data(9621, &by_symbol("SPY", "STK", "SMART", "USD"), "mdoff,233,236", false, false).unwrap();
+    pump(&client, &mut w, 15);
+    client.cancel_mkt_data(9621).unwrap();
+    client.req_mkt_data(9622, &by_symbol("AAPL", "STK", "SMART", "USD"), "999", false, false).unwrap();
+    client.req_mkt_data(9623, &by_symbol("EUR", "CASH", "IDEALPRO", "USD"), "233", false, false).unwrap();
+    pump(&client, &mut w, 8);
+    client.cancel_mkt_data(9623).unwrap();
+    client.req_contract_details(9624, &by_symbol("MNQ", "FUT", "CME", "USD")).unwrap();
+    pump(&client, &mut w, 5);
+    let front = w.details.iter().find(|(r, _)| *r == 9624).map(|(_, c)| *c).expect("MNQ contracts");
+    let mnq = Contract { con_id: front, ..by_symbol("MNQ", "FUT", "CME", "USD") };
+    client.req_mkt_data(9625, &mnq, "588", false, false).unwrap();
+    pump(&client, &mut w, 15);
+    client.cancel_mkt_data(9625).unwrap();
+    // Market data errors.
+    let toyota = by_symbol("7203", "STK", "SMART", "JPY");
+    client.req_market_data_type(1);
+    client.req_mkt_data(9652, &toyota, "", false, false).unwrap();
+    pump(&client, &mut w, 5);
+    client.cancel_mkt_data(9652).unwrap();
+    client.req_market_data_type(3);
+    client.req_mkt_data(9654, &toyota, "", false, false).unwrap();
+    pump(&client, &mut w, 8);
+    client.cancel_mkt_data(9654).unwrap();
+    client.req_market_data_type(1);
+    client.req_mkt_data(9655, &toyota, "", false, false).unwrap();
+    pump(&client, &mut w, 5);
+    client.cancel_mkt_data(9655).unwrap();
+    // Tick-by-tick data and 5-second bars by symbol.
+    client.req_tick_by_tick_data(9600, &by_symbol("AAPL", "STK", "SMART", "USD"), "Last", 0, false).unwrap();
+    client.req_real_time_bars(9640, &by_symbol("AAPL", "STK", "SMART", "USD"), 5, "TRADES", true).unwrap();
+    pump(&client, &mut w, 15);
+    client.cancel_tick_by_tick_data(9600).unwrap();
+    client.cancel_real_time_bars(9640).unwrap();
+    // A plain TRAIL order.
+    let id = client.next_order_id();
+    let trail = Order {
+        action: "BUY".into(), total_quantity: 1.0, order_type: "TRAIL".into(), aux_price: 1.0, tif: "DAY".into(),
+        ..Default::default()
+    };
+    client.place_order(id, &by_symbol("SPY", "STK", "SMART", "USD"), &trail).unwrap();
+    pump(&client, &mut w, 40);
+    client.cancel_order(id, "").unwrap();
+    pump(&client, &mut w, 3);
+    client.disconnect();
+    for (ms, e) in &w.events {
+        if !e.starts_with("tbt ") && !e.starts_with("price ") && !e.starts_with("size 9620 0 ") {
+            println!("  {ms:>6} ms  {e}");
+        }
+    }
+    for p in [
+        "size 9620 27 ", "size 9620 28 ", "generic 9620 24 ", "string 9620 59 ", "generic 9620 46 ", "size 9620 89 ",
+        "generic 9620 54 ", "generic 9620 55 ", "generic 9620 56 ", "string 9620 48 ", "string 9621 48 ",
+        "generic 9621 46 ", "size 9625 86 ", "tbt 9600 ", "bar 9640 ",
+    ] {
+        assert!(w.has(p), "no {p}");
+    }
+    assert!(!w.has("price 9621 "), "mdoff: no top of book");
+    assert!(w.has("error 9622 321 "));
+    assert!(!w.has("error 9623 "), "EUR.USD 233: accepted");
+    let not_subscribed = |req: i64| w.events.iter().any(|(_, e)| {
+        e.starts_with(&format!("error {req} 354 Requested market data is not subscribed. Check API status"))
+            && e.ends_with("7203 TSEJ (7203.T) /TOP/ALL")
+    });
+    assert!(not_subscribed(9652) && not_subscribed(9655));
+    assert!(w.has("mdt 9654 3") && w.has("error 9654 10167 "));
+    let pos = |p: &str| w.events.iter().position(|(_, e)| e.starts_with(p));
+    assert!(matches!((pos("params 9655 "), pos("error 9655 354 ")), (Some(a), Some(b)) if a < b), "the kept parameters first");
+    assert!(w.events.iter().any(|(_, e)| e.starts_with(&format!("open {id} 756733 TRAIL ")) && !e.contains("e308")),
+        "the server's stop price");
+}
