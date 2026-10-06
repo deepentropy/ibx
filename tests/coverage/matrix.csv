@@ -89,7 +89,7 @@ rule,CONN-AUTH 2.2,"Second-factor types (w constants, )",no test
 rule,CONN-AUTH 2.3,"mobile key (775, M)",no test
 rule,CONN-AUTH 2.4,"Other factors, typed codes",no test
 rule,CONN-AUTH 3,Keys and crypto,no test
-rule,CONN-AUTH 3.1,NS key exchange (532 / 533),no test
+rule,CONN-AUTH 3.1,NS key exchange (532 / 533),src/auth/certs.rs::fixture_cases_give_the_reference_outcome ; src/auth/certs.rs::captured_chain_dates ; src/auth/certs.rs::check_order ; src/auth/certs.rs::reply_signature_only_its_length_counts ; src/auth/dh.rs::captured_server_hello_passes ; src/auth/dh.rs::certificate_failures_give_the_reference_login_texts ; src/gateway.rs::auth_login_without_tls_runs_the_key_exchange ; live:tests/farm_reconnect_poc.rs::auth_login_and_reconnect_without_key_exchange_live
 rule,CONN-AUTH 3.2,Per-channel ciphers,no test
 rule,CONN-AUTH 3.3,8349 sign and verify,no test
 rule,CONN-AUTH 3.4,Tokens and session ids,no test

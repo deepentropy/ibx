@@ -152,6 +152,32 @@ proptest! {
         let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
         let _ = crate::auth::dh::SecureChannel::zero_keys_for_test().process_server_hello(&refs);
     }
+
+    /// The certificates of the key-exchange reply (ibx#276): a captured
+    /// certificate mutated, in place of each certificate of the captured
+    /// chain, parses and checks to a result.
+    #[test]
+    fn key_exchange_certificates(at in 0..3usize, cert in mutated(captured_certificates())) {
+        use crate::auth::certs;
+        let chain = captured_certificates();
+        decode(&cert, PER_BYTE, |b| {
+            let mut ders: Vec<&[u8]> = chain.clone();
+            ders[at] = b;
+            let parsed: Result<Vec<_>, _> = ders.iter().map(|d| certs::parse_certificate(d)).collect();
+            parsed.map(|p| certs::check_server_certificates(&[0u8; 256], &p, certs::fixture::NOW_MS, false))
+        })?;
+    }
+}
+
+/// The certificates of the captured key-exchange reply.
+fn captured_certificates() -> Vec<&'static [u8]> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+    static CERTS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    CERTS
+        .get_or_init(|| crate::auth::certs::fixture::captured_hello_certificates()[2..].iter().map(|c| B64.decode(c).unwrap()).collect())
+        .iter()
+        .map(Vec::as_slice)
+        .collect()
 }
 
 /// A tick-by-tick frame of a few entries: the 2-byte bit count, then per

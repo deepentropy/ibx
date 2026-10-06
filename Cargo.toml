@@ -38,6 +38,9 @@ md-5 = "0.10"
 digest = "0.10"
 aes = "0.8"
 cbc = "0.1"
+# Certificates of the key-exchange reply (ibx#276); `hazmat` gives the
+# parse profile without the serial number limit.
+x509-cert = { version = "0.3.0", default-features = false, features = ["hazmat"] }
 
 # Protocol
 flate2 = "1"

@@ -3015,9 +3015,10 @@ mod tests {
     // in clear; any other refusal is an error.
     #[test]
     fn auth_login_without_tls_runs_the_key_exchange() {
-        let hello = format!("50;533;{};{};c2ln;0;", B64.encode([7u8; 32]), B64.encode([2u8]));
-        let mut wire = AuthWire::new(&[&hello, CAPTURED_AUTH_START]);
-        let mut channel = SecureChannel::new();
+        use crate::auth::certs::fixture;
+        let hello = fixture::captured_hello();
+        let mut wire = AuthWire::new(&[hello, CAPTURED_AUTH_START]);
+        let mut channel = SecureChannel::new().with_cert_time(fixture::NOW_MS);
         let (start, refused) = ccp_login_start(&mut wire, &mut channel, CAPTURED_CONNECT.as_bytes(), false).unwrap();
         assert!(!refused);
         assert!(start.password_required);
@@ -3036,6 +3037,22 @@ mod tests {
 
         let mut wire = AuthWire::new(&["50;535;no crypto;0;"]);
         assert!(ccp_login_start(&mut wire, &mut SecureChannel::new(), CAPTURED_CONNECT.as_bytes(), false).is_err());
+
+        // ibx#276: a reply whose certificates fail the reference's checks
+        // ends the login, with its login text; nothing more is sent.
+        for (now, text) in [
+            (fixture::NOW_MS + 86_400_000, crate::auth::dh::CERTIFICATE_EXPIRED),
+            (fixture::NOW_MS - 86_400_000 * 2, crate::auth::dh::CERTIFICATE_NOT_YET_VALID),
+        ] {
+            let mut wire = AuthWire::new(&[hello, CAPTURED_AUTH_START]);
+            let err = ccp_login_start(&mut wire, &mut SecureChannel::new().with_cert_time(now), CAPTURED_CONNECT.as_bytes(), false).unwrap_err();
+            assert!(err.to_string().starts_with(text), "{err}");
+            assert_eq!(wire.sent().len(), 1);
+        }
+        let no_certificate = format!("50;533;{};{};c2ln;0;", B64.encode([7u8; 32]), B64.encode([2u8]));
+        let mut wire = AuthWire::new(&[&no_certificate, CAPTURED_AUTH_START]);
+        let err = ccp_login_start(&mut wire, &mut SecureChannel::new(), CAPTURED_CONNECT.as_bytes(), false).unwrap_err();
+        assert!(err.to_string().starts_with(crate::auth::dh::SECURE_CONNECTION_FAILED), "{err}");
     }
 
     // ibx#423: the SSL and plain ports of an endpoint (`E.j()`, `E.k()`).

@@ -34,6 +34,16 @@ pub fn use_ssl_setting(value: Option<&str>) -> bool {
     !matches!(value.map(str::trim), Some(v) if v.eq_ignore_ascii_case("false") || v == "0")
 }
 
+/// The reference's setting `[Communication] TestSecureConnect` of its jts.ini
+/// (`jsetting.J.o()`, read once per process by `crypt.d.a(int, boolean)`):
+/// on, the key exchange also accepts the test certificates (ibx#276).
+/// `IBX_TEST_SECURE_CONNECT=true` (or `1`) turns it on; off by default, as
+/// the reference's.
+pub fn test_secure_connect() -> bool {
+    static SETTING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SETTING.get_or_init(|| bypass_setting(std::env::var("IBX_TEST_SECURE_CONNECT").ok().as_deref()))
+}
+
 /// The reference's API precaution "Bypass Redirect Order warning for Stock
 /// API Orders" (`ApiSettings.n()`, `m_bypassRedirectWarning`, false by
 /// default): off, a stock order directed to an exchange other than SMART

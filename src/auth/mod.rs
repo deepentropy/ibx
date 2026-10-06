@@ -1,3 +1,4 @@
+pub mod certs;
 pub mod crypto;
 pub mod dh;
 pub mod session;
