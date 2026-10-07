@@ -200,9 +200,8 @@ class TestLiveE2E:
     def test_display_groups(self):
         """Verify display group API calls work (issue #90).
 
-        Gateway has no physical TWS windows, so query_display_groups
-        returns empty and subscribe/unsubscribe are no-ops. We verify
-        the callbacks fire without errors.
+        Answered locally as the reference (ibx#424): the seven groups,
+        `none` for a subscription, nothing for a valid update.
         """
         assert self.wrapper.got_next_id.wait(timeout=10)
 
@@ -213,12 +212,15 @@ class TestLiveE2E:
         dg_events = [e for e in self.wrapper.events if e[0] == "display_group_list"]
         assert len(dg_events) > 0, "display_group_list callback should fire"
         assert dg_events[0][1] == 5001  # req_id
-        assert dg_events[0][2] == ""    # empty groups (no TWS windows)
+        assert dg_events[0][2] == "1|2|3|4|5|6|7"
 
-        # subscribe/unsubscribe should not raise
         self.client.subscribe_to_group_events(5002, 1)
+        time.sleep(0.5)
+        assert ("display_group_updated", 5002, "none") in self.wrapper.events
+        self.client.update_display_group(5002, "265598@SMART")
         self.client.unsubscribe_from_group_events(5002)
-        self.client.update_display_group(5002, "")
+        time.sleep(2)
+        assert len([e for e in self.wrapper.events if e[0] == "display_group_updated"]) == 1
 
     def test_disconnect_reconnect(self):
         """Verify clean disconnect."""

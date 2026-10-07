@@ -67,7 +67,7 @@ pub fn from_parts( shared: Arc<SharedState>, control_tx: Sender<ControlCommand>,
 
 #### `map_req_instrument`
 
-Map a reqId to an InstrumentId (for testing without a live engine).
+Map a reqId to an InstrumentId (for testing without a live engine). The request takes every tick of the instrument, its headlines too.
 
 ```rust
 pub fn map_req_instrument(&self, req_id: i64, instrument: InstrumentId)
@@ -90,7 +90,7 @@ pub fn track_order_for_test( &self, order_id: OrderId, contract: ApiContract, or
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `order_id` | `OrderId` (`i64`) | Order identifier. Must be unique per session. |
+| `order_id` | `OrderId` | Order identifier. Must be unique per session. |
 | `contract` | `ApiContract` | Contract specification (symbol, secType, exchange, currency, etc.). |
 | `order` | `ApiOrder` | Order parameters (action, quantity, type, price, TIF, etc.). |
 | `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
@@ -109,6 +109,30 @@ pub fn seed_instrument(&self, con_id: i64, instrument: InstrumentId)
 |-----------|------|-------------|
 | `con_id` | `i64` | Contract ID. Unique per instrument. |
 | `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
+
+---
+
+#### `server_version`
+
+API level the session follows: 214, the level the reference gives a current client (ibx#426)., for code that tests it before using a feature.
+
+```rust
+pub fn server_version(&self) -> i32
+```
+
+**Returns:** `i32`
+
+---
+
+#### `tws_connection_time`
+
+Time the session started, as `yyyyMMdd HH:mm:ss {zone}` in the machine's local time (ibx#426). The connection time of the C++ client.
+
+```rust
+pub fn tws_connection_time(&self) -> String
+```
+
+**Returns:** `String`
 
 ---
 
@@ -190,7 +214,7 @@ pub fn token_type(&self) -> &str
 
 #### `req_positions`
 
-Request positions. Waits for server-pushed account data before delivering, then calls position_end.
+Request positions. A subscription, as the reference (ibx#477): the snapshot and `position_end` once the position data is in, then one `position` row each time a position or its average cost changes, until `cancel_positions`. What is ready now is sent through `wrapper`; the rest comes through `process_msgs`. No wait in the caller's thread.
 
 ```rust
 pub fn req_positions(&self, wrapper: &mut impl Wrapper)
@@ -204,10 +228,10 @@ pub fn req_positions(&self, wrapper: &mut impl Wrapper)
 
 #### `req_pnl`
 
-Subscribe to account PnL updates.
+Subscribe to account PnL updates. Several requests can run; an empty or unknown account gives 321, a request id already running gives 102 (ibx#478).
 
 ```rust
-pub fn req_pnl(&self, req_id: i64, _account: &str, _model_code: &str)
+pub fn req_pnl(&self, req_id: i64, account: &str, _model_code: &str)
 ```
 
 | Parameter | Type | Description |
@@ -220,7 +244,7 @@ pub fn req_pnl(&self, req_id: i64, _account: &str, _model_code: &str)
 
 #### `cancel_pnl`
 
-Cancel PnL subscription.
+Cancel PnL subscription. A request id not running gives 10185 (ibx#478).
 
 ```rust
 pub fn cancel_pnl(&self, req_id: i64)
@@ -234,10 +258,10 @@ pub fn cancel_pnl(&self, req_id: i64)
 
 #### `req_pnl_single`
 
-Subscribe to single-position PnL updates.
+Subscribe to single-position PnL updates. Same checks as `req_pnl` (ibx#478).
 
 ```rust
-pub fn req_pnl_single(&self, req_id: i64, _account: &str, _model_code: &str, con_id: i64)
+pub fn req_pnl_single(&self, req_id: i64, account: &str, _model_code: &str, con_id: i64)
 ```
 
 | Parameter | Type | Description |
@@ -251,7 +275,7 @@ pub fn req_pnl_single(&self, req_id: i64, _account: &str, _model_code: &str, con
 
 #### `cancel_pnl_single`
 
-Cancel single-position PnL subscription.
+Cancel single-position PnL subscription. A request id not running gives 10186 (ibx#478).
 
 ```rust
 pub fn cancel_pnl_single(&self, req_id: i64)
@@ -265,10 +289,10 @@ pub fn cancel_pnl_single(&self, req_id: i64)
 
 #### `req_account_summary`
 
-Request account summary.
+Request account summary. A server subscription: the rows come as the server sends them, each batch ends with account_summary_end, until the cancel (ibx#479).
 
 ```rust
-pub fn req_account_summary(&self, req_id: i64, _group: &str, tags: &str)
+pub fn req_account_summary(&self, req_id: i64, group: &str, tags: &str)
 ```
 
 | Parameter | Type | Description |
@@ -298,7 +322,7 @@ pub fn cancel_account_summary(&self, req_id: i64)
 Subscribe to account updates.
 
 ```rust
-pub fn req_account_updates(&self, subscribe: bool, _acct_code: &str)
+pub fn req_account_updates(&self, subscribe: bool, acct_code: &str)
 ```
 
 | Parameter | Type | Description |
@@ -320,7 +344,7 @@ pub fn cancel_positions(&self)
 
 #### `req_managed_accts`
 
-Request managed accounts.
+Request managed accounts. Every account of the logon's account list, in logon order, comma separated, as the reference (ibx#420); the logon account when the logon had no list.
 
 ```rust
 pub fn req_managed_accts(&self, wrapper: &mut impl Wrapper)
@@ -334,10 +358,10 @@ pub fn req_managed_accts(&self, wrapper: &mut impl Wrapper)
 
 #### `req_account_updates_multi`
 
-Request account updates for multiple accounts/models.
+Request account updates for multiple accounts/models. A subscription, as the reference (ibx#476): the account values (unless `ledger_and_nlv`) and the ledger rows as the server sent them, each through `account_update_multi` with the request id and model code, then `account_update_multi_end`; then the rows that change, until `cancel_account_updates_multi`. A request id already running gives error 322. What is ready is sent through `wrapper` at once; the rest comes through `process_msgs`.
 
 ```rust
-pub fn req_account_updates_multi( &self, _req_id: i64, _account: &str, _model_code: &str, _ledger_and_nlv: bool, wrapper: &mut impl Wrapper, )
+pub fn req_account_updates_multi( &self, req_id: i64, account: &str, model_code: &str, ledger_and_nlv: bool, wrapper: &mut impl Wrapper, )
 ```
 
 | Parameter | Type | Description |
@@ -355,7 +379,7 @@ pub fn req_account_updates_multi( &self, _req_id: i64, _account: &str, _model_co
 Cancel multi-account updates.
 
 ```rust
-pub fn cancel_account_updates_multi(&self, _req_id: i64)
+pub fn cancel_account_updates_multi(&self, req_id: i64)
 ```
 
 | Parameter | Type | Description |
@@ -366,10 +390,10 @@ pub fn cancel_account_updates_multi(&self, _req_id: i64)
 
 #### `req_positions_multi`
 
-Request positions for multiple accounts/models.
+Request positions for multiple accounts/models. A subscription, as the reference (ibx#476): `position_multi` rows with the request id and model code, `position_multi_end`, then a row each time a position or its average cost changes, until `cancel_positions_multi`.
 
 ```rust
-pub fn req_positions_multi( &self, _req_id: i64, _account: &str, _model_code: &str, wrapper: &mut impl Wrapper, )
+pub fn req_positions_multi( &self, req_id: i64, account: &str, model_code: &str, wrapper: &mut impl Wrapper, )
 ```
 
 | Parameter | Type | Description |
@@ -386,7 +410,7 @@ pub fn req_positions_multi( &self, _req_id: i64, _account: &str, _model_code: &s
 Cancel multi-account positions.
 
 ```rust
-pub fn cancel_positions_multi(&self, _req_id: i64)
+pub fn cancel_positions_multi(&self, req_id: i64)
 ```
 
 | Parameter | Type | Description |
@@ -462,7 +486,7 @@ pub fn cancel_order_by_perm_id(&self, perm_id: i64) -> Result<(), String>
 
 #### `req_global_cancel`
 
-Cancel all orders.
+Cancel all orders.: every order of the account the session knows, those of other clients and of earlier sessions too, as the reference cancels them.
 
 ```rust
 pub fn req_global_cancel(&self) -> Result<(), String>
@@ -474,7 +498,7 @@ pub fn req_global_cancel(&self) -> Result<(), String>
 
 #### `req_ids`
 
-Request next valid order ID.
+Request next valid order ID.: the highest order id this client used + 1, as the reference computes it per client id (1 when none), a 32-bit id. The ids of the client's earlier sessions count as far as the server's replays of the logon show them (orders with the client's id); right after the connect the answer waits for the order replay of the logon. Nothing is reserved.
 
 ```rust
 pub fn req_ids(&self, wrapper: &mut impl Wrapper)
@@ -488,7 +512,7 @@ pub fn req_ids(&self, wrapper: &mut impl Wrapper)
 
 #### `next_order_id`
 
-Get the next order ID (local counter).
+The next order id for a new order: the next valid id (see [`req_ids`](EClient::req_ids)), or above the ids this method gave before. Each call reserves the id it gives.
 
 ```rust
 pub fn next_order_id(&self) -> i64
@@ -500,7 +524,7 @@ pub fn next_order_id(&self) -> i64
 
 #### `req_open_orders`
 
-Request open orders for this client.
+Request open orders for this client. Before the order replay of the logon has ended, and while the auth link is lost, the request is answered only after the order replay, from `process_msgs` (ibx#251).
 
 ```rust
 pub fn req_open_orders(&self, wrapper: &mut impl Wrapper)
@@ -514,7 +538,7 @@ pub fn req_open_orders(&self, wrapper: &mut impl Wrapper)
 
 #### `req_all_open_orders`
 
-Request all open orders.
+Request all open orders. Held like [`req_open_orders`](Self::req_open_orders) until the order replay (ibx#251).
 
 ```rust
 pub fn req_all_open_orders(&self, wrapper: &mut impl Wrapper)
@@ -591,7 +615,7 @@ pub fn parse_algo_params(strategy: &str, params: &[TagValue]) -> Result<AlgoPara
 
 #### `req_mkt_data`
 
-Subscribe to market data. When `snapshot` is true, delivers the first available quote then calls `tick_snapshot_end` and auto-cancels the subscription. `generic_tick_list` is checked as the reference checks it: a list with an unknown tick, or one not legal for the security type, is refused with error 321 (ibx#450). It is NOT transmitted to the gateway, with one exception: the news tick, "292" (every subscribed news source) or "292:CODE1+CODE2", subscribes the contract's headlines, delivered as `tick_news` (ibx#458); a derivative contract or a code that is not a subscribed source ends the request with error 10094. Other generic tick types (RTVolume and friends) have no emission path, and `tick_generic` fires only for a snapshot's halted state, 49 (ibx#234, ibx#446). Delayed data cannot be requested either — see `req_market_data_type`. Several request ids may ask for one contract, as with the reference (ibx#444): they share its subscription, a request that joins gets at once what the others have, and the subscription ends with the cancel of the last one.
+Subscribe to market data. When `snapshot` is true, the request is a snapshot, as the reference's: each tick type is sent once, then `tick_snapshot_end` when the bid, ask, last, open and close came (with the option computations for an option; the types a contract has none of are not waited for), or 11 seconds after the start; then the request is gone. A snapshot with generic ticks, or beyond the per-second snapshot limit, is refused with error 321. `generic_tick_list` is checked as the reference checks it: a list with an unknown tick, or one not legal for the security type, is refused with error 321 (ibx#450). Each generic tick valid for the contract is its own farm entry, shared by the requests of the contract, and its values come as the reference's ticks (`control::generic_values`): option volume 29/30 (100), open interest 27/28 (101), average option volume 87 (105), implied and historical volatility 24 (106) and 23 (104), misc stats 21 and 15-20 (165), auction 34-36 and 61 (225), RTVolume 48 (233) and RT trade volume 77 (375), shortable 46 and 89 (236), trade count, rate and volume rate 54-56 (293-295), last RTH trade 57 (318), dividends 59 (456), futures open interest 86 (588). The other legal ticks are accepted and not sent. The news tick, "292" (every subscribed news source) or "292:CODE1+CODE2", subscribes the contract's headlines, delivered as `tick_news` (ibx#458); a derivative contract or a code that is not a subscribed source ends the request with error 10094. `mdoff` keeps the top of book ticks from the request. Several request ids may ask for one contract, as with the reference (ibx#444): they share its subscription, a request that joins gets at once what the others have, and the subscription ends with the cancel of the last one.
 
 ```rust
 pub fn req_mkt_data( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool, ) -> Result<(), String>
@@ -611,10 +635,10 @@ pub fn req_mkt_data( &self, req_id: i64, contract: &Contract, generic_tick_list:
 
 #### `req_mkt_data_ex`
 
-Like [`req_mkt_data`], but encodes the market-data mode per-request via FIX field 9887, allowing parallel realtime + frozen subscriptions for the same contract: | `mode_9887` | mode             | wire shape | |-------------|------------------|---| | `0`         | REALTIME         | `264=442` (BID_ASK) + `264=443` (LAST), no 9887 | | `1`         | DELAYED          | `264=1` (TOP) + `9887=1` | | `2`         | FROZEN           | `264=1` (TOP) + `9887=2` | | `3`         | DELAYED_FROZEN   | `264=1` (TOP) + `9887=3` | The frozen sub keeps thinly-traded names streaming after-hours when the realtime feed is silent. Issue 3-4 parallel calls per contract with different modes and pick whichever feed has data.
+Like [`req_mkt_data`], but sends a market-data mode with the request, allowing parallel realtime + frozen subscriptions for the same contract. The request is always the bid/ask and last pair; the mode rides on each of its entries: | `mode_9887` | mode             | |-------------|------------------| | `0`         | REALTIME (no mode sent) | | `1`         | DELAYED          | | `2`         | FROZEN           | | `3`         | DELAYED_FROZEN   | The frozen sub keeps thinly-traded names streaming after-hours when the realtime feed is silent. Issue 3-4 parallel calls per contract with different modes and pick whichever feed has data.
 
 ```rust
-pub fn req_mkt_data_ex( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, _regulatory_snapshot: bool, mode_9887: i32, ) -> Result<(), String>
+pub fn req_mkt_data_ex( &self, req_id: i64, contract: &Contract, generic_tick_list: &str, snapshot: bool, regulatory_snapshot: bool, mode_9887: i32, ) -> Result<(), String>
 ```
 
 | Parameter | Type | Description |
@@ -627,6 +651,74 @@ pub fn req_mkt_data_ex( &self, req_id: i64, contract: &Contract, generic_tick_li
 | `mode_9887` | `i32` |  |
 
 **Returns:** `Result<(), String>`
+
+---
+
+#### `calculate_implied_volatility`
+
+Implied volatility of an option price. Computed locally by the option model, as the reference: one `tick_option_computation` with tick type 53, or nothing when no volatility is found within 5 seconds. The options are read and not used, as the reference.
+
+```rust
+pub fn calculate_implied_volatility( &self, req_id: i64, contract: &Contract, option_price: f64, under_price: f64, _implied_vol_options: &[crate::api::types::TagValue], ) -> Result<(), String>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `contract` | `&Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `option_price` | `f64` | Option market price. |
+| `under_price` | `f64` | Underlying asset price. |
+| `implied_vol_options` | `&[crate::api::types::TagValue]` |  |
+
+**Returns:** `Result<(), String>`
+
+---
+
+#### `calculate_option_price`
+
+Price and greeks of an option at a volatility.: one `tick_option_computation` with tick type 53; after 30 seconds without a price, the tick has no price and no greeks, as the reference.
+
+```rust
+pub fn calculate_option_price( &self, req_id: i64, contract: &Contract, volatility: f64, under_price: f64, _opt_prc_options: &[crate::api::types::TagValue], ) -> Result<(), String>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `contract` | `&Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `volatility` | `f64` | Implied volatility. |
+| `under_price` | `f64` | Underlying asset price. |
+| `opt_prc_options` | `&[crate::api::types::TagValue]` |  |
+
+**Returns:** `Result<(), String>`
+
+---
+
+#### `cancel_calculate_implied_volatility`
+
+ Does nothing, as the reference: a running calculation still answers.
+
+```rust
+pub fn cancel_calculate_implied_volatility(&self, _req_id: i64)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+---
+
+#### `cancel_calculate_option_price`
+
+ Does nothing, as the reference: a running calculation still answers.
+
+```rust
+pub fn cancel_calculate_option_price(&self, _req_id: i64)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 
 ---
 
@@ -648,10 +740,10 @@ pub fn cancel_mkt_data(&self, req_id: i64) -> Result<(), String>
 
 #### `req_tick_by_tick_data`
 
-Subscribe to tick-by-tick data.
+Subscribe to tick-by-tick data. `tick_type` is "Last", "AllLast", "BidAsk" or "MidPoint", each asked under its own name; anything else gives error 321, as the reference. `number_of_ticks` above 0 asks for that many past ticks first, given as historical ticks; `ignore_size` asks for the size filter. A request for a contract, type and size filter already streaming joins that stream (ibx#455).
 
 ```rust
-pub fn req_tick_by_tick_data( &self, req_id: i64, contract: &Contract, tick_type: &str, _number_of_ticks: i32, _ignore_size: bool, ) -> Result<(), String>
+pub fn req_tick_by_tick_data( &self, req_id: i64, contract: &Contract, tick_type: &str, number_of_ticks: i32, ignore_size: bool, ) -> Result<(), String>
 ```
 
 | Parameter | Type | Description |
@@ -779,7 +871,7 @@ pub fn last_rtt(&self) -> Option<std::time::Duration>
 
 #### `req_market_data_type`
 
-NOT supported end to end (ibx#234): the requested type is stored locally but never sent to the gateway, so subscriptions always deliver realtime data and delayed tick variants never arrive. Requesting a non-realtime type logs a warning, and the `market_data_type` callback reports the DELIVERED type (realtime) rather than echoing the request.
+Set the market data type (ibx#447), as the reference sets its modes: 1 all off, 2 frozen on, 3 delayed on, 4 delayed and delayed-frozen on (2 keeps the delayed modes, 3 keeps frozen). With delayed on, a subscription the server rejects goes on with delayed data when the server has it: `market_data_type(reqId, 3)` then error 10167, as the reference. With frozen on (2, until 1), a streaming request also asks the contract's market data status; while it says frozen, the request gets the frozen top of book: `market_data_type(reqId, 2)`, then the kept values; back on real-time data, type 1 and the real-time values. A value outside 1..=4 gives error 321 with id -1.
 
 ```rust
 pub fn req_market_data_type(&self, market_data_type: i32)
@@ -827,10 +919,10 @@ pub fn quote_by_instrument(&self, instrument: InstrumentId) -> Option<Quote>
 
 #### `req_historical_data`
 
-Request historical data.
+Request historical data. A request the reference refuses locally gets its error (321 or 10314) and no query; SCHEDULE asks for the trading schedule (ibx#430).
 
 ```rust
-pub fn req_historical_data( &self, req_id: i64, contract: &Contract, end_date_time: &str, duration: &str, bar_size: &str, what_to_show: &str, use_rth: bool, _format_date: i32, keep_up_to_date: bool, ) -> Result<(), String>
+pub fn req_historical_data( &self, req_id: i64, contract: &Contract, end_date_time: &str, duration: &str, bar_size: &str, what_to_show: &str, use_rth: bool, format_date: i32, keep_up_to_date: bool, ) -> Result<(), String>
 ```
 
 | Parameter | Type | Description |
@@ -870,7 +962,7 @@ pub fn cancel_historical_data(&self, req_id: i64) -> Result<(), String>
 Request head timestamp.
 
 ```rust
-pub fn req_head_time_stamp( &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool, _format_date: i32, ) -> Result<(), String>
+pub fn req_head_time_stamp( &self, req_id: i64, contract: &Contract, what_to_show: &str, use_rth: bool, format_date: i32, ) -> Result<(), String>
 ```
 
 | Parameter | Type | Description |
@@ -916,7 +1008,7 @@ pub fn req_mkt_depth_exchanges(&self) -> Result<(), String>
 
 #### `req_matching_symbols`
 
-Request matching symbols.
+Request matching symbols. An empty or invalid pattern gives 321 and nothing is sent; the pattern is sent trimmed (ibx#439).
 
 ```rust
 pub fn req_matching_symbols(&self, req_id: i64, pattern: &str) -> Result<(), String>
@@ -926,6 +1018,26 @@ pub fn req_matching_symbols(&self, req_id: i64, pattern: &str) -> Result<(), Str
 |-----------|------|-------------|
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 | `pattern` | `&str` | Symbol search pattern. |
+
+**Returns:** `Result<(), String>`
+
+---
+
+#### `req_sec_def_opt_params`
+
+Request option chain parameters. A request the reference refuses locally gets 321; the rows come through `security_definition_option_parameter`, then `security_definition_option_parameter_end` (ibx#440).
+
+```rust
+pub fn req_sec_def_opt_params( &self, req_id: i64, underlying_symbol: &str, fut_fop_exchange: &str, underlying_sec_type: &str, underlying_con_id: i64, ) -> Result<(), String>
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `underlying_symbol` | `&str` | Underlying symbol (e.g. `"AAPL"`). |
+| `fut_fop_exchange` | `&str` | Exchange for futures/FOP options. |
+| `underlying_sec_type` | `&str` | Underlying security type (e.g. `"STK"`). |
+| `underlying_con_id` | `i64` | Underlying contract ID. |
 
 **Returns:** `Result<(), String>`
 
@@ -949,7 +1061,7 @@ pub fn cancel_head_time_stamp(&self, req_id: i64) -> Result<(), String>
 
 #### `req_market_rule`
 
-Request market rule by ID. Looks up cached market rules delivered during connection init.
+Request market rule by ID. Answered from the rules of the definition replies received; an id not received, or a rule with no price increments, gives 322 (ibx#437).
 
 ```rust
 pub fn req_market_rule(&self, market_rule_id: i32, wrapper: &mut impl crate::api::wrapper::Wrapper)
@@ -964,10 +1076,10 @@ pub fn req_market_rule(&self, market_rule_id: i32, wrapper: &mut impl crate::api
 
 #### `req_news_bulletins`
 
-Subscribe to news bulletins.
+Subscribe to news bulletins.: `all_msgs` replays the bulletins of the day first.
 
 ```rust
-pub fn req_news_bulletins(&self, _all_msgs: bool)
+pub fn req_news_bulletins(&self, all_msgs: bool)
 ```
 
 | Parameter | Type | Description |
@@ -1000,27 +1112,18 @@ pub fn req_scanner_parameters(&self) -> Result<(), String>
 
 #### `req_scanner_subscription`
 
-Subscribe to a market scanner: the whole subscription, the subscription options and the filter options. A local refusal comes back through `error`.
+Subscribe to a market scanner.: the whole subscription, the subscription options and the filter options (ibx#456). A local refusal comes back through `error`.
 
 ```rust
-pub fn req_scanner_subscription( &self, req_id: i64, subscription: &ScannerSubscription, scanner_subscription_options: &[TagValue], scanner_subscription_filter_options: &[TagValue], ) -> Result<(), String>
+pub fn req_scanner_subscription( &self, req_id: i64, subscription: &crate::api::types::ScannerSubscription, scanner_subscription_options: &[TagValue], scanner_subscription_filter_options: &[TagValue], ) -> Result<(), String>
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
-| `subscription` | `&ScannerSubscription` | Instrument, location, scan code, rows (`-1` = not set) and the filter fields (unset: `f64::MAX`, `i32::MAX`, empty text). |
-| `scanner_subscription_options` | `&[TagValue]` | Subscription options; only `manual` is a known key. |
-| `scanner_subscription_filter_options` | `&[TagValue]` | Extra filters, code and value; a code also set by a field replaces it. |
-
-**Returns:** `Result<(), String>`
-
------------|------|-------------|
-| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
-| `instrument` | `&str` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
-| `location_code` | `&str` | Scanner location (e.g. `"STK.US.MAJOR"`). |
-| `scan_code` | `&str` | Scanner code (e.g. `"TOP_PERC_GAIN"`, `"HIGH_OPT_IMP_VOLAT"`). |
-| `max_items` | `u32` | Maximum number of scanner results. |
+| `subscription` | `&crate::api::types::ScannerSubscription` | Scanner subscription parameters. |
+| `scanner_subscription_options` | `&[TagValue]` |  |
+| `scanner_subscription_filter_options` | `&[TagValue]` |  |
 
 **Returns:** `Result<(), String>`
 
@@ -1044,7 +1147,7 @@ pub fn cancel_scanner_subscription(&self, req_id: i64) -> Result<(), String>
 
 #### `req_historical_news`
 
-Request historical news headlines.
+Request historical news headlines. The dates are sent as given; at most 300 headlines. A local refusal comes back through `error`.
 
 ```rust
 pub fn req_historical_news( &self, req_id: i64, con_id: i64, provider_codes: &str, start_time: &str, end_time: &str, max_results: u32, ) -> Result<(), String>
@@ -1065,7 +1168,7 @@ pub fn req_historical_news( &self, req_id: i64, con_id: i64, provider_codes: &st
 
 #### `req_news_article`
 
-Request a news article by provider and article ID.
+Request a news article by provider and article ID. A local refusal comes back through `error`.
 
 ```rust
 pub fn req_news_article(&self, req_id: i64, provider_code: &str, article_id: &str) -> Result<(), String>
@@ -1152,7 +1255,7 @@ pub fn cancel_histogram_data(&self, req_id: i64) -> Result<(), String>
 
 #### `req_historical_ticks`
 
-Request historical tick data.
+Request historical tick data. The reference's warnings (2174, 10299) and local refusals (10314, 321) come first (ibx#432).
 
 ```rust
 pub fn req_historical_ticks( &self, req_id: i64, contract: &Contract, start_date_time: &str, end_date_time: &str, number_of_ticks: i32, what_to_show: &str, use_rth: bool, ignore_size: bool, _misc_options: &[TagValue], ) -> Result<(), String>
@@ -1167,6 +1270,8 @@ pub fn req_historical_ticks( &self, req_id: i64, contract: &Contract, start_date
 | `number_of_ticks` | `i32` | Maximum number of ticks to return. |
 | `what_to_show` | `&str` | Data type: `"TRADES"`, `"MIDPOINT"`, `"BID"`, `"ASK"`, `"BID_ASK"`, etc. |
 | `use_rth` | `bool` | If `true`, only return data from Regular Trading Hours. |
+| `ignore_size` | `bool` | If `true`, ignore size in tick-by-tick data. |
+| `misc_options` | `&[TagValue]` |  |
 
 **Returns:** `Result<(), String>`
 
@@ -1196,10 +1301,10 @@ pub fn req_historical_schedule( &self, req_id: i64, contract: &Contract, end_dat
 
 #### `req_smart_components`
 
-Request smart routing components for a BBO exchange. Gateway-local — returns component exchanges from init data.
+Request smart routing components for a BBO exchange. Gateway-local, as the reference (ibx#441): the exchange map of the BBO exchange that market data made known (the `bboExchange` of `tick_req_params`); an unknown one gives error 321. When the map has not come yet, the answer comes from `process_msgs`, within 2 s.
 
 ```rust
-pub fn req_smart_components(&self, req_id: i64, _bbo_exchange: &str, wrapper: &mut impl Wrapper)
+pub fn req_smart_components(&self, req_id: i64, bbo_exchange: &str, wrapper: &mut impl Wrapper)
 ```
 
 | Parameter | Type | Description |
@@ -1226,7 +1331,7 @@ pub fn req_news_providers(&self, wrapper: &mut impl Wrapper)
 
 #### `req_current_time`
 
-Request current server time. Answered locally, as the reference: the local clock plus the offset to the server clock of the logon (no server round-trip).
+Request current server time. Answered locally, as the reference: the local clock plus the offset to the server clock of the logon (ibx#421).
 
 ```rust
 pub fn req_current_time(&self, wrapper: &mut impl Wrapper)
@@ -1240,7 +1345,7 @@ pub fn req_current_time(&self, wrapper: &mut impl Wrapper)
 
 #### `request_fa`
 
-Request FA data. Not yet implemented.
+Request FA data. On a session that is not FA, error 321 as the reference (ibx#481); the FA data exchange itself is not implemented.
 
 ```rust
 pub fn request_fa(&self, _fa_data_type: i32)
@@ -1254,10 +1359,10 @@ pub fn request_fa(&self, _fa_data_type: i32)
 
 #### `replace_fa`
 
-Replace FA data. Not yet implemented.
+Replace FA data. On a session that is not FA, error 321 for the request as the reference (ibx#481); the FA data exchange itself is not implemented.
 
 ```rust
-pub fn replace_fa(&self, _req_id: i64, _fa_data_type: i32, _cxml: &str)
+pub fn replace_fa(&self, req_id: i64, _fa_data_type: i32, _cxml: &str)
 ```
 
 | Parameter | Type | Description |
@@ -1270,39 +1375,41 @@ pub fn replace_fa(&self, _req_id: i64, _fa_data_type: i32, _cxml: &str)
 
 #### `query_display_groups`
 
-Query display groups. Not yet implemented.
+Query display groups. Gateway-local, as the reference (ibx#424): the fixed list of groups.
 
 ```rust
-pub fn query_display_groups(&self, _req_id: i64)
+pub fn query_display_groups(&self, req_id: i64, wrapper: &mut impl Wrapper)
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `wrapper` | `&mut impl Wrapper` | Wrapper callback receiver for synchronous delivery. |
 
 ---
 
 #### `subscribe_to_group_events`
 
-Subscribe to display group events. Not yet implemented.
+Subscribe to display group events. Gateway-local, as the reference (ibx#424): the contract of the group at once, `none` since no group has one; error 321 for a group outside 1 to 7 or a request id already subscribed.
 
 ```rust
-pub fn subscribe_to_group_events(&self, _req_id: i64, _group_id: i32)
+pub fn subscribe_to_group_events(&self, req_id: i64, group_id: i32, wrapper: &mut impl Wrapper)
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 | `group_id` | `i32` | Display group ID. |
+| `wrapper` | `&mut impl Wrapper` | Wrapper callback receiver for synchronous delivery. |
 
 ---
 
 #### `unsubscribe_from_group_events`
 
-Unsubscribe from display group events. Not yet implemented.
+Unsubscribe from display group events. No answer, but error 321 for a request id that is not subscribed, as the reference (ibx#424).
 
 ```rust
-pub fn unsubscribe_from_group_events(&self, _req_id: i64)
+pub fn unsubscribe_from_group_events(&self, req_id: i64)
 ```
 
 | Parameter | Type | Description |
@@ -1313,10 +1420,10 @@ pub fn unsubscribe_from_group_events(&self, _req_id: i64)
 
 #### `update_display_group`
 
-Update display group. Not yet implemented.
+Update display group. As the reference (ibx#424): error 321 for bad input or a request id that is not subscribed, error 473 for a conId that is not a contract, and no answer for a valid update, which changes no group.
 
 ```rust
-pub fn update_display_group(&self, _req_id: i64, _contract_info: &str)
+pub fn update_display_group(&self, req_id: i64, contract_info: &str)
 ```
 
 | Parameter | Type | Description |
@@ -1328,7 +1435,7 @@ pub fn update_display_group(&self, _req_id: i64, _contract_info: &str)
 
 #### `req_soft_dollar_tiers`
 
-Request soft dollar tiers. Gateway-local — returns tiers parsed from CCP logon tag 6560.
+Request soft dollar tiers. Gateway-local — returns tiers parsed from CCP logon tag 6522, none when the logon has no tiers (ibx#480).
 
 ```rust
 pub fn req_soft_dollar_tiers(&self, req_id: i64, wrapper: &mut impl Wrapper)
@@ -1703,6 +1810,56 @@ End of positions list.
 
 ---
 
+#### `account_update_multi`
+
+A row of `req_account_updates_multi` (ibx#476).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `account` | `&str` | Account ID. |
+| `model_code` | `&str` | Model portfolio code (empty for default). |
+| `key` | `&str` | Account value key (e.g. `"NetLiquidation"`, `"BuyingPower"`). |
+| `value` | `&str` | Account value. |
+| `currency` | `&str` | Currency code (e.g. `"USD"`). |
+
+---
+
+#### `account_update_multi_end`
+
+End of multi-account updates.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+---
+
+#### `position_multi`
+
+A row of `req_positions_multi` (ibx#476).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `account` | `&str` | Account ID. |
+| `model_code` | `&str` | Model portfolio code (empty for default). |
+| `contract` | `&Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `pos` | `f64` | Position size (decimal shares). |
+| `avg_cost` | `f64` | Average cost per share. |
+
+---
+
+#### `position_multi_end`
+
+End of multi-account positions.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+---
+
 #### `pnl`
 
 Account P&L update (daily, unrealized, realized).
@@ -1794,6 +1951,17 @@ End of contract details.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+
+---
+
+#### `bond_contract_details`
+
+A bond row of a contract details request (`bondContractDetails`).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `details` | `&ContractDetails` | Contract details object. |
 
 ---
 
@@ -1909,7 +2077,7 @@ Per-contract news tick.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `ticker_id` | `i64` | Ticker/request ID. |
-| `timestamp` | `i64` | Time of the headline, epoch milliseconds. |
+| `timestamp` | `i64` | Timestamp string. |
 | `provider_code` | `&str` | News provider code (e.g. `"BRFG"`). |
 | `article_id` | `&str` | News article identifier. |
 | `headline` | `&str` | News headline text. |
@@ -2208,6 +2376,28 @@ Available news providers list.
 
 ---
 
+#### `display_group_list`
+
+Display group list.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `groups` | `&str` | FA group definitions. |
+
+---
+
+#### `display_group_updated`
+
+Display group updated.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `contract_info` | `&str` | Display group contract info string. |
+
+---
+
 #### `soft_dollar_tiers`
 
 Soft dollar tier list.
@@ -2226,6 +2416,28 @@ Family codes linking related accounts.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `codes` | `&[crate::types::FamilyCode]` | Family code list. |
+
+---
+
+#### `receive_fa`
+
+FA data (groups or profiles XML), as `receiveFA` (ibx#481).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `fa_data_type` | `i32` | FA data type (1=Groups, 2=Profiles, 3=Aliases). |
+| `xml` | `&str` | XML string. |
+
+---
+
+#### `replace_fa_end`
+
+End of a replaceFA, as `replaceFAEnd` (ibx#481).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `text` | `&str` | Informational text. |
 
 ---
 

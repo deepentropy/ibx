@@ -207,6 +207,12 @@ pub trait Wrapper {
 
     fn news_providers(&mut self, providers: &[crate::types::NewsProvider]) {}
 
+    // ── Display Groups ──
+
+    fn display_group_list(&mut self, req_id: i64, groups: &str) {}
+
+    fn display_group_updated(&mut self, req_id: i64, contract_info: &str) {}
+
     // ── Soft Dollar Tiers ──
 
     fn soft_dollar_tiers(&mut self, req_id: i64, tiers: &[crate::types::SoftDollarTier]) {}
@@ -445,6 +451,12 @@ pub mod tests {
         }
         fn soft_dollar_tiers(&mut self, req_id: i64, tiers: &[crate::types::SoftDollarTier]) {
             self.events.push(format!("soft_dollar_tiers:{req_id}:{}", tiers.len()));
+        }
+        fn display_group_list(&mut self, req_id: i64, groups: &str) {
+            self.events.push(format!("display_group_list:{req_id}:{groups}"));
+        }
+        fn display_group_updated(&mut self, req_id: i64, contract_info: &str) {
+            self.events.push(format!("display_group_updated:{req_id}:{contract_info}"));
         }
         fn family_codes(&mut self, codes: &[crate::types::FamilyCode]) {
             self.events.push(format!("family_codes:{}", codes.len()));

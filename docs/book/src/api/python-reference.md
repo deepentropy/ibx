@@ -47,7 +47,7 @@ def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".
 | `core_id` | `usize or None` | CPU core affinity for the hot loop thread. Use a distinct value per engine when running several in one process. |
 | `ib_key_timeout_secs` | `int or None` | Live second-factor approval timeout in seconds. Default: no client timeout, the wait ends when the server answers or closes the login (about 18 min). Set it to fail fast on unattended live logins; ignored for paper. |
 | `ib_key_token_sub_type` | `str or None` | Override of the second-factor token sub-type. Default: the value the server lists for the session. Ignored for paper. |
-| `code_provider` | `callable or None` | Callable for the typed-code second factor: called once during `connect()` with a dict `{"display_id", "avth_url"}`, returns the code as `str`. Default: wait for the mobile push approval. Ignored for paper. |
+| `code_provider` | `Py<PyAny> or None` | Callable for the typed-code second factor: called once during `connect()` with a dict `{"display_id", "avth_url"}`, returns the code as `str`. Default: wait for the mobile push approval. Ignored for paper. |
 
 ---
 
@@ -57,6 +57,26 @@ Disconnect from IB.
 
 ```python
 def disconnect()
+```
+
+---
+
+#### `server_version`
+
+API level of the session: 214, the level the reference gives a current client; None when not connected (ibx#426).
+
+```python
+def server_version()
+```
+
+---
+
+#### `tws_connection_time`
+
+Time the session started, as `yyyyMMdd HH:mm:ss {zone}` in the machine's local time; None when not connected (ibx#426).
+
+```python
+def tws_connection_time()
 ```
 
 ---
@@ -221,7 +241,7 @@ def req_account_updates(subscribe, _acct_code=""))
 
 #### `req_managed_accts`
 
-Request managed accounts list.
+Request managed accounts list: every account of the logon's account list, in logon order, comma separated (ibx#420).
 
 ```python
 def req_managed_accts()
@@ -231,7 +251,7 @@ def req_managed_accts()
 
 #### `req_account_updates_multi`
 
-Request account updates for multiple accounts/models.
+Request account updates across accounts / models. A subscription, as the reference (ibx#476): the rows, account_update_multi_end, then the rows that change, until cancel_account_updates_multi.
 
 ```python
 def req_account_updates_multi(req_id, account, model_code, ledger_and_nlv=false))
@@ -262,7 +282,7 @@ def cancel_account_updates_multi(req_id)
 
 #### `req_positions_multi`
 
-Request positions across multiple accounts/models.
+Request positions across multiple accounts/models. A subscription, as the reference (ibx#476).
 
 ```python
 def req_positions_multi(req_id, account, model_code))
@@ -335,7 +355,7 @@ def cancel_order(order_id, manual_order_cancel_time=""))
 
 #### `req_global_cancel`
 
-Cancel all orders globally.
+Cancel all orders globally: every order of the account the session knows, those of other clients and of earlier sessions too, as the reference cancels them.
 
 ```python
 def req_global_cancel()
@@ -345,7 +365,7 @@ def req_global_cancel()
 
 #### `req_ids`
 
-Request next valid order ID.
+Request next valid order ID: the highest order id this client used + 1, as the reference computes it per client id (1 when none), a 32-bit id. The ids of the client's earlier sessions count as far as the server's replays of the logon show them; right after the connect the answer waits for the order replay of the logon. Nothing is reserved.
 
 ```python
 def req_ids(num_ids=1))
@@ -359,7 +379,7 @@ def req_ids(num_ids=1))
 
 #### `next_order_id`
 
-Get the next order ID (local counter, auto-increments).
+The next order id for a new order: the next valid id (see ``req_ids``), or above the ids this method gave before. Each call reserves the id it gives.
 
 ```python
 def next_order_id()
@@ -369,7 +389,7 @@ def next_order_id()
 
 #### `req_open_orders`
 
-Request all open orders for this client.
+Request all open orders for this client.  Before the order replay of the logon has ended, and while the auth link is lost, the request is answered only after the order replay, from the dispatch loop (ibx#251).
 
 ```python
 def req_open_orders()
@@ -379,7 +399,7 @@ def req_open_orders()
 
 #### `req_all_open_orders`
 
-Request all open orders across all clients.
+Request all open orders across all clients. Held like `req_open_orders` until the order replay (ibx#251).
 
 ```python
 def req_all_open_orders()
@@ -434,7 +454,7 @@ def req_completed_orders(api_only=false))
 
 #### `req_mkt_data`
 
-Request market data for a contract. A generic tick list with an unknown tick, or one not legal for the security type, is refused with error 321 (ibx#450). Several request ids may ask for one contract: they share its subscription, a request that joins gets at once what the others have, and the subscription ends with the cancel of the last one (ibx#444).
+Request market data for a contract.
 
 ```python
 def req_mkt_data(req_id, contract, generic_tick_list="", snapshot=false, regulatory_snapshot=false, mkt_data_options=Vec::new()))
@@ -519,7 +539,7 @@ def last_rtt_ms()
 
 #### `req_market_data_type`
 
-NOT supported end to end (ibx#234): the requested type (1=live, 2=frozen, 3=delayed, 4=delayed-frozen) is stored locally but never sent to the gateway, so subscriptions always deliver realtime data and delayed tick variants never arrive. Requesting a non-realtime type logs a warning, and the `market_data_type` callback reports the DELIVERED type (realtime) rather than echoing the request.
+Set the market data type (ibx#447): 1=live, 2=frozen, 3=delayed, 4=delayed-frozen, as the Rust client. With delayed on, a subscription the server rejects goes on with delayed data (type 3, error 10167). With frozen on (2, until 1), a streaming request of a contract whose data is frozen gets the frozen top of book (type 2). A value outside 1..=4 gives error 321 with id -1.
 
 ```python
 def req_market_data_type(market_data_type)
@@ -736,9 +756,27 @@ def req_matching_symbols(req_id, pattern)
 
 ---
 
+#### `req_sec_def_opt_params`
+
+Request option chain parameters (ibx#440). A request the reference refuses locally gets 321; the rows come through `security_definition_option_parameter`, then `security_definition_option_parameter_end`.
+
+```python
+def req_sec_def_opt_params(req_id, underlying_symbol, fut_fop_exchange="", underlying_sec_type="STK", underlying_con_id=0))
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `int` | Request identifier. Used to match responses to requests. |
+| `underlying_symbol` | `str` | Underlying symbol (e.g. `"AAPL"`). |
+| `fut_fop_exchange` | `str` | Exchange for futures/FOP options. |
+| `underlying_sec_type` | `str` | Underlying security type (e.g. `"STK"`). |
+| `underlying_con_id` | `int` | Underlying contract ID. |
+
+---
+
 #### `req_scanner_subscription`
 
-Request scanner subscription: the whole ibapi subscription, the subscription options and the filter options. A local refusal comes back through `error`.
+Request scanner subscription: the whole ibapi subscription, the subscription options and the filter options (ibx#456). A local refusal comes back through `error`.
 
 ```python
 def req_scanner_subscription(req_id, subscription, scanner_subscription_options=Vec::new(), scanner_subscription_filter_options=Vec::new()))
@@ -750,11 +788,6 @@ def req_scanner_subscription(req_id, subscription, scanner_subscription_options=
 | `subscription` | `Py<PyAny>` | Scanner subscription parameters. |
 | `scanner_subscription_options` | `list` |  |
 | `scanner_subscription_filter_options` | `list` |  |
-
------------|------|-------------|
-| `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `subscription` | `Py<PyAny>` | Scanner subscription parameters. |
-| `scanner_subscription_options` | `list` |  |
 
 ---
 
@@ -939,7 +972,7 @@ def req_historical_schedule(req_id, contract, end_date_time="", duration_str="1 
 
 #### `calculate_implied_volatility`
 
-Calculate option implied volatility. Not yet implemented.
+Implied volatility of an option price, computed locally by the option model as the reference (ibx#442). The options are not used.
 
 ```python
 def calculate_implied_volatility(req_id, contract, option_price, under_price, implied_vol_options=Vec::new()))
@@ -957,7 +990,7 @@ def calculate_implied_volatility(req_id, contract, option_price, under_price, im
 
 #### `calculate_option_price`
 
-Calculate option theoretical price. Not yet implemented.
+Price and greeks of an option at a volatility, computed locally by the option model as the reference (ibx#442). The options are not used.
 
 ```python
 def calculate_option_price(req_id, contract, volatility, under_price, opt_prc_options=Vec::new()))
@@ -1017,24 +1050,6 @@ def exercise_options(req_id, contract, exercise_action, exercise_quantity, accou
 | `exercise_quantity` | `int` | Number of contracts to exercise. |
 | `account` | `str` | Account ID. |
 | `override` | `int` | Override flag for exercise. |
-
----
-
-#### `req_sec_def_opt_params`
-
-Request option chain parameters. Not yet implemented.
-
-```python
-def req_sec_def_opt_params(req_id, underlying_symbol, fut_fop_exchange="", underlying_sec_type="STK", underlying_con_id=0))
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `req_id` | `int` | Request identifier. Used to match responses to requests. |
-| `underlying_symbol` | `str` | Underlying symbol (e.g. `"AAPL"`). |
-| `fut_fop_exchange` | `str` | Exchange for futures/FOP options. |
-| `underlying_sec_type` | `str` | Underlying security type (e.g. `"STK"`). |
-| `underlying_con_id` | `int` | Underlying contract ID. |
 
 ---
 
@@ -1104,7 +1119,7 @@ def replace_fa(req_id, fa_data_type, cxml))
 
 #### `query_display_groups`
 
-Query display groups.
+Query display groups: the fixed list of the seven groups.
 
 ```python
 def query_display_groups(req_id)
@@ -1118,7 +1133,7 @@ def query_display_groups(req_id)
 
 #### `subscribe_to_group_events`
 
-Subscribe to display group events.
+As the reference (ibx#424): the contract of the group at once, `none` since no group has one; error 321 for a group outside 1 to 7 or a request id already subscribed.
 
 ```python
 def subscribe_to_group_events(req_id, group_id)
@@ -1133,7 +1148,7 @@ def subscribe_to_group_events(req_id, group_id)
 
 #### `unsubscribe_from_group_events`
 
-Unsubscribe from display group events.
+No answer, but error 321 for a request id that is not subscribed, as the reference (ibx#424).
 
 ```python
 def unsubscribe_from_group_events(req_id)
@@ -1147,7 +1162,7 @@ def unsubscribe_from_group_events(req_id)
 
 #### `update_display_group`
 
-Update display group.
+As the reference (ibx#424): error 321 for bad input or a request id that is not subscribed, error 473 for a conId that is not a contract, and no answer for a valid update, which changes no group.
 
 ```python
 def update_display_group(req_id, contract_info)
@@ -1162,7 +1177,7 @@ def update_display_group(req_id, contract_info)
 
 #### `req_smart_components`
 
-Request SMART routing component exchanges.
+As the reference (ibx#441): the exchange map of the BBO exchange that market data made known; an unknown one gives error 321; a map not come yet is answered by the message loop, within 2 s.
 
 ```python
 def req_smart_components(req_id, bbo_exchange)
@@ -1808,7 +1823,7 @@ Per-contract news tick.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `ticker_id` | `int` | Ticker/request ID. |
-| `time_stamp` | `int` | Time of the headline, epoch milliseconds. |
+| `time_stamp` | `int` | Timestamp string. |
 | `provider_code` | `str` | News provider code (e.g. `"BRFG"`). |
 | `article_id` | `str` | News article identifier. |
 | `headline` | `str` | News headline text. |
@@ -1921,14 +1936,14 @@ Option implied vol / greeks computation.
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
 | `tick_type` | `int` | Tick type ID or tick-by-tick type string. |
 | `tick_attrib` | `int` |  |
-| `implied_vol` | `float` | Implied volatility. |
-| `delta` | `float` | Option delta. |
-| `opt_price` | `float` | Option theoretical price. |
-| `pv_dividend` | `float` | Present value of dividends. |
-| `gamma` | `float` | Option gamma. |
-| `vega` | `float` | Option vega. |
-| `theta` | `float` | Option theta. |
-| `und_price` | `float` | Underlying price. |
+| `implied_vol` | `float or None` | Implied volatility. |
+| `delta` | `float or None` | Option delta. |
+| `opt_price` | `float or None` | Option theoretical price. |
+| `pv_dividend` | `float or None` | Present value of dividends. |
+| `gamma` | `float or None` | Option gamma. |
+| `vega` | `float or None` | Option vega. |
+| `theta` | `float or None` | Option theta. |
+| `und_price` | `float or None` | Underlying price. |
 
 ---
 

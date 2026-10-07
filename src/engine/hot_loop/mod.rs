@@ -1638,6 +1638,9 @@ impl HotLoop {
                         self.ccp.send_secdef_request_by_symbol(req_id, &symbol, &sec_type, &exchange, &currency, &filters, &mut self.ccp_conn, &mut self.hb);
                     }
                 }
+                ControlCommand::DisplayGroupLookup { req_id, con_id } => {
+                    self.ccp.start_display_group_lookup(req_id, con_id, &mut self.ccp_conn, &mut self.hb);
+                }
                 ControlCommand::CancelHeadTimestamp { req_id } => {
                     if let Some(pos) = self.hmds.pending_head_ts.iter().position(|(_, rid, _)| *rid == req_id) {
                         self.hmds.pending_head_ts.remove(pos);

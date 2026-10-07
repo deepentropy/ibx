@@ -3022,6 +3022,43 @@ impl CcpState {
         self.pending_resolves.push(PendingResolve { lookup_id, req_id, request });
     }
 
+    /// Look up the conId of a display group update (ibx#424), as the
+    /// reference does for a contract it has not seen. The answer is read
+    /// by `contract_resolve_reply`.
+    pub(crate) fn start_display_group_lookup(
+        &mut self,
+        req_id: ReqId,
+        con_id: i64,
+        ccp_conn: &mut Option<Connection>,
+        hb: &mut HeartbeatState,
+    ) {
+        let lookup_id = HIST_LOOKUP_FIRST_ID + self.next_resolve_id % HIST_LOOKUP_IDS;
+        self.next_resolve_id = self.next_resolve_id.wrapping_add(1);
+        if let Some(conn) = ccp_conn.as_mut().filter(|_| !self.disconnected) {
+            let name = format!("{}{}", crate::control::contracts::SECDEF_MSG_NAME, lookup_id);
+            let con_id_str = con_id.to_string();
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "c"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (320, &name),
+                (321, "2"),
+                (146, "1"),
+                (6008, &con_id_str),
+                (6004, "ANYEXCH"),
+            ]);
+            hb.last_ccp_sent = Instant::now();
+            log::info!("Contract lookup {} for display group req_id={}: con_id={}", lookup_id, req_id, con_id);
+        } else {
+            log::warn!("Contract lookup {} for req_id={} queued with no auth connection", lookup_id, req_id);
+        }
+        self.pending_resolves.push(PendingResolve {
+            lookup_id,
+            req_id,
+            request: crate::types::ControlCommand::DisplayGroupLookup { req_id, con_id },
+        });
+    }
+
     /// The answer to a contract lookup of a historical-data request
     /// (ibx#427): exactly one contract releases the request with its
     /// conId; none or several give error 200 and no query, as the
@@ -3032,6 +3069,18 @@ impl CcpState {
         let Some(idx) = self.pending_resolves.iter().position(|p| ReqId::from(p.lookup_id) == number) else { return false };
         let pending = self.pending_resolves.swap_remove(idx);
         let records = crate::control::contracts::parse_secdef_records(msg).unwrap_or_default();
+        if matches!(pending.request, crate::types::ControlCommand::DisplayGroupLookup { .. }) {
+            // A display group update (ibx#424): a contract is kept and gives
+            // no answer, none gives the reference's error.
+            match records.iter().find(|def| def.con_id != 0) {
+                Some(def) => self.cache_definition(def, shared),
+                None => {
+                    let (code, text) = crate::client_core::DISPLAY_GROUP_NO_INSTRUMENT;
+                    shared.reference.push_historical_error(pending.req_id, code, text.to_string());
+                }
+            }
+            return true;
+        }
         let mut con_ids: Vec<i64> = Vec::new();
         for def in &records {
             if def.con_id != 0 && !con_ids.contains(&def.con_id) {
@@ -7232,6 +7281,23 @@ mod reconnect_tests {
                     assert_eq!(symbol, "AAPL"),
                 other => panic!("{:?}", other),
             }
+        }
+
+        // ibx#424: the conId of a display group update that is not a
+        // contract gets 473; a contract is kept and gives no answer.
+        #[test]
+        fn display_group_lookup_gives_473_for_no_contract_only() {
+            let (mut ccp, mut context, shared) = (CcpState::new(), Context::new(), SharedState::new());
+            ccp.start_display_group_lookup(2, 999999999, &mut None, &mut HeartbeatState::new());
+            ccp.start_display_group_lookup(3, 8314, &mut None, &mut HeartbeatState::new());
+            let none = pipe_msg("35=d|43=N|320=SecDefReqMsgReqByConid3489660928|322=*|323=4|6038=Y|6019=0|6344=0");
+            let one = pipe_msg("35=d|43=N|320=SecDefReqMsgReqByConid3489660929|322=*|323=4|55=IBM|167=STK|207=BEST|6008=8314|15=USD");
+            ccp.process_ccp_message(&none, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
+            ccp.process_ccp_message(&one, &mut None, &mut context, &shared, &None, &mut HeartbeatState::new(), "DU1");
+            assert!(ccp.pending_resolves.is_empty());
+            assert!(ccp.resolved_requests.is_empty());
+            assert_eq!(shared.reference.drain_historical_errors(), vec![(2, 473, "No Financial Instrument defined".to_string())]);
+            assert_eq!(shared.reference.get_contract(8314).map(|c| c.symbol), Some("IBM".to_string()));
         }
 
         #[test]

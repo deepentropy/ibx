@@ -51,6 +51,10 @@ const TESTED_CONTROL_COMMANDS: &[&str] = &[
 
 const KNOWN_CONTROL_COMMAND_GAPS: &[(&str, &str)] = &[
     (
+        "DisplayGroupLookup",
+        "Checked on the paper account by examples/ex424_display_groups (ibx#424), not by a phase of this suite",
+    ),
+    (
         "FetchNewsProviders",
         "Gateway-local response path, no CCP round-trip in hot loop yet",
     ),

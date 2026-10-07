@@ -190,21 +190,21 @@ rule,DISPLAY-GROUPS 0,Summary,no test
 rule,DISPLAY-GROUPS 1,Common part,no test
 rule,DISPLAY-GROUPS 1.1,Dispatch,no test
 rule,DISPLAY-GROUPS 1.2,Decode and base checks,no test
-rule,DISPLAY-GROUPS 1.3,How refusals reach the client,no test
+rule,DISPLAY-GROUPS 1.3,How refusals reach the client,src/api/client/tests.rs::display_group_requests_as_the_reference
 rule,DISPLAY-GROUPS 1.4,Answer messages,no test
-rule,DISPLAY-GROUPS 2,queryDisplayGroups (67),no test
-rule,DISPLAY-GROUPS 3,subscribeToGroupEvents (68),no test
+rule,DISPLAY-GROUPS 2,queryDisplayGroups (67),src/api/client/tests.rs::display_group_requests_as_the_reference
+rule,DISPLAY-GROUPS 3,subscribeToGroupEvents (68),src/api/client/tests.rs::display_group_requests_as_the_reference
 rule,DISPLAY-GROUPS 3.1,Decode,no test
-rule,DISPLAY-GROUPS 3.2,"Local refusals (, all 321)",no test
-rule,DISPLAY-GROUPS 3.3,Process,no test
+rule,DISPLAY-GROUPS 3.2,"Local refusals (, all 321)",src/api/client/tests.rs::display_group_requests_as_the_reference
+rule,DISPLAY-GROUPS 3.3,Process,src/api/client/tests.rs::display_group_requests_as_the_reference
 rule,DISPLAY-GROUPS 3.4,Later events,no test
-rule,DISPLAY-GROUPS 4,updateDisplayGroup (69),no test
+rule,DISPLAY-GROUPS 4,updateDisplayGroup (69),src/api/client/tests.rs::display_group_requests_as_the_reference
 rule,DISPLAY-GROUPS 4.1,Decode,no test
-rule,DISPLAY-GROUPS 4.2,"Action choice (, )",no test
-rule,DISPLAY-GROUPS 4.3,"Local refusals for ChangeGroupEc (the normal case, all 321)",no test
-rule,DISPLAY-GROUPS 4.4,Process,no test
+rule,DISPLAY-GROUPS 4.2,"Action choice (, )",src/api/client/tests.rs::display_group_requests_as_the_reference
+rule,DISPLAY-GROUPS 4.3,"Local refusals for ChangeGroupEc (the normal case, all 321)",src/api/client/tests.rs::display_group_requests_as_the_reference
+rule,DISPLAY-GROUPS 4.4,Process,src/api/client/tests.rs::display_group_requests_as_the_reference ; src/engine/hot_loop/ccp.rs::display_group_lookup_gives_473_for_no_contract_only
 rule,DISPLAY-GROUPS 4.5,OpenTS action,no test
-rule,DISPLAY-GROUPS 5,unsubscribeFromGroupEvents (70),no test
+rule,DISPLAY-GROUPS 5,unsubscribeFromGroupEvents (70),src/api/client/tests.rs::display_group_requests_as_the_reference
 rule,DISPLAY-GROUPS 6,Group state in the gateway,no test
 rule,DISPLAY-GROUPS 6.1,Where a group gets its contract,no test
 rule,DISPLAY-GROUPS 6.2,Restore at login,no test
@@ -2076,10 +2076,10 @@ eclient,req_news_providers,,live:tests/rust_api_gt.rs::api_gt_suite
 eclient,req_current_time,,src/api/client/tests.rs::req_current_time_adds_the_logon_clock_offset
 eclient,request_fa,,src/api/client/tests.rs::fa_requests_on_a_non_fa_session_are_refused
 eclient,replace_fa,,src/api/client/tests.rs::fa_requests_on_a_non_fa_session_are_refused
-eclient,query_display_groups,,no test
-eclient,subscribe_to_group_events,,no test
-eclient,unsubscribe_from_group_events,,no test
-eclient,update_display_group,,no test
+eclient,query_display_groups,,src/api/client/tests.rs::display_group_requests_as_the_reference
+eclient,subscribe_to_group_events,,src/api/client/tests.rs::display_group_requests_as_the_reference
+eclient,unsubscribe_from_group_events,,src/api/client/tests.rs::display_group_requests_as_the_reference
+eclient,update_display_group,,src/api/client/tests.rs::display_group_requests_as_the_reference ; src/engine/hot_loop/ccp.rs::display_group_lookup_gives_473_for_no_contract_only
 eclient,req_soft_dollar_tiers,,live:tests/rust_api_gt.rs::api_gt_suite
 eclient,req_family_codes,,live:tests/rust_api_gt.rs::api_gt_suite
 eclient,set_server_log_level,,no test

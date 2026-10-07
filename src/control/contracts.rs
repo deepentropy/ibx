@@ -769,6 +769,8 @@ pub const SECDEF_BY_CONID_NAME: &str = "socket-reqContractDetailsReqByConid";
 /// Name of the lookup of the preferred contract of a conId, the API lookup
 /// by conId without an exchange (ibx#438).
 pub const SECDEF_PREFERRED_NAME: &str = "PreferredReqByConid";
+/// Name of the lookup of a contract not seen yet, by conId (ibx#424).
+pub const SECDEF_MSG_NAME: &str = "SecDefReqMsgReqByConid";
 /// Name of the lookup of a record's market rule on one of its valid
 /// exchanges, as the reference names it (ibx#435, ibx#436).
 pub const SECDEF_EXCHANGE_RULE_NAME: &str = "getECsForConidExchangePairsReqByConid";
@@ -792,6 +794,7 @@ pub fn secdef_request_number(req_id: &str) -> Option<crate::types::ReqId> {
         .or_else(|| req_id.strip_prefix(SECDEF_BY_SYMBOL_NAME))
         .or_else(|| req_id.strip_prefix(SECDEF_BY_CONID_NAME))
         .or_else(|| req_id.strip_prefix(SECDEF_PREFERRED_NAME))
+        .or_else(|| req_id.strip_prefix(SECDEF_MSG_NAME))
         .unwrap_or(req_id)
         .parse()
         .ok()

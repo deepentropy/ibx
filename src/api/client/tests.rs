@@ -6973,3 +6973,65 @@ fn algo_time_parameters_10314_and_2174() {
     let errors = shared.orders.drain_order_errors();
     assert_eq!(errors.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(41, 2174)]);
 }
+
+// ibx#424: the display group requests are answered locally as the
+// reference (capture of 07/10/2026): the fixed list, `none` at once for a
+// subscription, error 321 with id -1 for a refusal, and nothing for a
+// valid update but the lookup of a conId not seen yet.
+#[test]
+fn display_group_requests_as_the_reference() {
+    let (client, rx, shared) = test_client();
+    let refusal = |class: &str, cause: &str| format!("error:-1:321:Error validating request.-'{class}' : cause - {cause}");
+    let mut w = RecordingWrapper::default();
+
+    client.query_display_groups(1, &mut w);
+    client.subscribe_to_group_events(2, 1, &mut w);
+    for group in [9, 0, 8, -1] {
+        client.subscribe_to_group_events(3, group, &mut w);
+    }
+    client.subscribe_to_group_events(2, 1, &mut w);
+    client.subscribe_to_group_events(7, 1, &mut w);
+    assert_eq!(w.events, [
+        "display_group_list:1:1|2|3|4|5|6|7".to_string(),
+        "display_group_updated:2:none".to_string(),
+        refusal("bX", "Invalid window group ID=9"),
+        refusal("bX", "Invalid window group ID=0"),
+        refusal("bX", "Invalid window group ID=8"),
+        refusal("bX", "Invalid window group ID=-1"),
+        refusal("bX", "Request with ID=2 was already subscribed."),
+        "display_group_updated:7:none".to_string(),
+    ]);
+
+    // Updates: the refusals come with the next messages.
+    shared.reference.cache_contract(265598, Contract { con_id: 265598, symbol: "AAPL".into(), ..Default::default() });
+    client.update_display_group(8, "265598@SMART");
+    client.update_display_group(2, "none");
+    client.update_display_group(2, "abc@SMART");
+    client.update_display_group(2, "0@SMART");
+    client.update_display_group(2, "265598@SMART|foo=1");
+    client.update_display_group(2, "265598@SMART|action=Foo");
+    client.update_display_group(2, "265598@SMART");
+    client.update_display_group(2, "265598");
+    client.update_display_group(2, "265598@SMART|action=changegroupec");
+    assert!(rx.try_recv().is_err(), "a contract seen before is not looked up");
+    client.update_display_group(2, "999999999@SMART");
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::DisplayGroupLookup { req_id: 2, con_id: 999999999 })));
+    client.unsubscribe_from_group_events(9);
+    client.unsubscribe_from_group_events(2);
+    client.unsubscribe_from_group_events(2);
+    client.update_display_group(2, "265598@SMART");
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    let errors: Vec<&String> = w.events.iter().filter(|e| e.starts_with("error:")).collect();
+    assert_eq!(errors, [
+        &refusal("bZ", "Request with ID=8 failed since request ID wasn't found."),
+        &refusal("bZ", "Request with ID=2 failed with invalid contract info=abc@SMART, expected format 'contractId@exchange'"),
+        &refusal("bZ", "Request with ID=2 failed with invalid contract info=0@SMART: conid or excahge are missing, expected format 'contractId@exchange'"),
+        &refusal("bZ", "Action is unknown. Please check the pattern: conid@exch|param1=value1|...|action=(action)"),
+        &refusal("bZ", "Action 'Foo' is unknown"),
+        &refusal("bY", "Subscription for Group Events with request ID=9 wasn't found."),
+        &refusal("bY", "Subscription for Group Events with request ID=2 wasn't found."),
+        &refusal("bZ", "Request with ID=2 failed since request ID wasn't found."),
+    ]);
+    assert!(!w.events.iter().any(|e| e.starts_with("display_group")), "{:?}", w.events);
+}

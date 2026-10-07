@@ -1223,6 +1223,9 @@ pub struct ClientCore {
     /// (ibx#461).
     pub bulletin_replay: AtomicBool,
 
+    /// Request ids subscribed to display group events (ibx#424).
+    pub display_group_subs: Mutex<HashSet<i64>>,
+
     // Account updates subscription
     pub account_updates_subscribed: AtomicBool,
     pub account_stream: Mutex<AccountStream>,
@@ -1312,6 +1315,37 @@ pub const REQUEST_FA_NOT_FA: (i64, i64, &str) =
 /// text; the id is the request's (ibx#481).
 pub const REPLACE_FA_NOT_FA: (i64, &str) =
     (321, "Error validating request.-'b1' : cause - FA data operations ignored for non FA customers.");
+
+/// The display groups, as the reference lists them with no window open
+/// (ibx#424).
+pub const DISPLAY_GROUP_LIST: &str = "1|2|3|4|5|6|7";
+
+/// The contract of a display group: no group has one (ibx#424).
+pub const DISPLAY_GROUP_NO_CONTRACT: &str = "none";
+
+/// Id and code of a refused display group request: the reference gives
+/// the request id in the text only (ibx#424).
+pub const DISPLAY_GROUP_REFUSAL: (i64, i64) = (-1, 321);
+
+/// Error of a display group update whose conId is not a contract
+/// (ibx#424).
+pub const DISPLAY_GROUP_NO_INSTRUMENT: (i32, &str) = (473, "No Financial Instrument defined");
+
+/// What a display group update asks of the caller (ibx#424).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DisplayGroupUpdate {
+    /// Accepted; the reference changes nothing and sends nothing.
+    Nothing,
+    /// Refused: the error text, for `DISPLAY_GROUP_REFUSAL`.
+    Refused(String),
+    /// Accepted, with a conId not seen yet: it is looked up, and one that
+    /// is not a contract gets `DISPLAY_GROUP_NO_INSTRUMENT`.
+    Lookup(i64),
+}
+
+fn display_group_refusal(class: &str, cause: String) -> String {
+    format!("Error validating request.-'{class}' : cause - {cause}")
+}
 
 /// The reference's other names for order types ibx supports, and the name
 /// ibx uses (ibx#469, from the reference's order-type map).
@@ -1540,6 +1574,7 @@ impl ClientCore {
             next_account_summary: AtomicU64::new(1),
             bulletin_subscribed: AtomicBool::new(false),
             bulletin_replay: AtomicBool::new(false),
+            display_group_subs: Mutex::new(HashSet::new()),
             account_updates_subscribed: AtomicBool::new(false),
             account_stream: Mutex::new(AccountStream::default()),
             last_portfolio: Mutex::new(None),
@@ -1596,6 +1631,7 @@ impl ClientCore {
         self.account_multi.lock().unwrap().clear();
         self.bulletin_subscribed.store(false, Ordering::Relaxed);
         self.bulletin_replay.store(false, Ordering::Relaxed);
+        self.display_group_subs.lock().unwrap().clear();
         self.account_updates_subscribed.store(false, Ordering::Relaxed);
         *self.account_stream.lock().unwrap() = AccountStream::default();
         *self.last_portfolio.lock().unwrap() = None;
@@ -3038,6 +3074,97 @@ impl ClientCore {
         } else {
             None
         }
+    }
+
+    // ── Display groups ──
+
+    /// queryDisplayGroups as the reference (ibx#424): the fixed list of
+    /// groups, or the text of its refusal.
+    pub fn query_display_groups(req_id: i64) -> Result<&'static str, String> {
+        if req_id == i32::MAX as i64 {
+            return Err(display_group_refusal("bW", format!("Invalid request ID={req_id}")));
+        }
+        Ok(DISPLAY_GROUP_LIST)
+    }
+
+    /// subscribeToGroupEvents as the reference (ibx#424): the contract of
+    /// the group, sent at once, or the text of the refusal. Groups are 1
+    /// to 7; a request id subscribes once.
+    pub fn subscribe_to_group_events(&self, req_id: i64, group_id: i32) -> Result<&'static str, String> {
+        if req_id == i32::MAX as i64 {
+            return Err(display_group_refusal("bX", format!("Invalid request ID={req_id}")));
+        }
+        if !(1..=7).contains(&group_id) {
+            return Err(display_group_refusal("bX", format!("Invalid window group ID={group_id}")));
+        }
+        if !self.display_group_subs.lock().unwrap().insert(req_id) {
+            return Err(display_group_refusal("bX", format!("Request with ID={req_id} was already subscribed.")));
+        }
+        Ok(DISPLAY_GROUP_NO_CONTRACT)
+    }
+
+    /// unsubscribeFromGroupEvents as the reference (ibx#424): the text of
+    /// the refusal when the request id is not subscribed, else no answer.
+    pub fn unsubscribe_from_group_events(&self, req_id: i64) -> Option<String> {
+        if req_id == i32::MAX as i64 {
+            return Some(display_group_refusal("bY", format!("Invalid request ID={req_id}")));
+        }
+        if self.display_group_subs.lock().unwrap().remove(&req_id) {
+            return None;
+        }
+        Some(display_group_refusal("bY", format!("Subscription for Group Events with request ID={req_id} wasn't found.")))
+    }
+
+    /// updateDisplayGroup as the reference (ibx#424). `contract_info` is
+    /// `conid@exch|param1=value1|...|action=(action)`; one token is a group
+    /// change, which needs the request id of a subscription. A valid
+    /// update changes nothing there and gives no event; `known` tells
+    /// whether a conId was seen before. The parameters of the other action
+    /// are not checked.
+    pub fn update_display_group(&self, req_id: i64, contract_info: &str, known: impl Fn(i64) -> bool) -> DisplayGroupUpdate {
+        let refused = |cause: String| DisplayGroupUpdate::Refused(display_group_refusal("bZ", cause));
+        if req_id == i32::MAX as i64 {
+            return refused(format!("Invalid request ID={req_id}"));
+        }
+        let mut tokens: Vec<&str> = contract_info.split('|').collect();
+        while tokens.len() > 1 && tokens.last().is_some_and(|t| t.is_empty()) {
+            tokens.pop();
+        }
+        let mut change_group = true;
+        if tokens.len() > 1 {
+            let action = tokens.iter().find_map(|t| {
+                t.get(..7).filter(|k| k.eq_ignore_ascii_case("action=")).map(|_| t[7..].trim())
+            });
+            match action {
+                None => return refused(
+                    "Action is unknown. Please check the pattern: conid@exch|param1=value1|...|action=(action)".to_string()),
+                Some(name) if name.eq_ignore_ascii_case("ChangeGroupEc") => {}
+                Some(name) if name.eq_ignore_ascii_case("OpenTS") => change_group = false,
+                Some(name) => return refused(format!("Action '{name}' is unknown")),
+            }
+        }
+        let token = tokens[0];
+        if change_group {
+            if !self.display_group_subs.lock().unwrap().contains(&req_id) {
+                return refused(format!("Request with ID={req_id} failed since request ID wasn't found."));
+            }
+            if token.eq_ignore_ascii_case("none") {
+                return DisplayGroupUpdate::Nothing;
+            }
+        }
+        let con_id = match token.split('@').next().unwrap_or("").parse::<i32>() {
+            Ok(con_id) => con_id,
+            Err(_) => return refused(format!(
+                "Request with ID={req_id} failed with invalid contract info={token}, expected format 'contractId@exchange'")),
+        };
+        if con_id == 0 || con_id == i32::MAX {
+            return refused(format!(
+                "Request with ID={req_id} failed with invalid contract info={token}: conid or excahge are missing, expected format 'contractId@exchange'"));
+        }
+        if !change_group || known(con_id as i64) {
+            return DisplayGroupUpdate::Nothing;
+        }
+        DisplayGroupUpdate::Lookup(con_id as i64)
     }
 
     // ── Bulletin subscription management ──

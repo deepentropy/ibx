@@ -12,8 +12,8 @@ Canonical IB API methods vs ibx implementation status.
 
 | | IB API | Rust | Python |
 |---|:---:|:---:|:---:|
-| **EClient methods** | 77 | 63 impl, 8 stub | 63 impl, 14 stub |
-| **EWrapper callbacks** | 81 | 66 impl, 3 stub | 70 impl, 11 stub |
+| **EClient methods** | 77 | 67 impl, 9 stub | 67 impl, 10 stub |
+| **EWrapper callbacks** | 81 | 72 impl, 6 stub | 72 impl, 9 stub |
 
 ## EClient Methods
 
@@ -79,21 +79,21 @@ Canonical IB API methods vs ibx implementation status.
 |  | `cancel_news_bulletins` | `cancelNewsBulletins` | Y | Y |
 | Fundamental | `req_fundamental_data` | `reqFundamentalData` | Y | Y |
 |  | `cancel_fundamental_data` | `cancelFundamentalData` | Y | Y |
-| Options | `calculate_implied_volatility` | `calculateImpliedVolatility` | - | STUB |
-|  | `cancel_calculate_implied_volatility` | `cancelCalculateImpliedVolatility` | - | STUB |
-|  | `calculate_option_price` | `calculateOptionPrice` | - | STUB |
-|  | `cancel_calculate_option_price` | `cancelCalculateOptionPrice` | - | STUB |
+| Options | `calculate_implied_volatility` | `calculateImpliedVolatility` | STUB | STUB |
+|  | `cancel_calculate_implied_volatility` | `cancelCalculateImpliedVolatility` | STUB | STUB |
+|  | `calculate_option_price` | `calculateOptionPrice` | STUB | STUB |
+|  | `cancel_calculate_option_price` | `cancelCalculateOptionPrice` | STUB | STUB |
 |  | `exercise_options` | `exerciseOptions` | - | STUB |
-|  | `req_sec_def_opt_params` | `reqSecDefOptParams` | - | STUB |
+|  | `req_sec_def_opt_params` | `reqSecDefOptParams` | STUB | STUB |
 | Reference | `req_soft_dollar_tiers` | `reqSoftDollarTiers` | Y | Y |
 |  | `req_family_codes` | `reqFamilyCodes` | Y | Y |
 |  | `req_user_info` | `reqUserInfo` | Y | Y |
 | Financial Advisor | `request_fa` | `requestFA` | STUB | STUB |
 |  | `replace_fa` | `replaceFA` | STUB | STUB |
-| Display Groups | `query_display_groups` | `queryDisplayGroups` | STUB | STUB |
-|  | `subscribe_to_group_events` | `subscribeToGroupEvents` | STUB | STUB |
-|  | `unsubscribe_from_group_events` | `unsubscribeFromGroupEvents` | STUB | STUB |
-|  | `update_display_group` | `updateDisplayGroup` | STUB | STUB |
+| Display Groups | `query_display_groups` | `queryDisplayGroups` | Y | Y |
+|  | `subscribe_to_group_events` | `subscribeToGroupEvents` | Y | Y |
+|  | `unsubscribe_from_group_events` | `unsubscribeFromGroupEvents` | Y | Y |
+|  | `update_display_group` | `updateDisplayGroup` | Y | Y |
 | WSH | `req_wsh_meta_data` | `reqWshMetaData` | STUB | STUB |
 |  | `req_wsh_event_data` | `reqWshEventData` | STUB | STUB |
 
@@ -131,13 +131,13 @@ Canonical IB API methods vs ibx implementation status.
 |  | `position_end` | Y | Y |
 |  | `pnl` | Y | Y |
 |  | `pnl_single` | Y | Y |
-|  | `position_multi` | - | Y |
-|  | `position_multi_end` | - | Y |
-|  | `account_update_multi` | - | Y |
-|  | `account_update_multi_end` | - | Y |
+|  | `position_multi` | Y | Y |
+|  | `position_multi_end` | Y | Y |
+|  | `account_update_multi` | Y | Y |
+|  | `account_update_multi_end` | Y | Y |
 | Contract | `contract_details` | Y | Y |
 |  | `contract_details_end` | Y | Y |
-|  | `bond_contract_details` | - | STUB |
+|  | `bond_contract_details` | STUB | STUB |
 |  | `symbol_samples` | Y | Y |
 | Historical Data | `historical_data` | Y | Y |
 |  | `historical_data_end` | Y | Y |
@@ -175,10 +175,10 @@ Canonical IB API methods vs ibx implementation status.
 |  | `soft_dollar_tiers` | Y | Y |
 |  | `family_codes` | Y | Y |
 |  | `user_info` | Y | Y |
-| FA | `receive_fa` | - | STUB |
-|  | `replace_fa_end` | - | STUB |
-| Display Groups | `display_group_list` | - | STUB |
-|  | `display_group_updated` | - | STUB |
+| FA | `receive_fa` | STUB | STUB |
+|  | `replace_fa_end` | STUB | STUB |
+| Display Groups | `display_group_list` | Y | Y |
+|  | `display_group_updated` | Y | Y |
 | Other | `delta_neutral_validation` | STUB | STUB |
 | WSH | `wsh_meta_data` | - | STUB |
 |  | `wsh_event_data` | - | STUB |

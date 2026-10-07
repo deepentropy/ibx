@@ -2090,6 +2090,9 @@ pub enum ControlCommand {
         currency: String,
         filters: SecDefFilters,
     },
+    /// Look up the conId of a display group update (ibx#424): one that is
+    /// not a contract gets error 473; a contract gives no answer.
+    DisplayGroupLookup { req_id: ReqId, con_id: i64 },
     /// Cancel a head timestamp request.
     CancelHeadTimestamp { req_id: ReqId },
     /// Search for matching symbols via auth connection.

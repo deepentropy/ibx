@@ -6,6 +6,12 @@ use crate::api::wrapper::Wrapper;
 
 use super::EClient;
 
+/// The error of a refused display group request (ibx#424).
+fn display_group_refused(wrapper: &mut impl Wrapper, text: &str) {
+    let (id, code) = crate::client_core::DISPLAY_GROUP_REFUSAL;
+    wrapper.error(id, code, text, "");
+}
+
 impl EClient {
     // ── Smart Components ──
 
@@ -69,17 +75,58 @@ impl EClient {
 
     // ── Display Groups ──
 
-    /// Query display groups. Not yet implemented.
-    pub fn query_display_groups(&self, _req_id: i64) {}
+    /// Query display groups. Matches `queryDisplayGroups` in C++.
+    /// Gateway-local, as the reference (ibx#424): the fixed list of groups.
+    pub fn query_display_groups(&self, req_id: i64, wrapper: &mut impl Wrapper) {
+        if !crate::client_core::ClientCore::ids_fit("query_display_groups", &[req_id]) { return; }
+        match crate::client_core::ClientCore::query_display_groups(req_id) {
+            Ok(groups) => wrapper.display_group_list(req_id, groups),
+            Err(text) => display_group_refused(wrapper, &text),
+        }
+    }
 
-    /// Subscribe to display group events. Not yet implemented.
-    pub fn subscribe_to_group_events(&self, _req_id: i64, _group_id: i32) {}
+    /// Subscribe to display group events. Matches `subscribeToGroupEvents`
+    /// in C++. Gateway-local, as the reference (ibx#424): the contract of
+    /// the group at once, `none` since no group has one; error 321 for a
+    /// group outside 1 to 7 or a request id already subscribed.
+    pub fn subscribe_to_group_events(&self, req_id: i64, group_id: i32, wrapper: &mut impl Wrapper) {
+        if !crate::client_core::ClientCore::ids_fit("subscribe_to_group_events", &[req_id]) { return; }
+        match self.core.subscribe_to_group_events(req_id, group_id) {
+            Ok(contract_info) => wrapper.display_group_updated(req_id, contract_info),
+            Err(text) => display_group_refused(wrapper, &text),
+        }
+    }
 
-    /// Unsubscribe from display group events. Not yet implemented.
-    pub fn unsubscribe_from_group_events(&self, _req_id: i64) {}
+    /// Unsubscribe from display group events. Matches
+    /// `unsubscribeFromGroupEvents` in C++. No answer, but error 321 for a
+    /// request id that is not subscribed, as the reference (ibx#424).
+    pub fn unsubscribe_from_group_events(&self, req_id: i64) {
+        if !crate::client_core::ClientCore::ids_fit("unsubscribe_from_group_events", &[req_id]) { return; }
+        if let Some(text) = self.core.unsubscribe_from_group_events(req_id) {
+            let (id, code) = crate::client_core::DISPLAY_GROUP_REFUSAL;
+            self.shared.orders.push_order_error(id, code, text);
+        }
+    }
 
-    /// Update display group. Not yet implemented.
-    pub fn update_display_group(&self, _req_id: i64, _contract_info: &str) {}
+    /// Update display group. Matches `updateDisplayGroup` in C++. As the
+    /// reference (ibx#424): error 321 for bad input or a request id that is
+    /// not subscribed, error 473 for a conId that is not a contract, and
+    /// no answer for a valid update, which changes no group.
+    pub fn update_display_group(&self, req_id: i64, contract_info: &str) {
+        use crate::client_core::DisplayGroupUpdate;
+        if !crate::client_core::ClientCore::ids_fit("update_display_group", &[req_id]) { return; }
+        let known = |con_id| self.shared.reference.get_contract(con_id).is_some();
+        match self.core.update_display_group(req_id, contract_info, known) {
+            DisplayGroupUpdate::Nothing => {}
+            DisplayGroupUpdate::Refused(text) => {
+                let (id, code) = crate::client_core::DISPLAY_GROUP_REFUSAL;
+                self.shared.orders.push_order_error(id, code, text);
+            }
+            DisplayGroupUpdate::Lookup(con_id) => {
+                let _ = self.send(crate::types::ControlCommand::DisplayGroupLookup { req_id, con_id });
+            }
+        }
+    }
 
     // ── Soft Dollar Tiers ──
 
