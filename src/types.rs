@@ -802,8 +802,8 @@ pub enum OrderKind {
     /// (0 = not set).
     TrailMit { trail: Price, percent: bool, trail_stop_price: Price },
     /// Trailing limit if touched (ibx#469): the limit price, the trailing
-    /// amount and the optional initial trigger (0 = not set).
-    TrailLit { price: Price, trail_amt: Price, trail_stop_price: Price },
+    /// amount (or percent, as for `TrailMit`) and the trigger price.
+    TrailLit { price: Price, trail: Price, percent: bool, trail_stop_price: Price },
     /// Pegged to best (ibx#469): `price` is the limit price, 0 = unset.
     PegBest { price: Price },
     /// Retail price improvement (ibx#469): the limit price and the offset
@@ -856,7 +856,7 @@ impl OrderKind {
             | OrderKind::SnapMid { offset } | OrderKind::SnapPri { offset } => [0, offset],
             OrderKind::PegBench { starting_price, .. } => [0, starting_price],
             OrderKind::TrailMit { trail, percent, .. } => [0, if percent { 0 } else { trail }],
-            OrderKind::TrailLit { price, trail_amt, .. } => [price, trail_amt],
+            OrderKind::TrailLit { price, trail, percent, .. } => [price, if percent { 0 } else { trail }],
             OrderKind::PegBest { price } => [price, 0],
             OrderKind::Rpi { price, offset } | OrderKind::PassvRel { price, offset } => [price, offset],
         }

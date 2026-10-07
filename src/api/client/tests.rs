@@ -1184,8 +1184,8 @@ fn place_order_trail_mit_trail_lit_peg_best_rpi_and_passv_rel() {
         match (order_type, kind) {
             ("TRAIL MIT", OrderKind::TrailMit { trail, percent: false, trail_stop_price }) =>
                 assert_eq!((trail, trail_stop_price), (p(2.0), p(150.0))),
-            ("TRAIL LIT", OrderKind::TrailLit { price, trail_amt, trail_stop_price }) =>
-                assert_eq!((price, trail_amt, trail_stop_price), (p(148.0), p(2.0), p(150.0))),
+            ("TRAIL LIT", OrderKind::TrailLit { price, trail, percent: false, trail_stop_price }) =>
+                assert_eq!((price, trail, trail_stop_price), (p(148.0), p(2.0), p(150.0))),
             ("PEG BEST", OrderKind::PegBest { price }) => assert_eq!(price, p(148.0)),
             ("RPI", OrderKind::Rpi { price, offset }) | ("PASSV REL", OrderKind::PassvRel { price, offset }) =>
                 assert_eq!((price, offset), (p(148.0), p(2.0))),
@@ -1198,6 +1198,24 @@ fn place_order_trail_mit_trail_lit_peg_best_rpi_and_passv_rel() {
     client.place_order(9, &spy(), &pct).unwrap();
     assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::SubmitEx {
         kind: OrderKind::TrailMit { percent: true, trail, .. }, .. }) if trail == p(3.0))));
+    client.place_order(12, &spy(), &Order { trailing_percent: 3.0, aux_price: 0.0, ..order("TRAIL LIT") }).unwrap();
+    assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::SubmitEx {
+        kind: OrderKind::TrailLit { percent: true, trail, .. }, .. }) if trail == p(3.0))));
+    // A TRAIL LIT without a trigger price is refused, by amount and by
+    // percent (captured 07/10/2026); a TRAIL MIT without one is sent.
+    for (id, pct) in [(13, 0.0), (14, 3.0)] {
+        let no_trigger = Order {
+            trail_stop_price: f64::MAX, trailing_percent: pct, aux_price: if pct > 0.0 { 0.0 } else { 2.0 },
+            ..order("TRAIL LIT")
+        };
+        client.place_order(id, &spy(), &no_trigger).unwrap();
+        assert!(rx.try_iter().all(|c| !matches!(c, ControlCommand::Order(_))), "nothing sent");
+        assert_eq!(shared.orders.drain_order_errors(),
+            [(id, 321, "Error validating request.-'bH' : cause - Please enter a stop price".to_string())]);
+    }
+    client.place_order(15, &spy(), &Order { trail_stop_price: f64::MAX, ..order("TRAIL MIT") }).unwrap();
+    assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::SubmitEx {
+        kind: OrderKind::TrailMit { trail_stop_price: 0, .. }, .. }))));
     // No trailing value at all.
     assert!(client.place_order(10, &spy(), &Order { aux_price: 0.0, ..order("TRAIL MIT") }).is_err());
     assert!(client.place_order(11, &spy(), &Order { aux_price: 0.0, ..order("TRAIL LIT") }).is_err());

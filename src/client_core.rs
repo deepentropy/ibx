@@ -4479,9 +4479,10 @@ impl ClientCore {
                      but both are 0.0".into()
                 );
             }
-            "TRAIL LIT" if !is_given(order.aux_price) => {
+            "TRAIL LIT" if !is_given(order.trailing_percent) && !is_given(order.aux_price) => {
                 return Err(
-                    "TRAIL LIT order requires aux_price (trail amount) but got 0.0".into()
+                    "TRAIL LIT order requires either trailing_percent or aux_price (trail amount) \
+                     but both are 0.0".into()
                 );
             }
             _ => {}
@@ -5235,10 +5236,13 @@ impl ClientCore {
         // A stop type without its stop price, the API's unset value
         // (`jextend.bH.S()@1690-1750`, ibx#485): the auxPrice of STP,
         // STP LMT and STP PRT, the trailStopPrice of a TRAIL LIMIT
-        // (ib-agent#194, no final period; ibx takes 0 as unset there too).
+        // (ib-agent#194, no final period; ibx takes 0 as unset there too)
+        // and of a TRAIL LIT (ibx#469, captured 07/10/2026 by amount and
+        // by percent; a TRAIL MIT without one is sent).
         let stop_type = matches!(order_type.as_str(), "STP" | "STP LMT" | "STP PRT");
         if (stop_type && order.aux_price == f64::MAX)
-            || (order_type == "TRAIL LIMIT" && (order.trail_stop_price == f64::MAX || order.trail_stop_price == 0.0))
+            || (matches!(order_type.as_str(), "TRAIL LIMIT" | "TRAIL LIT")
+                && (order.trail_stop_price == f64::MAX || order.trail_stop_price == 0.0))
         {
             return refuse("Please enter a stop price");
         }
@@ -5512,20 +5516,17 @@ impl ClientCore {
     }
 
     /// A TRAIL MIT, TRAIL LIT, PEG BEST, RPI or PASSV REL order from the
-    /// API fields (ibx#469). TRAIL MIT trails by the percent when one is given, else
-    /// by the amount (the auxPrice); TRAIL LIT by the amount. The RPI
-    /// offset is the auxPrice, 0 when unset.
+    /// API fields (ibx#469). TRAIL MIT and TRAIL LIT trail by the percent
+    /// when one is given, else by the amount (the auxPrice). The RPI and
+    /// PASSV REL offset is the auxPrice, 0 when unset.
     fn new_type_kind(order: &ApiOrder) -> OrderKind {
         let scale = price_or_zero;
         let trail_stop_price = scale(order.trail_stop_price);
+        let percent = is_given(order.trailing_percent) && order.trailing_percent > 0.0;
+        let trail = if percent { crate::api::types::price_from_f64(order.trailing_percent) } else { scale(order.aux_price) };
         match order.order_type.to_uppercase().as_str() {
-            "TRAIL MIT" if is_given(order.trailing_percent) && order.trailing_percent > 0.0 => OrderKind::TrailMit {
-                trail: crate::api::types::price_from_f64(order.trailing_percent), percent: true, trail_stop_price,
-            },
-            "TRAIL MIT" => OrderKind::TrailMit { trail: scale(order.aux_price), percent: false, trail_stop_price },
-            "TRAIL LIT" => OrderKind::TrailLit {
-                price: scale(order.lmt_price), trail_amt: scale(order.aux_price), trail_stop_price,
-            },
+            "TRAIL MIT" => OrderKind::TrailMit { trail, percent, trail_stop_price },
+            "TRAIL LIT" => OrderKind::TrailLit { price: scale(order.lmt_price), trail, percent, trail_stop_price },
             "PEG BEST" => OrderKind::PegBest { price: scale(aux_or_zero(order.lmt_price)) },
             "PASSV REL" => OrderKind::PassvRel {
                 price: scale(aux_or_zero(order.lmt_price)), offset: scale(aux_or_zero(order.aux_price)),

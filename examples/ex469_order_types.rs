@@ -1,7 +1,8 @@
 //! ibx#469 probe. Paper account only.
 //!
-//! TRAIL MIT (by percent and by amount) and TRAIL LIT rest with a trigger
-//! above the market; each is replaced once, then cancelled. PEG BEST is
+//! TRAIL MIT and TRAIL LIT (by percent and by amount) rest with a trigger
+//! above the market; each is replaced once, then cancelled. A TRAIL LIT
+//! without a trigger price is refused with 321. PEG BEST is
 //! sent and rejected by the server. RPI is refused with 387 on SPY (no key
 //! in its order-type list) and sent on IBM, where the server cancels it.
 //! PASSV REL is refused with 387 on both (no list has its key).
@@ -103,10 +104,12 @@ fn main() {
     let pct = Order { order_type: "TRAIL MIT".into(), trailing_percent: 3.0, ..sell.clone() };
     let amount = Order { order_type: "TRAIL MIT".into(), aux_price: 20.0, trail_stop_price: trigger, ..sell.clone() };
     let lit = Order { order_type: "TRAIL LIT".into(), aux_price: 20.0, trail_stop_price: trigger, lmt_price: cents(trigger - 5.0), ..sell.clone() };
+    let lit_pct = Order { order_type: "TRAIL LIT".into(), trailing_percent: 3.0, trail_stop_price: trigger, lmt_price: cents(trigger - 5.0), ..sell.clone() };
     let replaced = [
         ("TRAIL MIT percent", pct.clone(), Order { trailing_percent: 3.1, ..pct }),
         ("TRAIL MIT amount", amount.clone(), Order { aux_price: 20.1, ..amount }),
         ("TRAIL LIT", lit.clone(), Order { lmt_price: cents(trigger - 5.1), ..lit }),
+        ("TRAIL LIT percent", lit_pct.clone(), Order { trailing_percent: 3.1, ..lit_pct }),
     ];
     for (label, order, replace) in replaced {
         let id = client.next_order_id();
@@ -128,6 +131,7 @@ fn main() {
 
     let far = cents(r - 50.0);
     let refused = [
+        ("TRAIL LIT no trigger price", &spy, Order { order_type: "TRAIL LIT".into(), aux_price: 20.0, lmt_price: cents(trigger - 5.0), ..sell.clone() }),
         ("PEG BEST SPY", &spy, Order { order_type: "PEG BEST".into(), lmt_price: far, ..buy.clone() }),
         ("RPI SPY", &spy, Order { order_type: "RPI".into(), lmt_price: far, ..buy.clone() }),
         ("RPI IBM", &ibm, Order { order_type: "RPI".into(), lmt_price: 150.0, ..buy.clone() }),

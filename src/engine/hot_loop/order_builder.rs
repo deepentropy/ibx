@@ -2417,8 +2417,8 @@ fn modify_fields(
             stop_trigger = Some(p(stop_price));
             "3"
         }
-        // TRAIL MIT and TRAIL LIT (ib-agent#197, captured 26/09/2026 and
-        // 28/09/2026): the trailing value in both fields, the trigger
+        // TRAIL MIT and TRAIL LIT (ib-agent#197, captured 26/09/2026,
+        // 28/09/2026 and 07/10/2026): the trailing value in both fields, the trigger
         // restated when the order has one, and for TRAIL LIT the limit
         // price with the offset the server reported.
         K::TrailMit { trail, percent, trail_stop_price } => {
@@ -2428,13 +2428,13 @@ fn modify_fields(
             after_type.push((211, p(trail)));
             "TMIT"
         }
-        K::TrailLit { price, trail_amt, trail_stop_price } => {
+        K::TrailLit { price, trail, percent, trail_stop_price } => {
             before_account.push((44, p(price)));
-            before_account.push((99, p(trail_amt)));
+            before_account.push((99, p(trail)));
             if trail_stop_price > 0 { touched_trigger = Some(p(trail_stop_price)); }
             trail_offset = trail_limit_offset.map(p);
-            trail_unit = Some("0");
-            after_type.push((211, p(trail_amt)));
+            trail_unit = Some(if percent { "100" } else { "0" });
+            after_type.push((211, p(trail)));
             "TLIT"
         }
         // Not captured: a pegged-to-best order was never accepted, and the
@@ -3319,12 +3319,13 @@ fn send_order_ex(
             if percent { fields.push((6268, "100".to_string())); }
             if trail_stop_price > 0 { fields.push((6117, format_price_ref(trail_stop_price).to_string())); }
         }
-        K::TrailLit { price, trail_amt, trail_stop_price } => {
-            let t = format_price_ref(trail_amt).to_string();
+        K::TrailLit { price, trail, percent, trail_stop_price } => {
+            let t = format_price_ref(trail).to_string();
             fields.push((40, "TLIT".to_string()));
             fields.push((44, format_price_ref(price).to_string()));
             fields.push((99, t.clone()));
             fields.push((211, t));
+            if percent { fields.push((6268, "100".to_string())); }
             if trail_stop_price > 0 { fields.push((6117, format_price_ref(trail_stop_price).to_string())); }
         }
         // Pegged to best: the limit price; its compete attributes follow
@@ -5268,6 +5269,9 @@ mod tests {
              crate::api::types::Order { trailing_percent: 3.0, ..order("TRAIL MIT", "SELL") }),
             ("35=D|11=x|44=743.26|99=20.00|1=DU1|6122=c|8339=1|6117=748.26|6115=0|6268=0|6121=3|6119=262|38=1|40=TLIT|211=20.00|55=SPY|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=756733|6088=Socket|15=USD|6211=|6238=",
              crate::api::types::Order { lmt_price: 743.26, aux_price: 20.0, trail_stop_price: 748.26, ..order("TRAIL LIT", "SELL") }),
+            // By percent (captured 07/10/2026).
+            ("35=D|11=x|44=789.98|99=3.00|1=DU1|6010=fourleg|6115=0|6122=c|8339=1|6268=100|6117=794.98|6121=139|6119=198|38=1|40=TLIT|211=3.00|55=SPY|167=STK|231=1.00|54=2|59=0|100=BEST|6210=BEST|6008=756733|6088=Socket|15=USD|6211=|6238=",
+             crate::api::types::Order { lmt_price: 789.98, trailing_percent: 3.0, trail_stop_price: 794.98, ..order("TRAIL LIT", "SELL") }),
             ("35=D|11=x|44=718.26|1=DU1|6122=c|8339=1|8411=100|8412=0.02|6121=7|6119=262|38=1|40=E2M|55=SPY|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=756733|6088=Socket|15=USD|6211=|6238=",
              crate::api::types::Order { lmt_price: 718.26, ..order("PEG BEST", "BUY") }),
             ("35=D|11=x|44=198.90|99=0.00|1=DU1|6122=c|8339=1|6121=132|6119=198|38=1|40=RPI|211=0.00|55=IBM|167=STK|231=1.00|54=1|59=0|100=BEST|6210=BEST|6008=8314|6088=Socket|15=USD|6211=|6238=",
@@ -5321,8 +5325,12 @@ mod tests {
             assert_eq!(sorted(ours), sorted(want), "{reference}");
         };
         same(replace(K::TrailMit { trail: px(20.1), percent: false, trail_stop_price: px(751.35) }, false), TMIT);
-        let lit = K::TrailLit { price: px(746.25), trail_amt: px(20.0), trail_stop_price: px(751.35) };
+        let lit = K::TrailLit { price: px(746.25), trail: px(20.0), percent: false, trail_stop_price: px(751.35) };
         same(replace(lit, true), TLIT);
+        // By percent (captured 07/10/2026): the percent, its unit, the
+        // offset and the trigger.
+        const TLIT_PCT: &str = "35=G|11=7.1|41=7.0|44=746.25|99=3.10|1=|6010=fourleg|6122=c|6370=5.00|6268=100|6117=751.35|38=1|54=2|40=TLIT|211=3.10|55=SPY|167=STK|6035=SPY|59=0|6008=265598|6088=Socket|6211=|6238=";
+        same(replace(K::TrailLit { price: px(746.25), trail: px(3.1), percent: true, trail_stop_price: px(751.35) }, true), TLIT_PCT);
         // Before any report the offset is the trigger minus the new limit
         // price of a sell, as for a TRAIL LIMIT.
         assert_eq!(tag(&replace(lit, false), 6370), Some("5.10"));
@@ -5352,7 +5360,8 @@ mod tests {
     // ibx#469: PEG BEST and RPI are checked against the order-type list
     // of the contract on the order's exchange (captured 28/09/2026 and
     // 07/10/2026: RPI refused with 387 on SPY, sent on IBM); TRAIL MIT and
-    // TRAIL LIT are not.
+    // TRAIL LIT are not: every recorded exchange list has their keys but
+    // one, and the reference sent both types to that one too (07/10/2026).
     #[test]
     fn peg_best_and_rpi_are_checked_against_the_order_type_list() {
         use crate::engine::outside_rth::{pegged_type_check, RthTypes};
@@ -5375,7 +5384,7 @@ mod tests {
         let best = K::PegBest { price: P };
         assert_eq!((allowed(best, &spy), allowed(best, &list("LMT/3"))), (Some(true), Some(false)));
         assert!(pegged_type_check(&req(K::TrailMit { trail: P, percent: false, trail_stop_price: 0 })).is_none());
-        assert!(pegged_type_check(&req(K::TrailLit { price: P, trail_amt: P, trail_stop_price: 0 })).is_none());
+        assert!(pegged_type_check(&req(K::TrailLit { price: P, trail: P, percent: false, trail_stop_price: 0 })).is_none());
     }
 
     // ibx#467 (captured 28/09/2026 in the overnight session, SPY BUY 1 LMT
