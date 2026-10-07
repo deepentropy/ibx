@@ -43,6 +43,12 @@ pub(crate) struct RthTypes {
     /// protection (STPPROT) are in the list (ibx#493).
     pub mkt_prot: bool,
     pub stp_prot: bool,
+    /// The keys of pegged to best (REL2MID) and of retail price
+    /// improvement (RPI) are in the list (ibx#469).
+    pub peg_best: bool,
+    pub rpi: bool,
+    /// The key of passive relative (PASSVREL) is in the list (ibx#469).
+    pub passv_rel: bool,
     /// The price check key (PRICECHK) is in the list (ibx#492).
     pub price_chk: bool,
     /// The all-or-none key (AON) is in the list (ibx#263).
@@ -78,6 +84,9 @@ impl RthTypes {
                 "PEGMID" | "PEGMID2" => t.peg_mid = true,
                 "MKTPROT" => t.mkt_prot = true,
                 "STPPROT" => t.stp_prot = true,
+                "REL2MID" => t.peg_best = true,
+                "RPI" => t.rpi = true,
+                "PASSVREL" => t.passv_rel = true,
                 "PRICECHK" => t.price_chk = true,
                 "AON" => t.aon = true,
                 _ => {}
@@ -91,9 +100,10 @@ impl RthTypes {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct RthKind {
     /// Market-like: MKT, MTL, STP, MIT, TRAIL, STP PRT, MIDPRICE, PEG MKT,
-    /// PEG MID (TRAIL MIT and FUNARI are not order types of ibx).
+    /// PEG MID, TRAIL MIT (FUNARI is not an order type of ibx).
     pub market_like: bool,
-    /// Stop or touched: STP, STP LMT, STP PRT, TRAIL, TRAIL LIMIT, LIT, MIT.
+    /// Stop or touched: STP, STP LMT, STP PRT, TRAIL, TRAIL LIMIT, LIT, MIT,
+    /// TRAIL MIT, TRAIL LIT.
     pub stop_or_touched: bool,
     /// MOC or LOC.
     pub moc_loc: bool,
@@ -106,12 +116,13 @@ impl RthKind {
             | OrderKind::PegMkt { .. } | OrderKind::PegMid { .. } => (true, false, false),
             OrderKind::Stop { .. } | OrderKind::Mit { .. } | OrderKind::StpPrt { .. }
             | OrderKind::TrailingStop { .. } | OrderKind::TrailPct { .. }
-            | OrderKind::AdjustableStop { .. } => (true, true, false),
+            | OrderKind::TrailMit { .. } | OrderKind::AdjustableStop { .. } => (true, true, false),
             OrderKind::StopLimit { .. } | OrderKind::TrailingStopLimit { .. }
-            | OrderKind::Lit { .. } => (false, true, false),
+            | OrderKind::Lit { .. } | OrderKind::TrailLit { .. } => (false, true, false),
             OrderKind::Moc | OrderKind::Loc { .. } => (false, false, true),
             OrderKind::Limit { .. } | OrderKind::MktPrt | OrderKind::SnapMkt { .. } | OrderKind::SnapMid { .. }
-            | OrderKind::SnapPri { .. } | OrderKind::Rel { .. } | OrderKind::PegBench { .. } => (false, false, false),
+            | OrderKind::SnapPri { .. } | OrderKind::Rel { .. } | OrderKind::PegBench { .. }
+            | OrderKind::PegBest { .. } | OrderKind::Rpi { .. } | OrderKind::PassvRel { .. } => (false, false, false),
         };
         RthKind { market_like, stop_or_touched, moc_loc }
     }
@@ -214,18 +225,30 @@ pub(crate) const UNSUPPORTED_ORDER_TYPE: &str = "Unsupported order type for this
 /// order types either). Checked for pegged to market and pegged to
 /// midpoint (ib-agent#192 B8b, ibx#414), and for market and stop with
 /// protection, keys MKTPROT and STPPROT (`jibtypes.L.i()`,
-/// `jibtypes.ae.i()`; ibx#493: neither is in the SPY list on BEST).
+/// `jibtypes.ae.i()`; ibx#493: neither is in the SPY list on BEST), and
+/// for pegged to best and retail price improvement, keys REL2MID and RPI
+/// (ibx#469; captured 28/09/2026 and 07/10/2026: the SPY list on BEST has
+/// no RPI key and the order is refused, the IBM list has it and the order
+/// is sent), and for passive relative, key PASSVREL (`jibtypes.R.i()`; no
+/// recorded list has it, and the reference refused the type on every
+/// route tried).
 pub(crate) fn pegged_type_check(req: &OrderRequest) -> Option<(u32, fn(&RthTypes) -> bool)> {
     use OrderRequest as R;
     let mkt: fn(&RthTypes) -> bool = |t| t.peg_mkt;
     let mid: fn(&RthTypes) -> bool = |t| t.peg_mid;
     let mkt_prot: fn(&RthTypes) -> bool = |t| t.mkt_prot;
     let stp_prot: fn(&RthTypes) -> bool = |t| t.stp_prot;
+    let peg_best: fn(&RthTypes) -> bool = |t| t.peg_best;
+    let rpi: fn(&RthTypes) -> bool = |t| t.rpi;
+    let passv_rel: fn(&RthTypes) -> bool = |t| t.passv_rel;
     match req {
         R::SubmitPegMkt { instrument, .. } | R::SubmitEx { instrument, kind: OrderKind::PegMkt { .. }, .. } => Some((*instrument, mkt)),
         R::SubmitPegMid { instrument, .. } | R::SubmitEx { instrument, kind: OrderKind::PegMid { .. }, .. } => Some((*instrument, mid)),
         R::SubmitMktPrt { instrument, .. } | R::SubmitEx { instrument, kind: OrderKind::MktPrt, .. } => Some((*instrument, mkt_prot)),
         R::SubmitStpPrt { instrument, .. } | R::SubmitEx { instrument, kind: OrderKind::StpPrt { .. }, .. } => Some((*instrument, stp_prot)),
+        R::SubmitEx { instrument, kind: OrderKind::PegBest { .. }, .. } => Some((*instrument, peg_best)),
+        R::SubmitEx { instrument, kind: OrderKind::Rpi { .. }, .. } => Some((*instrument, rpi)),
+        R::SubmitEx { instrument, kind: OrderKind::PassvRel { .. }, .. } => Some((*instrument, passv_rel)),
         _ => None,
     }
 }

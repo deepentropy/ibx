@@ -1164,6 +1164,45 @@ fn place_order_type_aliases() {
     }
 }
 
+// ibx#469: TRAIL MIT, TRAIL LIT, PEG BEST, RPI and PASSV REL are placed,
+// each as an order of its own type.
+#[test]
+fn place_order_trail_mit_trail_lit_peg_best_rpi_and_passv_rel() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    let order = |order_type: &str| Order {
+        action: "SELL".into(), total_quantity: 1.0, order_type: order_type.into(),
+        lmt_price: 148.0, aux_price: 2.0, trail_stop_price: 150.0, ..Default::default()
+    };
+    let p = |v: f64| crate::api::types::price_from_f64(v);
+    for (id, order_type) in [(1, "TRAIL MIT"), (2, "TRAIL LIT"), (3, "PEG BEST"), (4, "RPI"), (5, "PASSV REL")] {
+        client.place_order(id, &spy(), &order(order_type)).unwrap();
+        let kind = rx.try_iter().find_map(|c| match c {
+            ControlCommand::Order(OrderRequest::SubmitEx { kind, .. }) => Some(kind),
+            _ => None,
+        }).unwrap_or_else(|| panic!("{order_type}: no order sent"));
+        match (order_type, kind) {
+            ("TRAIL MIT", OrderKind::TrailMit { trail, percent: false, trail_stop_price }) =>
+                assert_eq!((trail, trail_stop_price), (p(2.0), p(150.0))),
+            ("TRAIL LIT", OrderKind::TrailLit { price, trail_amt, trail_stop_price }) =>
+                assert_eq!((price, trail_amt, trail_stop_price), (p(148.0), p(2.0), p(150.0))),
+            ("PEG BEST", OrderKind::PegBest { price }) => assert_eq!(price, p(148.0)),
+            ("RPI", OrderKind::Rpi { price, offset }) | ("PASSV REL", OrderKind::PassvRel { price, offset }) =>
+                assert_eq!((price, offset), (p(148.0), p(2.0))),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(shared.orders.drain_order_errors().is_empty());
+    // A percent takes the place of the amount.
+    let pct = Order { trailing_percent: 3.0, aux_price: 0.0, ..order("TRAIL MIT") };
+    client.place_order(9, &spy(), &pct).unwrap();
+    assert!(rx.try_iter().any(|c| matches!(c, ControlCommand::Order(OrderRequest::SubmitEx {
+        kind: OrderKind::TrailMit { percent: true, trail, .. }, .. }) if trail == p(3.0))));
+    // No trailing value at all.
+    assert!(client.place_order(10, &spy(), &Order { aux_price: 0.0, ..order("TRAIL MIT") }).is_err());
+    assert!(client.place_order(11, &spy(), &Order { aux_price: 0.0, ..order("TRAIL LIT") }).is_err());
+}
+
 // ibx#467: a goodAfterTime that is not a date and time is refused with 337
 // and the reference's text; nothing is sent. A good one is sent.
 #[test]

@@ -1579,7 +1579,9 @@ fn reported_trail_limit(order: &mut ApiOrder, reported: &ApiOrder) {
     if order.order_type.eq_ignore_ascii_case("TRAIL") && reported.trail_stop_price != f64::MAX {
         order.trail_stop_price = reported.trail_stop_price;
     }
-    if !order.order_type.eq_ignore_ascii_case("TRAIL LIMIT") { return; }
+    // A TRAIL LIT as a TRAIL LIMIT: the server reports its limit price,
+    // offset and trigger (captured 26/09/2026, ibx#469).
+    if !["TRAIL LIMIT", "TRAIL LIT"].iter().any(|t| order.order_type.eq_ignore_ascii_case(t)) { return; }
     if reported.lmt_price != 0.0 { order.lmt_price = reported.lmt_price; }
     if reported.lmt_price_offset != f64::MAX { order.lmt_price_offset = reported.lmt_price_offset; }
     if reported.trail_stop_price != f64::MAX { order.trail_stop_price = reported.trail_stop_price; }
@@ -4439,7 +4441,8 @@ impl ClientCore {
             | "MOC" | "LOC" | "MIT" | "LIT" | "MTL" | "MKT PRT" | "STP PRT"
             | "REL" | "PEG MKT" | "PEG MID" | "PEG MIDPT" | "MIDPX" | "MIDPRICE"
             | "SNAP MKT" | "SNAP MID" | "SNAP MIDPT" | "SNAP PRI" | "SNAP PRIM"
-            | "BOX TOP" | "PEG BENCH" => {}
+            | "BOX TOP" | "PEG BENCH"
+            | "TRAIL MIT" | "TRAIL LIT" | "PEG BEST" | "RPI" | "PASSV REL" => {}
             _ => return Err(format!("Unsupported order type: '{}'", order.order_type)),
         }
 
@@ -4468,6 +4471,17 @@ impl ClientCore {
             "TRAIL LIMIT" if !is_given(order.aux_price) => {
                 return Err(
                     "TRAIL LIMIT order requires aux_price (trail amount) but got 0.0".into()
+                );
+            }
+            "TRAIL MIT" if !is_given(order.trailing_percent) && !is_given(order.aux_price) => {
+                return Err(
+                    "TRAIL MIT order requires either trailing_percent or aux_price (trail amount) \
+                     but both are 0.0".into()
+                );
+            }
+            "TRAIL LIT" if !is_given(order.aux_price) => {
+                return Err(
+                    "TRAIL LIT order requires aux_price (trail amount) but got 0.0".into()
                 );
             }
             _ => {}
@@ -5247,7 +5261,7 @@ impl ClientCore {
         }
         // A trailing percent below 0 or above 100 (ibx#263).
         let pct = order.trailing_percent;
-        if matches!(order_type.as_str(), "TRAIL" | "TRAIL LIMIT") && pct != 0.0 && pct != f64::MAX
+        if matches!(order_type.as_str(), "TRAIL" | "TRAIL LIMIT" | "TRAIL MIT" | "TRAIL LIT") && pct != 0.0 && pct != f64::MAX
             && (pct < 0.0 || pct > 100.0)
         {
             return refuse("Invalid Trailing Percent value. Valid values are greater than 0 and less than 100.");
@@ -5492,8 +5506,32 @@ impl ClientCore {
             "SNAP MID" | "SNAP MIDPT" => OrderKind::SnapMid { offset: scale(aux_or_zero(order.aux_price)) },
             "SNAP PRI" | "SNAP PRIM" => OrderKind::SnapPri { offset: scale(aux_or_zero(order.aux_price)) },
             "PEG BENCH" => Self::peg_bench_kind(order),
+            "TRAIL MIT" | "TRAIL LIT" | "PEG BEST" | "RPI" | "PASSV REL" => Self::new_type_kind(order),
             _ => return Err(format!("Unsupported order type: '{}'", order.order_type)),
         })
+    }
+
+    /// A TRAIL MIT, TRAIL LIT, PEG BEST, RPI or PASSV REL order from the
+    /// API fields (ibx#469). TRAIL MIT trails by the percent when one is given, else
+    /// by the amount (the auxPrice); TRAIL LIT by the amount. The RPI
+    /// offset is the auxPrice, 0 when unset.
+    fn new_type_kind(order: &ApiOrder) -> OrderKind {
+        let scale = price_or_zero;
+        let trail_stop_price = scale(order.trail_stop_price);
+        match order.order_type.to_uppercase().as_str() {
+            "TRAIL MIT" if is_given(order.trailing_percent) && order.trailing_percent > 0.0 => OrderKind::TrailMit {
+                trail: crate::api::types::price_from_f64(order.trailing_percent), percent: true, trail_stop_price,
+            },
+            "TRAIL MIT" => OrderKind::TrailMit { trail: scale(order.aux_price), percent: false, trail_stop_price },
+            "TRAIL LIT" => OrderKind::TrailLit {
+                price: scale(order.lmt_price), trail_amt: scale(order.aux_price), trail_stop_price,
+            },
+            "PEG BEST" => OrderKind::PegBest { price: scale(aux_or_zero(order.lmt_price)) },
+            "PASSV REL" => OrderKind::PassvRel {
+                price: scale(aux_or_zero(order.lmt_price)), offset: scale(aux_or_zero(order.aux_price)),
+            },
+            _ => OrderKind::Rpi { price: scale(order.lmt_price), offset: scale(aux_or_zero(order.aux_price)) },
+        }
     }
 
     /// A pegged-to-benchmark order from the API fields (ibx#415): the
@@ -5842,6 +5880,8 @@ impl ClientCore {
             // One encoder for every pegged-to-benchmark order: its
             // reference exchange rides the attributes (ibx#415).
             "PEG BENCH" => ex(Self::peg_bench_kind(order)),
+            // One encoder for each of these types too (ibx#469).
+            "TRAIL MIT" | "TRAIL LIT" | "PEG BEST" | "RPI" | "PASSV REL" => ex(Self::new_type_kind(order)),
             // The offset is the API auxPrice, 0.00 when unset (ibx#413).
             "SNAP MKT" => {
                 let offset = price_or_zero(order.aux_price);

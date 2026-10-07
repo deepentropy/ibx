@@ -141,10 +141,14 @@ pub fn base(id: &str) -> &str {
 
 /// An order message as compared: the session fields normalised, and the
 /// order attributes, which the reference writes in no fixed order, sorted
-/// in their place.
+/// in their place. The trigger of a touched type (MIT, LIT, TRAIL MIT,
+/// TRAIL LIT) is one of them (ibx#469: before the origin on 26/09/2026,
+/// after the price management flag on 28/09/2026).
 pub fn comparable(f: &Fields) -> Fields {
     let mut out = Normaliser::session().apply(f);
-    let attr = |t: u32| (70..100).contains(&crate::engine::hot_loop::order_builder::reference_rank(t));
+    let touched = matches!(tag(f, 40), Some("J" | "LT" | "TMIT" | "TLIT"));
+    let attr = |t: u32| (touched && t == 6117)
+        || (70..100).contains(&crate::engine::hot_loop::order_builder::reference_rank(t));
     let mut k = 0;
     while k < out.len() {
         if attr(out[k].0) {

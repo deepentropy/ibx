@@ -14,14 +14,14 @@ use std::collections::HashMap;
 
 use crate::types::{InstrumentId, OrderKind, OrderRequest};
 
-/// Order types the flag never goes with: market, stop, market-if-touched
-/// and trailing stop (amount or percent). An adjustable stop is a stop
-/// until it converts.
+/// Order types the flag never goes with: market, stop, market-if-touched,
+/// trailing stop (amount or percent) and trailing market-if-touched. An
+/// adjustable stop is a stop until it converts.
 pub(crate) fn excluded_kind(kind: &OrderKind) -> bool {
     matches!(kind,
         OrderKind::Market | OrderKind::Stop { .. } | OrderKind::Mit { .. }
         | OrderKind::TrailingStop { .. } | OrderKind::TrailPct { .. }
-        | OrderKind::AdjustableStop { .. })
+        | OrderKind::TrailMit { .. } | OrderKind::AdjustableStop { .. })
 }
 
 /// The same rule read on a new order as written: its order type and
@@ -29,7 +29,7 @@ pub(crate) fn excluded_kind(kind: &OrderKind) -> bool {
 pub(crate) fn excluded_frame(fields: &[(u32, &str)]) -> bool {
     let get = |tag: u32| fields.iter().find(|&&(t, _)| t == tag).map(|&(_, v)| v);
     match get(40) {
-        Some("1" | "3" | "J") => true,
+        Some("1" | "3" | "J" | "TMIT") => true,
         Some("P") => get(18).is_some_and(|v| v.split(' ').next() == Some("a")),
         _ => false,
     }
@@ -172,10 +172,11 @@ mod tests {
             if let Some(i) = i { f.push((18, i)); }
             f
         };
-        for (t, i) in [("1", None), ("3", None), ("J", None), ("P", Some("a"))] {
+        for (t, i) in [("1", None), ("3", None), ("J", None), ("P", Some("a")), ("TMIT", None)] {
             assert!(excluded_frame(&frame(t, i)), "{t}");
         }
-        for (t, i) in [("2", None), ("4", None), ("5", None), ("B", None), ("PB", Some("R")), ("P", Some("R")), ("TSL", None), ("LT", None)] {
+        for (t, i) in [("2", None), ("4", None), ("5", None), ("B", None), ("PB", Some("R")), ("P", Some("R")), ("TSL", None), ("LT", None),
+            ("TLIT", None), ("E2M", None), ("RPI", None), ("PSVR", None)] {
             assert!(!excluded_frame(&frame(t, i)), "{t}");
         }
         assert!(excluded_kind(&OrderKind::Market));

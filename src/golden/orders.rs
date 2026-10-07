@@ -323,15 +323,18 @@ fn overnight_time_in_force_on_smart() {
     replay_and_compare("orders_i196_overnight", |r| r.seq < 1237, KNOWN, &[]);
 }
 
-// The session's order types (28/09/2026, rth_order_types): PEG BENCH, its
+// The session's order types (28/09/2026, rth_order_types): TRAIL MIT by
+// amount (filled at once) and by percent with its replace, TRAIL LIT,
+// PASSV REL and RPI refused with 387 (the SPY list has no key for them),
+// after the lookup of the contract's order types,
+// PEG BEST sent and rejected by the server (ibx#469); PEG BENCH, its
 // replace and cancel (openOrder auxPrice = the starting price);
 // OVERNIGHT, OVERNIGHT + DAY and includeOvernight in the session, the
-// directed OVERNIGHT order discarded (10). Left out here, each in an
-// ignored test below: TRAIL MIT, TRAIL LIT, PASSV REL, RPI and PEG BEST
-// (refused by ibx, ibx#469), the option combos refused with 460 (13, 14).
+// directed OVERNIGHT order discarded (10). Left out here, in an ignored
+// test below: the option combos refused with 460 (13, 14).
 #[test]
 fn session_order_types() {
-    replay_and_compare("orders_rth_order_types", all, KNOWN, &[1, 2, 3, 4, 5, 6, 7, 13, 14]);
+    replay_and_compare("orders_rth_order_types", all, KNOWN, &[13, 14]);
 }
 
 // What-if previews (02/10/2026, b1_462_whatif): LMT, MKT and a margin
@@ -388,8 +391,8 @@ fn bracket_with_transmit_off() {
 }
 
 #[test]
-#[ignore = "ibx#469: TRAIL MIT, TRAIL LIT, PASSV REL, RPI and PEG BEST are refused locally"]
-fn trail_mit_trail_lit_peg_best() {
+#[ignore = "ibx#470: the option combos refused with 460 get no answer"]
+fn option_combos_refused_with_460() {
     replay_and_compare("orders_rth_order_types", all, KNOWN, &[]);
 }
 

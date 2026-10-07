@@ -1871,7 +1871,9 @@ impl CcpState {
             let order_type_str = match ord_type_tag {
                 "1" => "MKT", "2" => "LMT", "3" => "STP", "4" => "STP LMT",
                 "P" => "TRAIL", "5" => "MOC", "B" => "LOC", "J" => "MIT",
-                "K" => "MTL", "R" => "REL", _ => ord_type_tag,
+                "K" => "MTL", "R" => "REL",
+                "TMIT" => "TRAIL MIT", "TLIT" => "TRAIL LIT", "E2M" => "PEG BEST", "PSVR" => "PASSV REL",
+                _ => ord_type_tag,
             };
 
             // As the reference: an unknown code is kept ("???"), not read

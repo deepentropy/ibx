@@ -197,7 +197,7 @@ client.disconnect()
 
 ### Supported Order Types
 
-MKT, LMT, STP, STP LMT, TRAIL, TRAIL LIMIT, MOC, LOC, MTL, MIT, LIT, MKT PRT, STP PRT, REL, PEG MKT, PEG MID, MIDPRICE, SNAP MKT, SNAP MID, SNAP PRI, PEG BENCH, BOX TOP. Algo orders: VWAP, TWAP, Arrival Price, Close Price, Dark Ice, PctVol.
+MKT, LMT, STP, STP LMT, TRAIL, TRAIL LIMIT, MOC, LOC, MTL, MIT, LIT, MKT PRT, STP PRT, REL, PEG MKT, PEG MID, MIDPRICE, SNAP MKT, SNAP MID, SNAP PRI, PEG BENCH, BOX TOP, TRAIL MIT, TRAIL LIT, PEG BEST, RPI, PASSV REL. Algo orders: VWAP, TWAP, Arrival Price, Close Price, Dark Ice, PctVol.
 
 ## Notebooks
 
