@@ -55,6 +55,8 @@ it always comes after the `fix_in` that caused it.
 
 | `20261007` | pre-open | session_start: the server frames of the auth link from the logon on (account config, the execution replay of two fills of the morning, the working order, the account and portfolio frames), then the first API client: reqPositions, reqAccountUpdates, reqPnL / reqPnLSingle, reqOpenOrders, reqAllOpenOrders, reqCompletedOrders, reqExecutions and the cancel of the working order (slice: no logon frame, heartbeats or farms; the requests the gateway made by itself before the first API record are left out) |
 
+| `20261007` | pre-open | b4_generic_rest: one request per generic tick on AAPL (162 refused, 221, 232, 258, 460, 577, 586, 587, 595, 614, 619, 623), then the whole list refused on six contracts; b4_generic_rest2: the list without 162 on AAPL, SPY, SPX, EUR.USD, an AAPL option and a future |
+
 ## Decoded API side (`<name>.api.jsonl`, ibx#487)
 
 Next to each scenario, its API messages decoded by the official client library, for the scenario replay
