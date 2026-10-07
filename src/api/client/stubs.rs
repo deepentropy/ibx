@@ -175,13 +175,33 @@ impl EClient {
 
     // ── WSH ──
 
-    /// Request WSH metadata. Not yet implemented.
-    pub fn req_wsh_meta_data(&self, _req_id: i64) {
-        log::warn!("req_wsh_meta_data: not yet implemented — needs FIX capture");
+    /// Request WSH meta data. Matches `reqWshMetaData` in C++. The
+    /// permission check of the reference (ibx#443): error 10276 when the
+    /// session has no WSH news source, 10277 when it is not subscribed.
+    /// The data request itself is not implemented: with the permission,
+    /// error 10279.
+    pub fn req_wsh_meta_data(&self, req_id: i64) {
+        if !crate::client_core::ClientCore::ids_fit("req_wsh_meta_data", &[req_id]) { return; }
+        let (code, text) = crate::client_core::wsh_meta_data_error(&self.shared.reference);
+        self.shared.orders.push_order_error(req_id, code, text.to_string());
     }
 
-    /// Request WSH event data. Not yet implemented.
-    pub fn req_wsh_event_data(&self, _req_id: i64) {
-        log::warn!("req_wsh_event_data: not yet implemented — needs FIX capture");
+    /// Cancel a WSH meta data request. Matches `cancelWshMetaData` in
+    /// C++. No answer, as the reference (ibx#443).
+    pub fn cancel_wsh_meta_data(&self, _req_id: i64) {}
+
+    /// Request WSH event data. Matches `reqWshEventData` in C++. The
+    /// permission check of the reference (ibx#443): error 10276 when the
+    /// session has no WSH news source, 10277 when it is not subscribed.
+    /// The data request itself is not implemented: with the permission,
+    /// error 10282, since no meta data is held.
+    pub fn req_wsh_event_data(&self, req_id: i64, _wsh_event_data: &crate::api::types::WshEventData) {
+        if !crate::client_core::ClientCore::ids_fit("req_wsh_event_data", &[req_id]) { return; }
+        let (code, text) = crate::client_core::wsh_event_data_error(&self.shared.reference);
+        self.shared.orders.push_order_error(req_id, code, text.to_string());
     }
+
+    /// Cancel a WSH event data request. Matches `cancelWshEventData` in
+    /// C++. No answer, as the reference (ibx#443).
+    pub fn cancel_wsh_event_data(&self, _req_id: i64) {}
 }

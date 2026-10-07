@@ -663,6 +663,16 @@ impl EClient {
         Ok(())
     }
 
+    /// Set the API news sources of the logon: the subscribed codes and
+    /// the listed ones without a subscription (ibx#443, test-only).
+    #[doc(hidden)]
+    fn _test_set_news_sources(&self, subscribed: Vec<String>, unsubscribed: Vec<String>) -> PyResult<()> {
+        let shared = self.shared_state()?;
+        shared.reference.set_news_sources(subscribed);
+        shared.reference.set_news_sources_unsubscribed(unsubscribed);
+        Ok(())
+    }
+
     /// Queue a link status notice, as the engine does (test-only).
     #[doc(hidden)]
     fn _test_push_connection_notice(&self, code: i64, message: &str) -> PyResult<()> {

@@ -963,6 +963,9 @@ pub struct ReferenceState {
     /// (ibx#460): the provider check and the all-subscribed form of the
     /// historical news request use them.
     news_sources: Mutex<Vec<String>>,
+    /// API news source codes of the logon that are listed but not
+    /// subscribed (ibx#443).
+    news_sources_unsubscribed: Mutex<Vec<String>>,
     soft_dollar_tiers: Mutex<Vec<crate::types::SoftDollarTier>>,
     family_codes: Mutex<Vec<crate::types::FamilyCode>>,
     white_branding_id: Mutex<String>,
@@ -1053,6 +1056,7 @@ impl ReferenceState {
             exchange_maps_at: Mutex::new(HashMap::new()),
             news_providers: Mutex::new(Vec::new()),
             news_sources: Mutex::new(Vec::new()),
+            news_sources_unsubscribed: Mutex::new(Vec::new()),
             soft_dollar_tiers: Mutex::new(Vec::new()),
             family_codes: Mutex::new(Vec::new()),
             white_branding_id: Mutex::new(String::new()),
@@ -1369,6 +1373,12 @@ impl ReferenceState {
         self.news_sources.lock().unwrap().clone()
     }
 
+    /// API news source codes of the logon that are listed but not
+    /// subscribed (ibx#443).
+    pub fn news_sources_unsubscribed(&self) -> Vec<String> {
+        self.news_sources_unsubscribed.lock().unwrap().clone()
+    }
+
     pub fn soft_dollar_tiers(&self) -> Vec<crate::types::SoftDollarTier> {
         self.soft_dollar_tiers.lock().unwrap().clone()
     }
@@ -1496,6 +1506,10 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_news_sources(&self, codes: Vec<String>) {
         *self.news_sources.lock().unwrap() = codes;
+    }
+
+    #[doc(hidden)] pub fn set_news_sources_unsubscribed(&self, codes: Vec<String>) {
+        *self.news_sources_unsubscribed.lock().unwrap() = codes;
     }
 
     #[doc(hidden)] pub fn set_soft_dollar_tiers(&self, tiers: Vec<crate::types::SoftDollarTier>) {

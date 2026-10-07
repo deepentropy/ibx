@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 
 use super::EClient;
-use super::super::contract::{Contract, NewsProviderPy, SmartComponentPy, SoftDollarTierPy};
+use super::super::contract::{Contract, NewsProviderPy, SmartComponentPy, SoftDollarTierPy, WshEventDataPy};
 
 impl EClient {
     /// The smart_components callback, or the error of the request.
@@ -321,17 +321,42 @@ impl EClient {
 
     // ── WSH ──
 
-    fn req_wsh_meta_data(&self, req_id: i64) -> PyResult<()> {
+    /// The permission check of the reference (ibx#443): error 10276 when
+    /// the session has no WSH news source, 10277 when it is not
+    /// subscribed. The data request itself is not implemented: with the
+    /// permission, error 10279.
+    fn req_wsh_meta_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
-        let _ = req_id;
-        log::warn!("req_wsh_meta_data: not yet implemented — needs FIX capture");
+        if !crate::client_core::ClientCore::ids_fit("req_wsh_meta_data", &[req_id]) { return Ok(()); }
+        let (code, text) = crate::client_core::wsh_meta_data_error(&self.shared_state()?.reference);
+        self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
         Ok(())
     }
 
+    /// No answer, as the reference (ibx#443).
+    fn cancel_wsh_meta_data(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        if let Some(r) = self.not_connected(-1) { return r; }
+        Ok(())
+    }
+
+    /// The permission check of the reference (ibx#443), as
+    /// `req_wsh_meta_data`. The data request itself is not implemented:
+    /// with the permission, error 10282, since no meta data is held.
     #[pyo3(signature = (req_id, wsh_event_data=None))]
-    fn req_wsh_event_data(&self, req_id: i64, wsh_event_data: Option<Py<PyAny>>) -> PyResult<()> {
-        let _ = (req_id, wsh_event_data);
-        log::warn!("req_wsh_event_data: not yet implemented — needs FIX capture");
+    fn req_wsh_event_data(&self, py: Python<'_>, req_id: i64, wsh_event_data: Option<WshEventDataPy>) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
+        if !crate::client_core::ClientCore::ids_fit("req_wsh_event_data", &[req_id]) { return Ok(()); }
+        let _ = wsh_event_data;
+        let (code, text) = crate::client_core::wsh_event_data_error(&self.shared_state()?.reference);
+        self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
+        Ok(())
+    }
+
+    /// No answer, as the reference (ibx#443).
+    fn cancel_wsh_event_data(&self, req_id: i64) -> PyResult<()> {
+        let _ = req_id;
+        if let Some(r) = self.not_connected(-1) { return r; }
         Ok(())
     }
 }

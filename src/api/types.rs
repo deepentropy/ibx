@@ -576,6 +576,37 @@ pub struct TagValue {
     pub value: String,
 }
 
+// ── WshEventData ──
+
+/// ibapi-compatible WSH event data request (ibx#443). Unset values are
+/// the ibapi ones: `i32::MAX` numbers, empty texts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WshEventData {
+    pub con_id: i32,
+    pub filter: String,
+    pub fill_watchlist: bool,
+    pub fill_portfolio: bool,
+    pub fill_competitors: bool,
+    pub start_date: String,
+    pub end_date: String,
+    pub total_limit: i32,
+}
+
+impl Default for WshEventData {
+    fn default() -> Self {
+        Self {
+            con_id: i32::MAX,
+            filter: String::new(),
+            fill_watchlist: false,
+            fill_portfolio: false,
+            fill_competitors: false,
+            start_date: String::new(),
+            end_date: String::new(),
+            total_limit: i32::MAX,
+        }
+    }
+}
+
 // ── ScannerSubscription ──
 
 /// ibapi-compatible scanner subscription (ibx#456). Unset values are the

@@ -3239,6 +3239,55 @@ impl NewsProviderPy {
     fn new() -> Self { Self::default() }
 }
 
+// ── WshEventData ──
+
+/// ibapi-compatible WshEventData class (ibx#443).
+#[pyclass(from_py_object, name = "WshEventData")]
+#[derive(Clone, Debug)]
+pub struct WshEventDataPy {
+    #[pyo3(get, set)]
+    pub con_id: i32,
+    #[pyo3(get, set)]
+    pub filter: String,
+    #[pyo3(get, set)]
+    pub fill_watchlist: bool,
+    #[pyo3(get, set)]
+    pub fill_portfolio: bool,
+    #[pyo3(get, set)]
+    pub fill_competitors: bool,
+    #[pyo3(get, set)]
+    pub start_date: String,
+    #[pyo3(get, set)]
+    pub end_date: String,
+    #[pyo3(get, set)]
+    pub total_limit: i32,
+}
+
+#[pymethods]
+impl WshEventDataPy {
+    #[new]
+    #[pyo3(signature = ())]
+    fn new() -> Self {
+        let d = crate::api::types::WshEventData::default();
+        Self {
+            con_id: d.con_id,
+            filter: d.filter,
+            fill_watchlist: d.fill_watchlist,
+            fill_portfolio: d.fill_portfolio,
+            fill_competitors: d.fill_competitors,
+            start_date: d.start_date,
+            end_date: d.end_date,
+            total_limit: d.total_limit,
+        }
+    }
+}
+
+official_names!(WshEventDataPy, [
+    ("conId", "con_id"), ("fillWatchlist", "fill_watchlist"), ("fillPortfolio", "fill_portfolio"),
+    ("fillCompetitors", "fill_competitors"), ("startDate", "start_date"), ("endDate", "end_date"),
+    ("totalLimit", "total_limit"),
+]);
+
 // ── SoftDollarTier ──
 
 /// ibapi-compatible SoftDollarTier class.
@@ -3434,6 +3483,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SmartComponentPy>()?;
     m.add_class::<NewsProviderPy>()?;
     m.add_class::<SoftDollarTierPy>()?;
+    m.add_class::<WshEventDataPy>()?;
     m.add_class::<DepthMktDataDescriptionPy>()?;
     Ok(())
 }

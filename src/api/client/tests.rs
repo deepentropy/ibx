@@ -938,6 +938,49 @@ fn fa_requests_on_a_non_fa_session_are_refused() {
     assert!(!w.events.iter().any(|e| e.contains(":321:")), "{:?}", w.events);
 }
 
+// ibx#443: the WSH requests get the reference's permission error from the
+// logon's news sources: 10276 without the source, 10277 when it is listed
+// without a subscription. With the permission, the errors of a request
+// that cannot be served. The cancels answer nothing.
+#[test]
+fn wsh_requests_get_the_permission_error() {
+    use crate::api::types::WshEventData;
+    let (client, rx, shared) = test_client();
+    let answers = |client: &EClient| {
+        client.req_wsh_meta_data(1);
+        client.req_wsh_event_data(2, &WshEventData { con_id: 265598, ..Default::default() });
+        client.cancel_wsh_meta_data(1);
+        client.cancel_wsh_event_data(2);
+        let mut w = RecordingWrapper::default();
+        client.process_msgs(&mut w);
+        w.events.into_iter().filter(|e| e.starts_with("error:")).collect::<Vec<_>>()
+    };
+
+    // The captured paper logon (ibx#460): no such source.
+    shared.reference.set_news_sources("BRFG,BRFUPDN,DJ-N,DJNL".split(',').map(String::from).collect());
+    shared.reference.set_news_sources_unsubscribed("BZ,DJTOP,FLY".split(',').map(String::from).collect());
+    assert_eq!(answers(&client), [
+        "error:1:10276:News feed is not allowed.",
+        "error:2:10276:News feed is not allowed.",
+    ]);
+
+    shared.reference.set_news_sources_unsubscribed(vec!["BZ".into(), "WSHE".into()]);
+    assert_eq!(answers(&client), [
+        "error:1:10277:News Feed requires permissions. Please login to Portal to subscribe.",
+        "error:2:10277:News Feed requires permissions. Please login to Portal to subscribe.",
+    ]);
+
+    shared.reference.set_news_sources(vec!["BRFG".into(), "wshe".into()]);
+    assert_eq!(answers(&client), [
+        "error:1:10279:Failed to request WSH meta data.The request is not supported.",
+        "error:2:10282:WSH meta data not requested.",
+    ]);
+    assert!(rx.try_recv().is_err(), "nothing sent");
+
+    let unset = WshEventData::default();
+    assert_eq!((unset.con_id, unset.total_limit), (i32::MAX, i32::MAX));
+}
+
 // ibx#444: a market data request id already live gets 322, a cancel of an
 // unknown id gets 300, as the reference.
 #[test]

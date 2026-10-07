@@ -334,6 +334,16 @@ def test_wsh_signatures():
     c, w = make_client()
     assert hasattr(c, "req_wsh_meta_data")
     assert hasattr(c, "req_wsh_event_data")
+    assert hasattr(c, "cancel_wsh_meta_data")
+    assert hasattr(c, "cancel_wsh_event_data")
+
+
+def test_wsh_not_connected():
+    # The reference client reports it without the request id.
+    for call in ("req_wsh_meta_data", "cancel_wsh_meta_data", "req_wsh_event_data", "cancel_wsh_event_data"):
+        c, w = make_client()
+        getattr(c, call)(7)
+        assert_not_connected(w, -1)
 
 
 # ═══════════════════════════════════════════════════════════

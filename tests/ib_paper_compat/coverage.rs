@@ -112,7 +112,8 @@ const KNOWN_RUST_API_GAPS: &[(&str, &str)] = &[
     ),
     (
         "WSH endpoints",
-        "Not implemented in Rust endpoint layer yet",
+        "Only the permission check is implemented (answered locally, no control command); \
+         the data request is not",
     ),
 ];
 

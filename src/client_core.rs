@@ -1306,6 +1306,55 @@ pub fn delayed_tick_type(tick_type: i32) -> i32 {
     }
 }
 
+/// The news source of the WSH requests (ibx#443).
+const WSH_SOURCE: &str = "WSHE";
+
+/// A WSH request when its news source is not in the logon's list: the
+/// reference's error (ibx#443).
+pub const WSH_NOT_ALLOWED: (i64, &str) = (10276, "News feed is not allowed.");
+
+/// A WSH request when its news source is listed but not subscribed: the
+/// reference's error (ibx#443).
+pub const WSH_NOT_SUBSCRIBED: (i64, &str) =
+    (10277, "News Feed requires permissions. Please login to Portal to subscribe.");
+
+/// reqWshEventData while no meta data is held: the reference's error
+/// (ibx#443).
+pub const WSH_META_NOT_REQUESTED: (i64, &str) = (10282, "WSH meta data not requested.");
+
+/// reqWshMetaData that cannot be served: the reference's error for a
+/// failed request, with the reason after it (ibx#443).
+pub const WSH_META_FAILED: (i64, &str) =
+    (10279, "Failed to request WSH meta data.The request is not supported.");
+
+/// The permission check of the WSH requests, as the reference (ibx#443):
+/// the error of a session whose logon does not list the WSH news source,
+/// or lists it without a subscription; `None` when it is subscribed.
+pub(crate) fn wsh_refusal(subscribed: &[String], unsubscribed: &[String]) -> Option<(i64, &'static str)> {
+    let has = |codes: &[String]| codes.iter().any(|c| c.eq_ignore_ascii_case(WSH_SOURCE));
+    if has(subscribed) {
+        None
+    } else if has(unsubscribed) {
+        Some(WSH_NOT_SUBSCRIBED)
+    } else {
+        Some(WSH_NOT_ALLOWED)
+    }
+}
+
+/// The answer of reqWshMetaData (ibx#443): the permission error, as the
+/// reference; with the permission, the error of a failed request, since
+/// the data request itself is not implemented.
+pub(crate) fn wsh_meta_data_error(reference: &crate::bridge::ReferenceState) -> (i64, &'static str) {
+    wsh_refusal(&reference.news_sources(), &reference.news_sources_unsubscribed()).unwrap_or(WSH_META_FAILED)
+}
+
+/// The answer of reqWshEventData (ibx#443): the permission error, as the
+/// reference; with the permission, the error of a request made before
+/// any meta data is held, which is always the case here.
+pub(crate) fn wsh_event_data_error(reference: &crate::bridge::ReferenceState) -> (i64, &'static str) {
+    wsh_refusal(&reference.news_sources(), &reference.news_sources_unsubscribed()).unwrap_or(WSH_META_NOT_REQUESTED)
+}
+
 /// requestFA on a session that is not FA: the reference's error, with its
 /// request id for a request that has none (ibx#481).
 pub const REQUEST_FA_NOT_FA: (i64, i64, &str) =

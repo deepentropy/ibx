@@ -282,10 +282,10 @@ rule,FUNDAMENTALS-WSH-OPTCALC 2.6,Wire traffic and connection,no test
 rule,FUNDAMENTALS-WSH-OPTCALC 3,"WSH: reqWshMetaData (100), reqWshEventData (102) and cancels (101, 103)",no test
 rule,FUNDAMENTALS-WSH-OPTCALC 3.1,Classes and manager,no test
 rule,FUNDAMENTALS-WSH-OPTCALC 3.2,Decode,no test
-rule,FUNDAMENTALS-WSH-OPTCALC 3.3,Local refusals,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 3.3,Local refusals,src/api/client/tests.rs::wsh_requests_get_the_permission_error
 rule,FUNDAMENTALS-WSH-OPTCALC 3.4,Wire request,no test
 rule,FUNDAMENTALS-WSH-OPTCALC 3.5,Response and API messages,no test
-rule,FUNDAMENTALS-WSH-OPTCALC 3.6,Cancels,no test
+rule,FUNDAMENTALS-WSH-OPTCALC 3.6,Cancels,src/api/client/tests.rs::wsh_requests_get_the_permission_error
 rule,FUNDAMENTALS-WSH-OPTCALC 4,exerciseOptions (21),no test
 rule,FUNDAMENTALS-WSH-OPTCALC 4.1,Decode,no test
 rule,FUNDAMENTALS-WSH-OPTCALC 4.2,Local refusals,no test
@@ -1192,13 +1192,13 @@ error,10272,Duration field is only valid with time-in-force of GTD,no test
 error,10273,Expiration date and time and Duration cannot be set on the order at the same time.,no test
 error,10274,The 'PostToATS' order attribute may not be specified for this order or is invalid.,no test
 error,10275,Positions info is not available for account(s): %s until the application is finished and approved.,no test
-error,10276,News feed is not allowed.,no test
-error,10277,News Feed requires permissions. Please login to Portal to subscribe.,no test
+error,10276,News feed is not allowed.,src/api/client/tests.rs::wsh_requests_get_the_permission_error
+error,10277,News Feed requires permissions. Please login to Portal to subscribe.,src/api/client/tests.rs::wsh_requests_get_the_permission_error
 error,10278,Duplicate WSH meta data request.,no test
-error,10279,Failed to request WSH meta data.,no test
+error,10279,Failed to request WSH meta data.,src/api/client/tests.rs::wsh_requests_get_the_permission_error
 error,10280,Failed to cancel WSH meta data.,no test
 error,10281,Duplicate WSH event data request.,no test
-error,10282,WSH meta data not requested.,no test
+error,10282,WSH meta data not requested.,src/api/client/tests.rs::wsh_requests_get_the_permission_error
 error,10283,Failed to request WSH event data.,no test
 error,10284,Failed to cancel WSH event data.,no test
 error,10285,Your API version does not support fractional size rules. Please upgrade to a minimum version %s.,no test
@@ -2084,8 +2084,10 @@ eclient,req_soft_dollar_tiers,,live:tests/rust_api_gt.rs::api_gt_suite
 eclient,req_family_codes,,live:tests/rust_api_gt.rs::api_gt_suite
 eclient,set_server_log_level,,no test
 eclient,req_user_info,,live:tests/rust_api_gt.rs::api_gt_suite
-eclient,req_wsh_meta_data,,no test
-eclient,req_wsh_event_data,,no test
+eclient,req_wsh_meta_data,,src/api/client/tests.rs::wsh_requests_get_the_permission_error
+eclient,cancel_wsh_meta_data,,src/api/client/tests.rs::wsh_requests_get_the_permission_error
+eclient,req_wsh_event_data,,src/api/client/tests.rs::wsh_requests_get_the_permission_error
+eclient,cancel_wsh_event_data,,src/api/client/tests.rs::wsh_requests_get_the_permission_error
 decoder,protocol::ns::ns_recv,NS frame: header and length,src/robustness/decoders.rs::ns_frames ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
 decoder,protocol::ns::ns_parse,NS payload fields,src/robustness/decoders.rs::ns_frames ; src/robustness/decoders.rs::ns_payloads ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders
 decoder,protocol::ns::parse_test_request_timestamp,NS test request,src/robustness/decoders.rs::ns_payloads ; src/robustness/mutation.rs::recorded_frames_mutated_through_the_decoders

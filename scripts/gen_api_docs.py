@@ -356,8 +356,10 @@ KNOWN_DESCRIPTIONS: dict[str, str] = {
     "req_family_codes": "Request family codes.",
     "set_server_log_level": "Set server log level (1=error..5=trace).",
     "req_user_info": "Request user info (white branding ID).",
-    "req_wsh_meta_data": "Request Wall Street Horizon metadata. Not yet implemented.",
-    "req_wsh_event_data": "Request Wall Street Horizon event data. Not yet implemented.",
+    "req_wsh_meta_data": "Request Wall Street Horizon metadata. Answers the permission error (10276 / 10277); the data request is not yet implemented.",
+    "req_wsh_event_data": "Request Wall Street Horizon event data. Answers the permission error (10276 / 10277); the data request is not yet implemented.",
+    "cancel_wsh_meta_data": "Cancel a Wall Street Horizon metadata request. No answer.",
+    "cancel_wsh_event_data": "Cancel a Wall Street Horizon event data request. No answer.",
 }
 
 
@@ -867,7 +869,9 @@ IBAPI_ECLIENT: list[tuple[str, str, str]] = [
     ("Display Groups", "update_display_group", "updateDisplayGroup"),
     # WSH
     ("WSH", "req_wsh_meta_data", "reqWshMetaData"),
+    ("WSH", "cancel_wsh_meta_data", "cancelWshMetaData"),
     ("WSH", "req_wsh_event_data", "reqWshEventData"),
+    ("WSH", "cancel_wsh_event_data", "cancelWshEventData"),
 ]
 
 IBAPI_EWRAPPER: list[tuple[str, str]] = [

@@ -232,6 +232,14 @@ pub trait Wrapper {
     // ── User Info ──
 
     fn user_info(&mut self, req_id: i64, white_branding_id: &str) {}
+
+    // ── WSH ──
+
+    /// WSH meta data, as `wshMetaData` (ibx#443).
+    fn wsh_meta_data(&mut self, req_id: i64, data_json: &str) {}
+
+    /// WSH event data, as `wshEventData` (ibx#443).
+    fn wsh_event_data(&mut self, req_id: i64, data_json: &str) {}
 }
 
 /// Test helpers for Wrapper-based testing. Hidden from docs; built only

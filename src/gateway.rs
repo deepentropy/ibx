@@ -2578,6 +2578,9 @@ impl Gateway {
         shared.reference.set_news_sources(
             sources.iter().filter(|s| s.subscribed).map(|s| s.code.clone()).collect(),
         );
+        shared.reference.set_news_sources_unsubscribed(
+            sources.iter().filter(|s| !s.subscribed).map(|s| s.code.clone()).collect(),
+        );
         shared.reference.set_news_providers(news_providers);
 
         // Soft dollar tiers: from CCP logon tag 6522, none when it is absent

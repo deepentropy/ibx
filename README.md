@@ -193,7 +193,7 @@ client.disconnect()
 | **News** | `req_news_providers`, `req_news_article`, `req_historical_news`, `req_news_bulletins`, `cancel_news_bulletins` |
 | **Fundamental** | `req_fundamental_data`, `cancel_fundamental_data` |
 | **Options** | `calculate_implied_volatility`, `cancel_calculate_implied_volatility`, `calculate_option_price`, `cancel_calculate_option_price`, `exercise_options` |
-| **Other** | `req_current_time`, `req_user_info`, `req_family_codes`, `req_soft_dollar_tiers`, `set_server_log_level`, `req_wsh_meta_data`, `req_wsh_event_data` |
+| **Other** | `req_current_time`, `req_user_info`, `req_family_codes`, `req_soft_dollar_tiers`, `set_server_log_level`, `req_wsh_meta_data`, `cancel_wsh_meta_data`, `req_wsh_event_data`, `cancel_wsh_event_data` |
 
 ### Supported Order Types
 
