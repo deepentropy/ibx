@@ -1119,6 +1119,13 @@ pub const MD_MAX_TICKERS: (i64, &str) = (101, "Max number of tickers has been re
 pub const MD_NOT_SUBSCRIBED: &str = "Requested market data is not subscribed. Check API status by selecting the Account menu \
     then under Management choose Market Data Subscription Manager and/or availability of delayed data.";
 
+/// Error 10197 of the reference, as captured (02/10/2026, 07/10/2026): on
+/// a paper session, a streaming request that ended with a refused news
+/// tick (10094) gets it `MD_NO_DATA_WAIT` later, unless a request of its
+/// contract runs then.
+pub const MD_NO_DATA: (i64, &str) = (10197, "No market data during competing live session");
+pub const MD_NO_DATA_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A callback for a market data request beside its ticks (ibx#444).
 #[derive(Debug, Clone, PartialEq)]
 pub enum MdNotice {
@@ -1181,6 +1188,14 @@ pub struct ClientCore {
     /// Requests that joined a running subscription, and whether on delayed
     /// data, to be answered at the next dispatch (ibx#444).
     pub md_joins: Mutex<Vec<(i64, bool)>>,
+    /// Requests of a paper session that ended with a refused news tick:
+    /// (reqId, when its contract is looked at, conId), oldest first
+    /// (10197, ibx#444); their count is read without the lock.
+    md_no_data: Mutex<Vec<(i64, std::time::Instant, i64)>>,
+    /// The conId the engine found for the slots of requests sent without
+    /// one (ibx#444).
+    md_slot_con_ids: Mutex<HashMap<InstrumentId, i64>>,
+    md_no_data_count: std::sync::atomic::AtomicUsize,
     /// The client's market data modes from reqMarketDataType (ibx#444).
     pub md_modes: Mutex<crate::types::MarketDataModes>,
     /// The "Legal ones" text of the generic tick list refusal: computed
@@ -1603,6 +1618,9 @@ impl ClientCore {
             instrument_params: Mutex::new(HashMap::new()),
             instrument_news: Mutex::new(HashMap::new()),
             md_joins: Mutex::new(Vec::new()),
+            md_no_data: Mutex::new(Vec::new()),
+            md_slot_con_ids: Mutex::new(HashMap::new()),
+            md_no_data_count: std::sync::atomic::AtomicUsize::new(0),
             md_modes: Mutex::new(Default::default()),
             generic_legal: Mutex::new(None),
             snapshot_reqs: Mutex::new(HashMap::new()),
@@ -1662,6 +1680,9 @@ impl ClientCore {
         self.instrument_params.lock().unwrap().clear();
         self.instrument_news.lock().unwrap().clear();
         self.md_joins.lock().unwrap().clear();
+        self.md_no_data.lock().unwrap().clear();
+        self.md_slot_con_ids.lock().unwrap().clear();
+        self.md_no_data_count.store(0, Ordering::Release);
         *self.md_modes.lock().unwrap() = Default::default();
         self.md_frozen.lock().unwrap().clear();
         self.snapshot_reqs.lock().unwrap().clear();
@@ -2028,6 +2049,44 @@ impl ClientCore {
         true
     }
 
+    /// The requests ended by a refused news tick whose wait is over at
+    /// `now`: 10197 for each whose contract has no running request, as
+    /// captured (ibx#444).
+    pub fn take_md_no_data(&self, now: std::time::Instant) -> Vec<MdNotice> {
+        if self.md_no_data_count.load(Ordering::Acquire) == 0 {
+            return Vec::new();
+        }
+        let mut waits = self.md_no_data.lock().unwrap();
+        let due = waits.iter().take_while(|(_, at, _)| *at <= now).count();
+        if due == 0 {
+            return Vec::new();
+        }
+        let instruments = self.con_id_to_instrument.lock().unwrap();
+        let slots = self.md_slot_con_ids.lock().unwrap();
+        let observers = self.instrument_to_req.lock().unwrap();
+        let runs = |slot: &InstrumentId| observers.get(slot).is_some_and(|reqs| !reqs.is_empty());
+        let notices = waits.drain(..due)
+            .filter(|(_, _, con_id)| {
+                !instruments.get(con_id).is_some_and(runs) && !slots.iter().any(|(slot, c)| c == con_id && runs(slot))
+            })
+            .map(|(req_id, ..)| MdNotice::Error { req_id, code: MD_NO_DATA.0, text: MD_NO_DATA.1.to_string() })
+            .collect();
+        self.md_no_data_count.store(waits.len(), Ordering::Release);
+        notices
+    }
+
+    /// A streaming request ended with a refused news tick (10094): on a
+    /// paper session its contract (`con_id`) is looked at
+    /// `MD_NO_DATA_WAIT` later (`take_md_no_data`).
+    pub fn note_news_refused(&self, shared: &SharedState, req_id: i64, con_id: i64) {
+        if !shared.reference.paper_session() {
+            return;
+        }
+        let mut waits = self.md_no_data.lock().unwrap();
+        waits.push((req_id, std::time::Instant::now() + MD_NO_DATA_WAIT, con_id));
+        self.md_no_data_count.store(waits.len(), Ordering::Release);
+    }
+
     /// Put a market data request among the requests of an instrument
     /// (ibx#444). The first request of a fresh instrument starts its
     /// stream; a request on an instrument other requests use joins it, as
@@ -2340,7 +2399,12 @@ impl ClientCore {
     pub fn take_md_rejects(&self, shared: &SharedState) -> (Vec<MdNotice>, Vec<ControlCommand>) {
         let mut notices = Vec::new();
         let mut commands = Vec::new();
+        let resolved = shared.market.drain_md_resolved();
+        if !resolved.is_empty() {
+            self.md_slot_con_ids.lock().unwrap().extend(resolved);
+        }
         for (from, into, at) in shared.market.drain_md_merges() {
+            self.md_slot_con_ids.lock().unwrap().remove(&from);
             // None left: they were cancelled, which freed the slot.
             let Some(reqs) = self.instrument_to_req.lock().unwrap().remove(&from) else { continue };
             for req_id in reqs {
@@ -2400,7 +2464,14 @@ impl ClientCore {
                     notices.push(MdNotice::Error { req_id, code: MD_TOP_REJECTED.0, text: MD_TOP_REJECTED.1.to_string() });
                 } else {
                     notices.push(MdNotice::Error { req_id, code, text: text.to_string() });
+                    let streaming = !self.snapshot_reqs.lock().unwrap().contains_key(&req_id);
                     commands.extend(self.drop_mkt_data(shared, req_id, false).map(MdCancel::commands).unwrap_or_default());
+                    // A refused news tick: its contract is looked at later (10197).
+                    if let crate::bridge::MdReject::NewsRefused { con_id, .. } = &reject
+                        && streaming
+                    {
+                        self.note_news_refused(shared, req_id, *con_id);
+                    }
                 }
             }
         }
@@ -2530,6 +2601,7 @@ impl ClientCore {
     /// contract inherits the id. A later request for that conId simply
     /// re-registers.
     pub fn forget_instrument(&self, instrument: InstrumentId) {
+        self.md_slot_con_ids.lock().unwrap().remove(&instrument);
         self.instrument_params.lock().unwrap().remove(&instrument);
         self.instrument_news.lock().unwrap().remove(&instrument);
         let mut sent = self.currency_sent.lock().unwrap();

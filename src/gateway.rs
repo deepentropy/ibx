@@ -2612,6 +2612,8 @@ impl Gateway {
         // The account list of the logon: the managed accounts (ibx#420).
         shared.reference.set_managed_accounts(self.managed_accounts.clone());
         shared.reference.set_fa_session(self.fa_session);
+        // The logon's environment: a paper session (ibx#444).
+        shared.reference.set_paper_session(self.user_book);
         shared.reference.set_short_sale_flags(self.super_user, self.omnibus);
         shared.reference.set_smart_combo_con_ids(&self.raw_smart_combo_con_ids);
         shared.reference.set_tick_by_tick_limits(self.tick_by_tick_limit, self.tick_by_tick_off);

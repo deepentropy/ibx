@@ -530,7 +530,7 @@ impl HotLoop {
     fn route_md_subscribe(&mut self, sub: &farm::MdSubscribe) {
         let news = self.take_waiting_news(sub.instrument);
         if let Some(text) = news.iter().find_map(|(_, refusal)| refusal.clone()) {
-            self.shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument: sub.instrument, text });
+            self.shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument: sub.instrument, con_id: sub.con_id, text });
             return;
         }
         // A NEWS contract has no top of book.
@@ -616,7 +616,7 @@ impl HotLoop {
             return;
         }
         if let Some(text) = refusal {
-            self.shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument, text });
+            self.shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument, con_id, text });
             return;
         }
         let sub = farm::MdSubscribe {
@@ -1094,7 +1094,7 @@ impl HotLoop {
             if let Some(into) = into {
                 let news = self.take_waiting_news(sub.instrument);
                 if let Some(text) = news.iter().find_map(|(_, refusal)| refusal.clone()) {
-                    self.shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument: sub.instrument, text });
+                    self.shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument: sub.instrument, con_id: sub.con_id, text });
                     continue;
                 }
                 log::info!("Market data for {} {}: conId {} joins the subscription of instrument {}",
@@ -5117,7 +5117,7 @@ mod news_tests {
         engine.context = context;
         engine.send_md_resolved();
         assert_eq!(shared.market.drain_md_rejects(), [crate::bridge::MdReject::NewsRefused {
-            instrument: ids[0], text: "API News error:Source code unchecked in API news Settings: XYZ".into() }]);
+            instrument: ids[0], con_id: 4815747, text: "API News error:Source code unchecked in API news Settings: XYZ".into() }]);
         let out = sent(&mut farm_side);
         assert_eq!(out.len(), 2, "only MSFT: {out:?}");
         assert!(out[0].contains("|6008=272093|") && out[0].contains("|264=442|"), "{}", out[0]);

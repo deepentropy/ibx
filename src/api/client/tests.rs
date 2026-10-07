@@ -6351,7 +6351,7 @@ fn news_refusal_after_the_lookup_is_reported() {
     client.core.req_to_instrument.lock().unwrap().insert(9583, 6);
     client.core.instrument_to_req.lock().unwrap().insert(6, vec![9583]);
     shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused {
-        instrument: 6, text: "API News error:Source code unchecked in API news Settings: XYZ".into() });
+        instrument: 6, con_id: 265598, text: "API News error:Source code unchecked in API news Settings: XYZ".into() });
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
     assert!(w.events.contains(&"error:9583:10094:API News error:Source code unchecked in API news Settings: XYZ".to_string()), "{:?}", w.events);

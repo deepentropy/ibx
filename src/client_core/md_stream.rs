@@ -887,4 +887,45 @@ mod tests {
             "price:2:1:99", "size:2:0:1", "price:1:1:99", "size:1:0:1",
         ]);
     }
+
+    // ibx#444, captured 07/10/2026: on a paper session a streaming request
+    // ended by a refused news tick gets 10197 5 s later, unless a request
+    // of its contract runs then. A running request gets none.
+    #[test]
+    fn a_refused_news_request_gets_10197_unless_its_contract_runs() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        let no_data = |after: std::time::Duration| -> Vec<i64> {
+            core.take_md_no_data(std::time::Instant::now() + after).into_iter().map(|n| match n {
+                MdNotice::Error { req_id, code: 10197, text } if text == "No market data during competing live session" => req_id,
+                other => panic!("{other:?}"),
+            }).collect()
+        };
+        let late = MD_NO_DATA_WAIT + std::time::Duration::from_secs(1);
+        core.note_news_refused(&shared, 1, 600);
+        assert!(no_data(late).is_empty(), "a live session");
+
+        shared.reference.set_paper_session(true);
+        stream(&core, &shared, 2, 7);
+        core.con_id_to_instrument.lock().unwrap().extend([(700, 7), (600, 6)]);
+        core.note_news_refused(&shared, 10, 700);
+        core.note_news_refused(&shared, 11, 600);
+        assert!(no_data(std::time::Duration::from_secs(4)).is_empty(), "before the wait ends");
+        assert_eq!(no_data(late), [11]);
+        assert!(no_data(2 * late).is_empty(), "once; none for the running request");
+
+        // Through the engine (a request without a conId): the request ends,
+        // then 10197.
+        stream(&core, &shared, 3, 8);
+        shared.market.push_md_reject(crate::bridge::MdReject::NewsRefused { instrument: 8, con_id: 800, text: "x".into() });
+        let (notices, _) = core.take_md_rejects(&shared);
+        assert!(matches!(notices[..], [MdNotice::Error { req_id: 3, code: 10094, .. }]), "{notices:?}");
+        assert_eq!(no_data(late), [3]);
+
+        // The contract runs on the slot of a request sent without a conId.
+        stream(&core, &shared, 4, 9);
+        shared.market.push_md_resolved(9, 900);
+        let _ = core.take_md_rejects(&shared);
+        core.note_news_refused(&shared, 12, 900);
+        assert!(no_data(late).is_empty());
+    }
 }

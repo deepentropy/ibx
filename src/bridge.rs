@@ -325,6 +325,9 @@ pub struct MarketDataState {
     /// Requests given without a conId whose contract another request had
     /// subscribed: (their own slot, the slot they joined) (ibx#444).
     md_merges: Mutex<Vec<(InstrumentId, InstrumentId, u64)>>,
+    /// Slots of requests without a conId whose contract was found, with
+    /// its conId (ibx#444).
+    md_resolved: Mutex<Vec<(InstrumentId, i64)>>,
     /// The request parameters of acked subscriptions (ibx#449).
     tick_req_params: Mutex<Vec<TickReqParams>>,
     snapshot_acks: Mutex<Vec<TickReqParams>>,
@@ -369,8 +372,9 @@ pub enum MdReject {
     /// contract: error 200, the subscription is gone (ibx#278).
     NoSecurityDefinition { instrument: InstrumentId },
     /// A request with the news tick refused once its contract was known:
-    /// error 10094 with this text, nothing was sent (ibx#458).
-    NewsRefused { instrument: InstrumentId, text: String },
+    /// error 10094 with this text, nothing was sent (ibx#458). `con_id`:
+    /// its contract.
+    NewsRefused { instrument: InstrumentId, con_id: i64, text: String },
     /// The contract's data is frozen (ibx#447): its requests go on with
     /// the frozen top of book of slot `frozen` (marketDataType 2).
     Frozen { instrument: InstrumentId, frozen: InstrumentId },
@@ -410,6 +414,7 @@ impl MarketDataState {
             news_bulletins: Mutex::new(BulletinStore::default()),
             md_rejects: Mutex::new(Vec::new()),
             md_merges: Mutex::new(Vec::new()),
+            md_resolved: Mutex::new(Vec::new()),
             tick_req_params: Mutex::new(Vec::new()),
             snapshot_acks: Mutex::new(Vec::new()),
             tbt_errors: Mutex::new(Vec::new()),
@@ -458,6 +463,17 @@ impl MarketDataState {
     #[doc(hidden)] pub fn push_md_merge(&self, from: InstrumentId, into: InstrumentId) {
         let at = self.md_events.position();
         self.md_merges.lock().unwrap().push((from, into, at));
+    }
+
+    /// The lookup of a request without a conId found its contract (ibx#444).
+    #[doc(hidden)] pub fn push_md_resolved(&self, instrument: InstrumentId, con_id: i64) {
+        self.md_resolved.lock().unwrap().push((instrument, con_id));
+    }
+
+    pub fn drain_md_resolved(&self) -> Vec<(InstrumentId, i64)> {
+        let mut resolved = self.md_resolved.lock().unwrap();
+        if resolved.is_empty() { return Vec::new(); }
+        resolved.drain(..).collect()
     }
 
     pub fn drain_md_merges(&self) -> Vec<(InstrumentId, InstrumentId, u64)> {
@@ -977,6 +993,8 @@ pub struct ReferenceState {
     pending_accounts: Mutex<Vec<String>>,
     /// FA session, from CCP logon tag 6108 (ibx#481).
     fa_session: std::sync::atomic::AtomicBool,
+    /// A paper session, from the logon (ibx#444).
+    paper_session: std::sync::atomic::AtomicBool,
     /// The logon's super user and omnibus flags (ibx#417): either one lets
     /// a short-side order pass the side check.
     super_user: AtomicBool,
@@ -1063,6 +1081,7 @@ impl ReferenceState {
             managed_accounts: Mutex::new(Vec::new()),
             pending_accounts: Mutex::new(Vec::new()),
             fa_session: std::sync::atomic::AtomicBool::new(false),
+            paper_session: std::sync::atomic::AtomicBool::new(false),
             super_user: AtomicBool::new(false),
             omnibus: AtomicBool::new(false),
             smart_combo_con_ids: Mutex::new(HashMap::new()),
@@ -1568,6 +1587,15 @@ impl ReferenceState {
 
     #[doc(hidden)] pub fn set_fa_session(&self, fa: bool) {
         self.fa_session.store(fa, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// True when the logon says this is a paper session (ibx#444).
+    pub fn paper_session(&self) -> bool {
+        self.paper_session.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[doc(hidden)] pub fn set_paper_session(&self, paper: bool) {
+        self.paper_session.store(paper, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The server clock offset of the session (ibx#421).

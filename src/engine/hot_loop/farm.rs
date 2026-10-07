@@ -130,6 +130,7 @@ pub(crate) fn md_contract_reply(context: &mut Context, shared: &SharedState, req
         // is known, no second lookup (ibx#486, b1_441 of 02/10/2026).
         context.round_lots.entry(con_id).or_insert_with(|| crate::control::contracts::round_lot_from_secdef(msg));
         context.market.resolve_con_id(sub.instrument, con_id);
+        shared.market.push_md_resolved(sub.instrument, con_id);
         sub.con_id = con_id;
         context.md_resolved.push(sub);
     } else {

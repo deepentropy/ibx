@@ -57,6 +57,9 @@ impl EClient {
         // The news tick of a known contract is checked first (ibx#458).
         if let Some((code, text)) = self.core.news_tick_refusal(&shared, generic_tick_list, contract.con_id, &contract.sec_type) {
             shared.orders.push_order_error(req_id, code, text);
+            if !snapshot {
+                self.core.note_news_refused(&shared, req_id, contract.con_id);
+            }
             return Ok(());
         }
         let filters = SecDefFilters {

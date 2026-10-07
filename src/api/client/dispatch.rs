@@ -369,6 +369,9 @@ impl EClient {
                 let _ = self.cancel_mkt_data(req_id);
             }
         }
+        // Paper: the requests still without data after their wait (10197,
+        // ibx#444).
+        Self::md_notices(wrapper, self.core.take_md_no_data(std::time::Instant::now()));
 
         // Historical ticks — route to the variant-specific callback (iso
         // ibapi); before the tick-by-tick ticks, as the past ticks of a

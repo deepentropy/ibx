@@ -493,6 +493,9 @@ impl EClient {
                 self.cancel_mkt_data(py, req_id)?;
             }
         }
+        // Paper: the requests still without data after their wait (10197,
+        // ibx#444).
+        self.md_notices(py, self.core.take_md_no_data(std::time::Instant::now()))?;
 
         // Drain historical ticks -> the official tick objects (ibx#432),
         // before the tick-by-tick ticks: the past ticks of a tick-by-tick
