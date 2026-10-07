@@ -4583,6 +4583,7 @@ fn captured_fill_exec() -> crate::bridge::FillExec {
         last_liquidity: 0,
         combo: None,
         other_client: false,
+        replayed: false,
     }
 }
 
@@ -4783,6 +4784,8 @@ fn seed_account_rows(shared: &SharedState, complete: bool) {
 // the time, the time, then the end, once.
 #[test]
 fn account_updates_send_the_image_then_the_end_once() {
+    // The account time is in the machine's zone (ibx#487).
+    crate::gateway::set_machine_zone_for_test(Some("US/Eastern"));
     let (client, _rx, shared) = test_client();
     shared.portfolio.set_position_info(crate::types::PositionInfo {
         con_id: 756733, position_fixed: 18 * crate::types::QTY_SCALE, symbol: "SPY".into(),
@@ -4798,9 +4801,10 @@ fn account_updates_send_the_image_then_the_end_once() {
     let mut w = AccountRec::default();
     client.process_msgs(&mut w);
     assert_eq!(w.events, [
+        // In the order of the reference's value map: key, then currency.
         "value:AccountType:INDIVIDUAL:",
-        "value:NetLiquidation:953633.06:USD",
         "value:CashBalance:899133.4993:BASE",
+        "value:NetLiquidation:953633.06:USD",
         "portfolio:756733:18:",
         "time:08:16",
         "time:08:16",

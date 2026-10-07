@@ -1,0 +1,160 @@
+{"type":"header","format":"four-leg-api/1","source":"20261007/session_start.jsonl","scenario":"session_start","decoder":"official client library 10.46.01","machine_zone":"Europe/Paris"}
+{"seq":1103,"leg":"api_out","msg_name":"START_API","request":{"clientId":198}}
+{"seq":1104,"leg":"api_in","msg_name":"OPEN_ORDER","callbacks":[["openOrder",113,{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},{"softDollarTier":{},"orderId":113,"clientId":198,"permId":1525027866,"action":"BUY","totalQuantity":"1","orderType":"LMT","lmtPrice":233.54,"auxPrice":0.0,"tif":"DAY","ocaType":3,"orderRef":"d1work","rule80A":"0","volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"0","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":1},{"status":"PreSubmitted"}]]}
+{"seq":1105,"leg":"api_in","msg_name":"ORDER_STATUS","callbacks":[["orderStatus",113,"PreSubmitted","0","1",0.0,1525027866,0,0.0,198,"",0.0]]}
+{"seq":1106,"leg":"api_in","msg_name":"OPEN_ORDER_END","callbacks":[["openOrderEnd"]]}
+{"seq":1107,"leg":"api_in","msg_name":"MANAGED_ACCTS","callbacks":[["managedAccounts","DUXXXXXXX"]]}
+{"seq":1108,"leg":"api_in","msg_name":"NEXT_VALID_ID","callbacks":[["nextValidId",138]]}
+{"seq":1109,"leg":"api_out","msg_name":"REQ_POSITIONS","request":{}}
+{"seq":1110,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2104,"Market data farm connection is OK:usfarm",""]]}
+{"seq":1111,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2106,"HMDS data farm connection is OK:ushmds",""]]}
+{"seq":1112,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2158,"Sec-def data farm connection is OK:secdefil",""]]}
+{"seq":1113,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2172,"The version of the application you are running, 1040.1, needs to be upgraded, as it will be desupported on 20261215. The minimum supported version at that time will be 1050.1. ",""]]}
+{"seq":1114,"leg":"api_in","msg_name":"POSITION_DATA","callbacks":[["position","DUXXXXXXX",{"conId":4726868,"symbol":"AXTI","secType":"STK","strike":0.0,"exchange":"NASDAQ","localSymbol":"AXTI","tradingClass":"NMS"},"1",44.8]]}
+{"seq":1115,"leg":"api_in","msg_name":"POSITION_DATA","callbacks":[["position","DUXXXXXXX",{"conId":272093,"symbol":"MSFT","secType":"STK","strike":0.0,"exchange":"NASDAQ","localSymbol":"MSFT","tradingClass":"NMS"},"-10",397.54161]]}
+{"seq":1116,"leg":"api_in","msg_name":"POSITION_DATA","callbacks":[["position","DUXXXXXXX",{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"NASDAQ","localSymbol":"AAPL","tradingClass":"NMS"},"0",0.0]]}
+{"seq":1117,"leg":"api_in","msg_name":"POSITION_DATA","callbacks":[["position","DUXXXXXXX",{"conId":756733,"symbol":"SPY","secType":"STK","strike":0.0,"exchange":"ARCA","localSymbol":"SPY","tradingClass":"SPY"},"81",774.82864445]]}
+{"seq":1118,"leg":"api_in","msg_name":"POSITION_END","callbacks":[["positionEnd"]]}
+{"seq":1119,"leg":"api_out","msg_name":"CANCEL_POSITIONS","request":{}}
+{"seq":1120,"leg":"api_out","msg_name":"REQ_ACCT_DATA","request":{"subscribe":true,"acctCode":"DUXXXXXXX"}}
+{"seq":1121,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","AccountCode","DUXXXXXXX","","DUXXXXXXX"]]}
+{"seq":1122,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","AccountOrGroup","DUXXXXXXX","BASE","DUXXXXXXX"]]}
+{"seq":1123,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","AccountOrGroup","DUXXXXXXX","USD","DUXXXXXXX"]]}
+{"seq":1124,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","AccountReady","true","","DUXXXXXXX"]]}
+{"seq":1125,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","AccountType","INDIVIDUAL","","DUXXXXXXX"]]}
+{"seq":1126,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","AccruedCash","425.79","BASE","DUXXXXXXX"]]}
+{"seq":1127,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","AccruedCash","425.79","USD","DUXXXXXXX"]]}
+{"seq":1128,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","AccruedDividend","0.00","USD","DUXXXXXXX"]]}
+{"seq":1129,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","AvailableFunds","947355.59","USD","DUXXXXXXX"]]}
+{"seq":1130,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","Billable","0.00","USD","DUXXXXXXX"]]}
+{"seq":1131,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","BuyingPower","6315703.92","USD","DUXXXXXXX"]]}
+{"seq":1132,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","CashBalance","896958.4231","BASE","DUXXXXXXX"]]}
+{"seq":1133,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","CashBalance","896958.4231","USD","DUXXXXXXX"]]}
+{"seq":1134,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","ColumnPrio-S","1","","DUXXXXXXX"]]}
+{"seq":1135,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","CorporateBondValue","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1136,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","CorporateBondValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1137,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","Currency","BASE","BASE","DUXXXXXXX"]]}
+{"seq":1138,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","Currency","USD","USD","DUXXXXXXX"]]}
+{"seq":1139,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","Cushion","0.993198","","DUXXXXXXX"]]}
+{"seq":1140,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","EquityWithLoanValue","955195.69","USD","DUXXXXXXX"]]}
+{"seq":1141,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","ExcessLiquidity","948698.63","USD","DUXXXXXXX"]]}
+{"seq":1142,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","ExchangeRate","1.00","BASE","DUXXXXXXX"]]}
+{"seq":1143,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","ExchangeRate","1.00","USD","DUXXXXXXX"]]}
+{"seq":1144,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FullAvailableFunds","947355.59","USD","DUXXXXXXX"]]}
+{"seq":1145,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FullExcessLiquidity","948698.63","USD","DUXXXXXXX"]]}
+{"seq":1146,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FullInitMarginReq","7840.10","USD","DUXXXXXXX"]]}
+{"seq":1147,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FullMaintMarginReq","6497.06","USD","DUXXXXXXX"]]}
+{"seq":1148,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FundValue","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1149,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FundValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1150,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FutureOptionValue","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1151,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FutureOptionValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1152,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FuturesPNL","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1153,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FuturesPNL","0.00","USD","DUXXXXXXX"]]}
+{"seq":1154,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FxCashBalance","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1155,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","FxCashBalance","0.00","USD","DUXXXXXXX"]]}
+{"seq":1156,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","GrossPositionValue","68411.48","USD","DUXXXXXXX"]]}
+{"seq":1157,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","Guarantee","0.00","USD","DUXXXXXXX"]]}
+{"seq":1158,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","IncentiveCoupons","0.00","USD","DUXXXXXXX"]]}
+{"seq":1159,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","IndianStockHaircut","0.00","USD","DUXXXXXXX"]]}
+{"seq":1160,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","InitMarginReq","7840.10","USD","DUXXXXXXX"]]}
+{"seq":1161,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","IssuerOptionValue","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1162,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","IssuerOptionValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1163,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","Leverage-S","0.07","","DUXXXXXXX"]]}
+{"seq":1164,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","LookAheadAvailableFunds","947355.59","USD","DUXXXXXXX"]]}
+{"seq":1165,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","LookAheadExcessLiquidity","948698.63","USD","DUXXXXXXX"]]}
+{"seq":1166,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","LookAheadInitMarginReq","7840.10","USD","DUXXXXXXX"]]}
+{"seq":1167,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","LookAheadMaintMarginReq","6497.06","USD","DUXXXXXXX"]]}
+{"seq":1168,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","LookAheadNextChange","1791379800","","DUXXXXXXX"]]}
+{"seq":1169,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","MaintMarginReq","6497.06","USD","DUXXXXXXX"]]}
+{"seq":1170,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","MoneyMarketFundValue","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1171,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","MoneyMarketFundValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1172,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","MutualFundValue","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1173,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","MutualFundValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1174,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","NLVAndMarginInReview","false","","DUXXXXXXX"]]}
+{"seq":1175,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","NetDividend","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1176,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","NetDividend","0.00","USD","DUXXXXXXX"]]}
+{"seq":1177,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","NetLiquidation","955195.69","USD","DUXXXXXXX"]]}
+{"seq":1178,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","NetLiquidationByCurrency","955195.6921","BASE","DUXXXXXXX"]]}
+{"seq":1179,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","NetLiquidationByCurrency","955195.6921","USD","DUXXXXXXX"]]}
+{"seq":1180,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","NetLiquidationUncertainty","0.00","USD","DUXXXXXXX"]]}
+{"seq":1181,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","OptionMarketValue","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1182,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","OptionMarketValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1183,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","PASharesValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1184,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","PhysicalCertificateValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1185,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","PostExpirationExcess","0.00","USD","DUXXXXXXX"]]}
+{"seq":1186,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","PostExpirationMargin","0.00","USD","DUXXXXXXX"]]}
+{"seq":1187,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","RealCurrency","BASE","BASE","DUXXXXXXX"]]}
+{"seq":1188,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","RealCurrency","USD","USD","DUXXXXXXX"]]}
+{"seq":1189,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","RealizedPnL","-2.17","BASE","DUXXXXXXX"]]}
+{"seq":1190,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","RealizedPnL","-2.17","USD","DUXXXXXXX"]]}
+{"seq":1191,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","SegmentTitle-S","CFD","","DUXXXXXXX"]]}
+{"seq":1192,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","SettledCashByDate","20261007:896958.58309053;20261008:896958.42309053","","DUXXXXXXX"]]}
+{"seq":1193,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","SettledCashByDate-S","20261007:896958.58309053;20261008:896958.42309053","","DUXXXXXXX"]]}
+{"seq":1194,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","StockMarketValue","57811.48","BASE","DUXXXXXXX"]]}
+{"seq":1195,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","StockMarketValue","57811.48","USD","DUXXXXXXX"]]}
+{"seq":1196,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","TBillValue","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1197,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","TBillValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1198,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","TBondValue","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1199,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","TBondValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1200,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","TotalCashBalance","896958.4231","BASE","DUXXXXXXX"]]}
+{"seq":1201,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","TotalCashBalance","896958.4231","USD","DUXXXXXXX"]]}
+{"seq":1202,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","TotalCashValue","896958.42","USD","DUXXXXXXX"]]}
+{"seq":1203,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","TotalDebitCardPendingCharges","0.00","USD","DUXXXXXXX"]]}
+{"seq":1204,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","TradingType-S","STKNOPT","","DUXXXXXXX"]]}
+{"seq":1205,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","UnrealizedPnL","-1019.03","BASE","DUXXXXXXX"]]}
+{"seq":1206,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","UnrealizedPnL","-1019.03","USD","DUXXXXXXX"]]}
+{"seq":1207,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","WarrantValue","0.00","BASE","DUXXXXXXX"]]}
+{"seq":1208,"leg":"api_in","msg_name":"ACCT_VALUE","callbacks":[["updateAccountValue","WarrantValue","0.00","USD","DUXXXXXXX"]]}
+{"seq":1209,"leg":"api_in","msg_name":"PORTFOLIO_VALUE","callbacks":[["updatePortfolio",{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"NASDAQ","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},"0",335.1000061,0.0,0.0,0,-2.17,"DUXXXXXXX"]]}
+{"seq":1210,"leg":"api_in","msg_name":"ACCT_UPDATE_TIME","callbacks":[["updateAccountTime","11:49"]]}
+{"seq":1211,"leg":"api_in","msg_name":"PORTFOLIO_VALUE","callbacks":[["updatePortfolio",{"conId":4726868,"symbol":"AXTI","secType":"STK","strike":0.0,"exchange":"NASDAQ","currency":"USD","localSymbol":"AXTI","tradingClass":"NMS"},"1",81.0699997,81.07,44.8,36.27,0.0,"DUXXXXXXX"]]}
+{"seq":1212,"leg":"api_in","msg_name":"ACCT_UPDATE_TIME","callbacks":[["updateAccountTime","11:49"]]}
+{"seq":1213,"leg":"api_in","msg_name":"PORTFOLIO_VALUE","callbacks":[["updatePortfolio",{"conId":272093,"symbol":"MSFT","secType":"STK","strike":0.0,"exchange":"NASDAQ","currency":"USD","localSymbol":"MSFT","tradingClass":"NMS"},"-10",530.0,-5300.0,397.54161,-1324.58,0.0,"DUXXXXXXX"]]}
+{"seq":1214,"leg":"api_in","msg_name":"ACCT_UPDATE_TIME","callbacks":[["updateAccountTime","11:49"]]}
+{"seq":1215,"leg":"api_in","msg_name":"PORTFOLIO_VALUE","callbacks":[["updatePortfolio",{"conId":756733,"symbol":"SPY","secType":"STK","strike":0.0,"exchange":"ARCA","currency":"USD","localSymbol":"SPY","tradingClass":"SPY"},"81",778.15319825,63030.41,774.82864445,269.29,0.0,"DUXXXXXXX"]]}
+{"seq":1216,"leg":"api_in","msg_name":"ACCT_UPDATE_TIME","callbacks":[["updateAccountTime","11:49"]]}
+{"seq":1217,"leg":"api_in","msg_name":"ACCT_UPDATE_TIME","callbacks":[["updateAccountTime","11:49"]]}
+{"seq":1218,"leg":"api_in","msg_name":"ACCT_DOWNLOAD_END","callbacks":[["accountDownloadEnd","DUXXXXXXX"]]}
+{"seq":1262,"leg":"api_out","msg_name":"REQ_ACCT_DATA","request":{"acctCode":"DUXXXXXXX"}}
+{"seq":1263,"leg":"api_out","msg_name":"REQ_PNL","request":{"reqId":9830,"account":"DUXXXXXXX"}}
+{"seq":1264,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",-1,null,2100,"API client has been unsubscribed from account data.",""]]}
+{"seq":1265,"leg":"api_out","msg_name":"REQ_PNL_SINGLE","request":{"reqId":9831,"account":"DUXXXXXXX","conId":265598}}
+{"seq":1266,"leg":"api_in","msg_name":"PNL","callbacks":[["pnl",9830,-75.88094175000879,269.2888577999911,0.0]]}
+{"seq":1432,"leg":"api_in","msg_name":"PNL","callbacks":[["pnl",9830,-85.09670346679775,-1016.0839039167979,-2.16690945]]}
+{"seq":1433,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",9831,null,2150,"Invalid position trade derived value",""]]}
+{"seq":1434,"leg":"api_in","msg_name":"PNL_SINGLE","callbacks":[["pnlSingle",9831,"0",-2.1669,"MAX",-2.16690945,0.0]]}
+{"seq":1442,"leg":"api_in","msg_name":"PNL","callbacks":[["pnl",9830,-84.28591245117275,-1015.2731129011729,-2.16690945]]}
+{"seq":1465,"leg":"api_in","msg_name":"PNL","callbacks":[["pnl",9830,-85.09670346679775,-1016.0839039167979,-2.16690945]]}
+{"seq":1473,"leg":"api_in","msg_name":"PNL","callbacks":[["pnl",9830,-84.28591245117275,-1015.2731129011729,-2.16690945]]}
+{"seq":1481,"leg":"api_in","msg_name":"PNL","callbacks":[["pnl",9830,-83.47512143554775,-1014.4623218855479,-2.16690945]]}
+{"seq":1525,"leg":"api_out","msg_name":"CANCEL_PNL","request":{"reqId":9830}}
+{"seq":1526,"leg":"api_out","msg_name":"CANCEL_PNL_SINGLE","request":{"reqId":9831}}
+{"seq":1527,"leg":"api_out","msg_name":"REQ_OPEN_ORDERS","request":{}}
+{"seq":1528,"leg":"api_in","msg_name":"OPEN_ORDER","callbacks":[["openOrder",113,{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},{"softDollarTier":{},"orderId":113,"clientId":198,"permId":1525027866,"action":"BUY","totalQuantity":"1","orderType":"LMT","lmtPrice":233.54,"auxPrice":0.0,"tif":"DAY","ocaType":3,"orderRef":"d1work","rule80A":"0","volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"0","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":1},{"status":"PreSubmitted"}]]}
+{"seq":1529,"leg":"api_in","msg_name":"ORDER_STATUS","callbacks":[["orderStatus",113,"PreSubmitted","0","1",0.0,1525027866,0,0.0,198,"",0.0]]}
+{"seq":1530,"leg":"api_in","msg_name":"OPEN_ORDER_END","callbacks":[["openOrderEnd"]]}
+{"seq":1531,"leg":"api_out","msg_name":"REQ_ALL_OPEN_ORDERS","request":{}}
+{"seq":1532,"leg":"api_in","msg_name":"OPEN_ORDER","callbacks":[["openOrder",113,{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},{"softDollarTier":{},"orderId":113,"clientId":198,"permId":1525027866,"action":"BUY","totalQuantity":"1","orderType":"LMT","lmtPrice":233.54,"auxPrice":0.0,"tif":"DAY","ocaType":3,"orderRef":"d1work","rule80A":"0","volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"0","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":1},{"status":"PreSubmitted"}]]}
+{"seq":1533,"leg":"api_in","msg_name":"ORDER_STATUS","callbacks":[["orderStatus",113,"PreSubmitted","0","1",0.0,1525027866,0,0.0,198,"",0.0]]}
+{"seq":1534,"leg":"api_in","msg_name":"OPEN_ORDER_END","callbacks":[["openOrderEnd"]]}
+{"seq":1535,"leg":"api_out","msg_name":"REQ_COMPLETED_ORDERS","request":{}}
+{"seq":1589,"leg":"api_in","msg_name":"COMPLETED_ORDER","callbacks":[["completedOrder",{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},{"softDollarTier":{},"permId":1525027862,"action":"BUY","totalQuantity":"1","orderType":"MTL","lmtPrice":0.0,"auxPrice":0.0,"tif":"DAY","ocaType":3,"orderRef":"fourleg","rule80A":"0","volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"0","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":1},{"status":"Cancelled"}]]}
+{"seq":1590,"leg":"api_in","msg_name":"COMPLETED_ORDER","callbacks":[["completedOrder",{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},{"softDollarTier":{},"permId":1525027863,"action":"BUY","totalQuantity":"1","orderType":"MTL","lmtPrice":0.0,"auxPrice":0.0,"tif":"DAY","ocaType":3,"orderRef":"fourleg","rule80A":"0","volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"0","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":1},{"status":"Cancelled"}]]}
+{"seq":1591,"leg":"api_in","msg_name":"COMPLETED_ORDER","callbacks":[["completedOrder",{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},{"softDollarTier":{},"permId":1525027860,"action":"BUY","totalQuantity":"1","orderType":"STP","lmtPrice":0.0,"auxPrice":366.99,"tif":"DAY","ocaType":3,"orderRef":"fourleg","rule80A":"0","trailStopPrice":366.99,"volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"0","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":0},{"status":"Cancelled"}]]}
+{"seq":1592,"leg":"api_in","msg_name":"COMPLETED_ORDER","callbacks":[["completedOrder",{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},{"softDollarTier":{},"permId":1525027861,"action":"BUY","totalQuantity":"1","orderType":"STP","lmtPrice":0.0,"auxPrice":350.31,"tif":"DAY","ocaType":3,"orderRef":"fourleg","rule80A":"0","trailStopPrice":350.31,"volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"0","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":0},{"status":"Cancelled"}]]}
+{"seq":1593,"leg":"api_in","msg_name":"COMPLETED_ORDER","callbacks":[["completedOrder",{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},{"softDollarTier":{},"permId":1525027858,"action":"SELL","totalQuantity":"1","orderType":"STP","lmtPrice":0.0,"auxPrice":300.27,"tif":"DAY","ocaType":3,"orderRef":"fourleg","rule80A":"0","trailStopPrice":300.27,"volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"0","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":0},{"status":"Cancelled"}]]}
+{"seq":1594,"leg":"api_in","msg_name":"COMPLETED_ORDER","callbacks":[["completedOrder",{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},{"softDollarTier":{},"permId":1525027859,"action":"SELL","totalQuantity":"1","orderType":"STP","lmtPrice":0.0,"auxPrice":316.95,"tif":"DAY","ocaType":3,"orderRef":"fourleg","rule80A":"0","trailStopPrice":316.95,"volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"0","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":0},{"status":"Cancelled"}]]}
+{"seq":1595,"leg":"api_in","msg_name":"COMPLETED_ORDER","callbacks":[["completedOrder",{"conId":8314,"symbol":"IBM","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"IBM","tradingClass":"IBM"},{"softDollarTier":{},"permId":1525027886,"action":"BUY","totalQuantity":"1","orderType":"RPI","lmtPrice":198.9,"auxPrice":0.01,"tif":"DAY","ocaType":3,"orderRef":"fourleg","rule80A":"0","volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"0","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":1},{"status":"Cancelled"}]]}
+{"seq":1596,"leg":"api_in","msg_name":"COMPLETED_ORDER","callbacks":[["completedOrder",{"conId":8314,"symbol":"IBM","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"IBM","tradingClass":"IBM"},{"softDollarTier":{},"permId":1525027885,"action":"BUY","totalQuantity":"1","orderType":"RPI","lmtPrice":198.9,"auxPrice":0.0,"tif":"DAY","ocaType":3,"orderRef":"fourleg","rule80A":"0","volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"0","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":1},{"status":"Cancelled"}]]}
+{"seq":1597,"leg":"api_in","msg_name":"COMPLETED_ORDER","callbacks":[["completedOrder",{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},{"softDollarTier":{},"permId":1525027864,"action":"BUY","totalQuantity":"0","orderType":"LMT","lmtPrice":335.38,"auxPrice":0.0,"tif":"DAY","ocaType":3,"orderRef":"fourleg","outsideRth":true,"rule80A":"0","volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"1","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":1},{"status":"Filled"}]]}
+{"seq":1598,"leg":"api_in","msg_name":"COMPLETED_ORDER","callbacks":[["completedOrder",{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"SMART","currency":"USD","localSymbol":"AAPL","tradingClass":"NMS"},{"softDollarTier":{},"permId":1525027865,"action":"SELL","totalQuantity":"0","orderType":"LMT","lmtPrice":335.02,"auxPrice":0.0,"tif":"DAY","ocaType":3,"orderRef":"fourleg","outsideRth":true,"rule80A":"0","volatilityType":0,"deltaNeutralOrderType":"None","referencePriceType":0,"account":"DUXXXXXXX","clearingIntent":"IB","adjustedOrderType":"None","dontUseAutoPriceForHedge":true,"filledQuantity":"1","shareholder":"Not an insider or substantial shareholder","usePriceMgmtAlgo":1},{"status":"Filled"}]]}
+{"seq":1599,"leg":"api_in","msg_name":"COMPLETED_ORDERS_END","callbacks":[["completedOrdersEnd"]]}
+{"seq":1600,"leg":"api_out","msg_name":"REQ_EXECUTIONS","request":{"reqId":9470,"executionFilter":{"clientId":0}}}
+{"seq":1601,"leg":"api_in","msg_name":"EXECUTION_DATA","callbacks":[["execDetails",9470,{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"DRCTEDGE","currency":"USD","localSymbol":"AAPL"},{"execId":"0000e0d5.6ac60ac1.01.01","time":"20261007 05:46:04 US/Eastern","acctNumber":"DUXXXXXXX","exchange":"DRCTEDGE","side":"BOT","shares":"1","price":335.28,"permId":1525027864,"clientId":198,"orderId":111,"cumQty":"1","avgPrice":335.28,"orderRef":"fourleg","lastLiquidity":2}]]}
+{"seq":1602,"leg":"api_in","msg_name":"EXECUTION_DATA","callbacks":[["execDetails",9470,{"conId":265598,"symbol":"AAPL","secType":"STK","strike":0.0,"exchange":"DRCTEDGE","currency":"USD","localSymbol":"AAPL"},{"execId":"0000e0d5.6ac60ac2.01.01","time":"20261007 05:46:12 US/Eastern","acctNumber":"DUXXXXXXX","exchange":"DRCTEDGE","side":"SLD","shares":"1","price":335.12,"permId":1525027865,"clientId":198,"orderId":112,"cumQty":"1","avgPrice":335.12,"orderRef":"fourleg","lastLiquidity":2}]]}
+{"seq":1603,"leg":"api_in","msg_name":"COMMISSION_REPORT","callbacks":[["commissionAndFeesReport",{"execId":"0000e0d5.6ac60ac1.01.01","commissionAndFees":1.000003,"currency":"USD"}]]}
+{"seq":1604,"leg":"api_in","msg_name":"COMMISSION_REPORT","callbacks":[["commissionAndFeesReport",{"execId":"0000e0d5.6ac60ac2.01.01","commissionAndFees":1.006906,"currency":"USD","realizedPNL":-2.166909}]]}
+{"seq":1605,"leg":"api_in","msg_name":"EXECUTION_DATA_END","callbacks":[["execDetailsEnd",9470]]}
+{"seq":1613,"leg":"api_out","msg_name":"CANCEL_ORDER","request":{"orderId":113,"orderCancel":{}}}
+{"seq":1621,"leg":"api_in","msg_name":"ORDER_STATUS","callbacks":[["orderStatus",113,"Cancelled","0","1",0.0,1525027866,0,0.0,198,"",0.0]]}
+{"seq":1622,"leg":"api_in","msg_name":"ERR_MSG","callbacks":[["error",113,null,202,"Order Canceled - reason:",""]]}

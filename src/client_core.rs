@@ -408,9 +408,11 @@ pub struct AccountStream {
 /// The reference's answer to an unsubscribe from account updates (ibx#475).
 pub const ACCOUNT_UNSUBSCRIBED: (i64, &str) = (2100, "API client has been unsubscribed from account data.");
 
-/// A row time as update_account_time carries it: `HH:mm`, in US/Eastern
-/// like the execution times (UTC when the zone database has none). Empty
-/// before any row time.
+/// A row time as update_account_time carries it: `HH:mm` in the zone of
+/// the machine, as the reference reads it with a calendar of its default
+/// zone (`jfix.l.a()@25-30`, `jutils.d1.e(int)`; captured 07/10/2026 on a
+/// machine in Europe/Paris: 11:49 for a row of 09:49 UTC). Empty before any
+/// row time.
 pub fn format_account_time(unix_secs: i64) -> String {
     if unix_secs <= 0 {
         return String::new();
@@ -418,8 +420,7 @@ pub fn format_account_time(unix_secs: i64) -> String {
     let Ok(ts) = jiff::Timestamp::from_second(unix_secs) else {
         return String::new();
     };
-    let tz = jiff::tz::TimeZone::get("US/Eastern").unwrap_or(jiff::tz::TimeZone::UTC);
-    ts.to_zoned(tz).strftime("%H:%M").to_string()
+    ts.to_zoned(crate::gateway::machine_tz()).strftime("%H:%M").to_string()
 }
 
 /// The keys of a ledger row in an account summary and the tag of each
@@ -637,11 +638,59 @@ impl PositionsSubscription {
     }
 }
 
+/// The rows of a reqPositions snapshot in the reference's order (ibx#487):
+/// it collects the positions in a hash set and sends them as the set gives
+/// them (`jextend.Y.b`, a `HashSet<ia.ca>`; `Y.b()`), so the order is the
+/// set's buckets:
+/// - hash of a row: `conId ^ Objects.hash(null, spec)` = `conId ^ (961 +
+///   spec)`, the spec of a plain row being `account.hashCode()`
+///   (`ia.ca.hashCode()@0-26`, `AccountSpec.hashCode()`);
+/// - bucket: `(h ^ h >>> 16) & (capacity - 1)`, the capacity 16 doubled
+///   while the rows are more than three quarters of it;
+/// - the set also holds the rows of the account's model (`Core`), dropped
+///   when sent: they count for the capacity. They are taken as one per
+///   held position, as the logon's position frames of 07/10/2026 (four
+///   plain rows, three model rows).
+///
+/// Rows of one bucket keep their order here (by conId), where the set has
+/// its insertion order. Captured 07/10/2026: AXTI, MSFT, AAPL, SPY.
+fn java_position_set_order(rows: &mut [PositionInfo], account: &str) {
+    let spec = java_string_hash(account) as u32;
+    let entries = rows.len() + rows.iter().filter(|p| p.position_fixed != 0).count();
+    let mut capacity: usize = 16;
+    while entries * 4 > capacity * 3 {
+        capacity *= 2;
+    }
+    let bucket = |con_id: i64| {
+        let h = (con_id as u32) ^ 961u32.wrapping_add(spec);
+        ((h ^ (h >> 16)) as usize) & (capacity - 1)
+    };
+    rows.sort_by_key(|p| bucket(p.con_id));
+}
+
+#[cfg(test)]
+mod position_order_tests {
+    use super::*;
+
+    // ibx#487: the positions of the capture of 07/10/2026 (AAPL 0, MSFT,
+    // SPY, AXTI held) in the order of the reference's hash set. With the
+    // account of the capture the rule gives the captured order (AXTI, MSFT,
+    // AAPL, SPY; checked on the recording machine, the id is not kept
+    // here); with this account it gives SPY, MSFT, AAPL, AXTI.
+    #[test]
+    fn positions_go_in_the_order_of_the_reference_set() {
+        let row = |con_id: i64, qty: i64| PositionInfo { con_id, position_fixed: qty * QTY_SCALE, ..Default::default() };
+        let mut rows = vec![row(265598, 0), row(272093, -10), row(756733, 81), row(4726868, 1)];
+        java_position_set_order(&mut rows, "DU0000001");
+        assert_eq!(rows.iter().map(|p| p.con_id).collect::<Vec<_>>(), [756733, 272093, 265598, 4726868]);
+    }
+}
+
 /// The next rows of a positions subscription (ibx#477 ibx#476): the snapshot
 /// and the end once the position data is in; then one row per change of a
 /// position or its average cost. Error 2151 when the data is not in after
 /// 30 s.
-fn advance_positions(sub: &mut PositionsSubscription, shared: &SharedState) -> Option<PositionsBatch> {
+fn advance_positions(sub: &mut PositionsSubscription, shared: &SharedState, account: Option<&str>) -> Option<PositionsBatch> {
     if !sub.snapshot_sent {
         if !shared.portfolio.account_download_complete() {
             if sub.requested_at.elapsed() >= POSITIONS_WAIT {
@@ -655,6 +704,9 @@ fn advance_positions(sub: &mut PositionsSubscription, shared: &SharedState) -> O
         sub.generation = shared.portfolio.position_generation();
         let mut rows = shared.portfolio.position_infos();
         rows.sort_by_key(|p| p.con_id);
+        if let Some(account) = account {
+            java_position_set_order(&mut rows, account);
+        }
         sub.sent = rows.iter().map(|p| (p.con_id, (p.position_fixed, p.avg_cost))).collect();
         sub.snapshot_sent = true;
         return Some(PositionsBatch { rows, end: true, error: None });
@@ -2674,10 +2726,10 @@ impl ClientCore {
     /// position data is in; then one row each time a position or its
     /// average cost changes. When the data is not in after 30 s: error 2151
     /// and no end, and the request ends.
-    pub fn prepare_positions(&self, shared: &SharedState) -> Option<PositionsBatch> {
+    pub fn prepare_positions(&self, shared: &SharedState, account: &str) -> Option<PositionsBatch> {
         let mut guard = self.positions_sub.lock().unwrap();
         let sub = guard.as_mut()?;
-        let batch = advance_positions(sub, shared);
+        let batch = advance_positions(sub, shared, Some(account));
         if batch.as_ref().is_some_and(|b| b.error.is_some()) {
             *guard = None;
         }
@@ -2707,7 +2759,7 @@ impl ClientCore {
     pub fn prepare_positions_multi(&self, shared: &SharedState) -> Vec<(i64, String, String, PositionsBatch)> {
         let mut subs = self.positions_multi.lock().unwrap();
         let mut out = Vec::new();
-        subs.retain_mut(|m| match advance_positions(&mut m.sub, shared) {
+        subs.retain_mut(|m| match advance_positions(&mut m.sub, shared, None) {
             Some(batch) => {
                 let expired = batch.error.is_some();
                 out.push((m.req_id, m.account.clone(), m.model_code.clone(), batch));
@@ -3890,7 +3942,7 @@ impl ClientCore {
     /// the server sent, with its text and currency, then the end. Later
     /// batches carry the values that changed, and no end. `None` while not
     /// subscribed or before the image is complete.
-    pub fn prepare_account_updates(&self, shared: &SharedState) -> Option<AccountUpdateBatch> {
+    pub fn prepare_account_updates(&self, shared: &SharedState, account: &str) -> Option<AccountUpdateBatch> {
         if !self.account_updates_subscribed.load(Ordering::Acquire) {
             return None;
         }
@@ -3909,12 +3961,20 @@ impl ClientCore {
                     stream.sent.insert(id, row.value.clone());
                     fields.push(AccountFieldUpdate {
                         key: row.key.clone(),
-                        value: row.value.clone(),
+                        // The ledger's account row is the subscription's
+                        // account (`jaccount.X`, column 23).
+                        value: if row.key == "AccountOrGroup" { account.to_string() } else { row.value.clone() },
                         currency: row.currency.clone(),
                     });
                 }
             }
             stream.generation = store.generation;
+        }
+        // The image is the reference's cached values in the order of their
+        // map, keyed by key, "!" and currency (`trader.cm.G`, a TreeMap;
+        // `jextend.dK.a(String, bl)@40-88`; captured 07/10/2026).
+        if first {
+            fields.sort_by_cached_key(|f| format!("{}!{}", f.key, f.currency));
         }
         stream.image_pending = false;
         Some(AccountUpdateBatch { fields, time: format_account_time(time_secs), download_end: first })
@@ -3929,7 +3989,11 @@ impl ClientCore {
             return Vec::new();
         }
 
-        let current = shared.portfolio.position_infos();
+        // In the order the server's portfolio rows first came, as the
+        // reference's image (captured 07/10/2026: the rows of the portfolio
+        // frame, AAPL, AXTI, MSFT, SPY); a position with no row yet last.
+        let mut current = shared.portfolio.position_infos();
+        current.sort_by_key(|p| (p.portfolio_seq == 0, p.portfolio_seq, p.con_id));
         let mut prev_guard = self.last_portfolio.lock().unwrap();
         let is_first = prev_guard.is_none();
 

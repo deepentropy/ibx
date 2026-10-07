@@ -32,7 +32,7 @@ impl EClient {
 
     /// Position rows of a running req_positions (ibx#477).
     pub(crate) fn dispatch_positions(&self, wrapper: &mut impl Wrapper) {
-        let Some(batch) = self.core.prepare_positions(&self.shared) else { return };
+        let Some(batch) = self.core.prepare_positions(&self.shared, &self.account_id) else { return };
         for pi in &batch.rows {
             let ac = self.core.position_contract(pi.con_id, &self.shared);
             let c = Contract {

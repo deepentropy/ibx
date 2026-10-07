@@ -53,6 +53,8 @@ it always comes after the `fix_in` that caused it.
 | `20261005` | RTH | b2_generic: generic ticks (AAPL with sixteen of them, SPY with mdoff, an invalid list, EUR.USD with 233 on the cash farm, MNQ with 588 on the futures farm); b2_mkt_errors: two ids on AAPL, 7203 refused (354 with type 1, with 233, 10167 and delayed data with type 3, type 1 again); b2_tbt: tick-by-tick types, past ticks, ignoreSize, EUR.USD on the cash farm, an unknown type; b2_rtbars: real-time bars shared by four requests, empty bars, the cancel of one; b2_trail: plain TRAIL orders and their trail stop prices |
 | `20261001` | RTH | global_cancel_replayed: 8 orders of earlier sessions in the logon replay (150=A 20=3 39=A), then reqAllOpenOrders, reqGlobalCancel (8 cancels tagged ALL, in the book's order) and reqAllOpenOrders of client 193 (slice: the replay's order reports and the API connection; the scenario connections in between left out) |
 
+| `20261007` | pre-open | session_start: the server frames of the auth link from the logon on (account config, the execution replay of two fills of the morning, the working order, the account and portfolio frames), then the first API client: reqPositions, reqAccountUpdates, reqPnL / reqPnLSingle, reqOpenOrders, reqAllOpenOrders, reqCompletedOrders, reqExecutions and the cancel of the working order (slice: no logon frame, heartbeats or farms; the requests the gateway made by itself before the first API record are left out) |
+
 ## Decoded API side (`<name>.api.jsonl`, ibx#487)
 
 Next to each scenario, its API messages decoded by the official client library, for the scenario replay

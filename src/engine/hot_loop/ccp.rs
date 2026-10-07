@@ -184,6 +184,7 @@ fn fill_exec_of(parsed: &std::collections::HashMap<u32, String>, exec_id: &str) 
         last_liquidity: tag(851).and_then(|s| s.parse().ok()).unwrap_or(0),
         combo: None,
         other_client: false,
+        replayed: parsed.get(&97).is_some_and(|v| v == "Y"),
     }
 }
 
@@ -1297,6 +1298,7 @@ impl CcpState {
             // The replay of the logon: the requests made since the connect
             // are answered now, with no restored-link message (ibx#251).
             if std::mem::take(&mut self.awaiting_login_replay) {
+                shared.orders.set_login_orders_end();
                 shared.orders.set_open_orders_held(false);
                 shared.notify();
             }
@@ -3546,9 +3548,14 @@ fn handle_account_end(msg: &[u8], shared: &SharedState) {
     }
 }
 
-/// Ledger tags of a `35=RL` row and the account keys the reference gives
-/// them (ibx#475). The row's currency (8002) is the key's currency.
+/// The account keys of a `35=RL` row and the ledger tag of each, in the
+/// order of the reference's table (`jaccount.X.n`, ibx#475, ibx#487). The
+/// row's currency (8002) is the key's currency. `Currency`, `AccountOrGroup`
+/// and `RealCurrency` are texts (tag ""); the insured deposit (8174) is
+/// added to CashBalance (the API setting that gives it a key of its own is
+/// off by default).
 const LEDGER_KEYS: &[(&str, &str)] = &[
+    ("", "Currency"),
     ("9806", "CashBalance"),
     ("9818", "TotalCashBalance"),
     ("6242", "AccruedCash"),
@@ -3560,6 +3567,19 @@ const LEDGER_KEYS: &[(&str, &str)] = &[
     ("6100", "UnrealizedPnL"),
     ("6099", "RealizedPnL"),
     ("9820", "ExchangeRate"),
+    ("6483", "FundValue"),
+    ("6681", "NetDividend"),
+    ("6682", "MutualFundValue"),
+    ("6683", "MoneyMarketFundValue"),
+    ("6684", "CorporateBondValue"),
+    ("6685", "TBondValue"),
+    ("6686", "TBillValue"),
+    ("6687", "WarrantValue"),
+    ("6711", "FxCashBalance"),
+    ("", "AccountOrGroup"),
+    ("", "RealCurrency"),
+    ("6924", "IssuerOptionValue"),
+    ("8406", "Cryptocurrency"),
 ];
 
 /// Rows of an account frame as (key, currency, value text), and the latest
@@ -3569,8 +3589,12 @@ const LEDGER_KEYS: &[(&str, &str)] = &[
 ///   `PNL` row ends the frame. `AddAccountCode` is skipped, and
 ///   `AccountCode` is kept only after an `AccountType` row of the same frame
 ///   (the periodic frames carry an empty one).
-/// - `35=RL`: each `LedgerList` row gives `Currency` and the ledger keys,
-///   with the row's currency (8002).
+/// - `35=RL`: each `LedgerList` row gives the keys of `LEDGER_KEYS` with
+///   the row's currency (8002): its currency as `Currency` and
+///   `RealCurrency`, the frame's account as `AccountOrGroup`, and each
+///   number the row has, written as the reference's account values (two to
+///   seven decimals; captured 07/10/2026: exchange rate `1.00`, cash
+///   balance `896958.4231`). A tag the row has not gives no row.
 pub(crate) fn parse_account_rows(text: &str) -> (Vec<(String, String, String)>, Option<i64>) {
     let mut rows = Vec::new();
     let mut time: Option<i64> = None;
@@ -3588,10 +3612,20 @@ pub(crate) fn parse_account_rows(text: &str) -> (Vec<(String, String, String)>, 
         let Some(k) = key else { return true };
         if ledger {
             if k == "LedgerList" && !currency.is_empty() {
-                rows.push(("Currency".into(), currency.into(), currency.into()));
+                // A value Java does not read as a number (`nan`) is not set.
+                let number = |tag: &str| ledger_values.iter().find(|(t, _)| *t == tag)
+                    .and_then(|(_, v)| v.parse::<f64>().ok()).filter(|v| v.is_finite());
                 for (tag, name) in LEDGER_KEYS {
-                    if let Some((_, v)) = ledger_values.iter().find(|(t, _)| t == tag) {
-                        rows.push((name.to_string(), currency.into(), v.to_string()));
+                    let text = match *name {
+                        "Currency" | "RealCurrency" => Some(currency.to_string()),
+                        // The account of the subscription: the client fills it.
+                        "AccountOrGroup" => Some(String::new()),
+                        "CashBalance" => number(tag).map(|c| c + number("8174").unwrap_or(0.0))
+                            .map(crate::client_core::java_account_value),
+                        _ => number(tag).map(crate::client_core::java_account_value),
+                    };
+                    if let Some(text) = text {
+                        rows.push((name.to_string(), currency.into(), text));
                     }
                 }
             }
@@ -3934,7 +3968,8 @@ pub(crate) fn handle_position_update(
     // average cost, which is actually the market price.
     let price_tag = |tag: u32| parsed.get(&tag)
         .and_then(|s| s.parse::<f64>().ok())
-        .map(|v| (v * PRICE_SCALE as f64) as Price)
+        // Rounded: 335.1000061 must not become 335.10000609 (ibx#487).
+        .map(|v| (v * PRICE_SCALE as f64).round() as Price)
         .unwrap_or(0);
     let avg_cost: Price = price_tag(6101);
     let market_price: Price = price_tag(6065);
@@ -6610,9 +6645,9 @@ mod tests {
         assert!(rl.contains(&row("NetLiquidationByCurrency", "USD", "953633.0601")));
         assert!(rl.contains(&row("RealizedPnL", "USD", "26.57")));
         assert!(rl.contains(&row("UnrealizedPnL", "BASE", "-791.71")));
-        assert!(rl.contains(&row("ExchangeRate", "USD", "1")));
+        assert!(rl.contains(&row("ExchangeRate", "USD", "1.00")));
+        assert!(rl.contains(&row("RealCurrency", "BASE", "BASE")));
         assert!(!rl.iter().any(|(k, _, _)| k == "LedgerList"));
-        assert_eq!(rl.iter().filter(|(_, c, _)| c == "USD").count(), 12);
     }
 
     // The periodic frame's empty AccountCode is skipped: no AccountType

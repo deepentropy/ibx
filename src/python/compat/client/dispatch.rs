@@ -94,8 +94,8 @@ impl EClient {
 
     /// Position rows of a running req_positions (ibx#477).
     pub(crate) fn dispatch_positions(&self, py: Python<'_>, shared: &Arc<SharedState>) -> PyResult<()> {
-        let Some(batch) = self.core.prepare_positions(shared) else { return Ok(()) };
         let account = self.account();
+        let Some(batch) = self.core.prepare_positions(shared, &account) else { return Ok(()) };
         for pi in &batch.rows {
             let ac = self.core.position_contract(pi.con_id, shared);
             let c_py = Py::new(py, Contract::from_api(py, &ac)?)?.into_any();
@@ -337,7 +337,7 @@ impl EClient {
             let order_id = exec.order_id;
             self.core.apply_fill_exec(&mut exec, &fill_exec, order_id);
             // An execution of another client's order: nothing for this one.
-            if fill_exec.other_client {
+            if fill_exec.other_client || fill_exec.replayed {
                 self.core.push_silent_execution(contract, exec, fill_exec.time_secs);
                 continue;
             }
@@ -386,6 +386,14 @@ impl EClient {
         // reference: no error, no status; the order status that answers the
         // engine's status request sets the state (ibx#252).
         shared.orders.drain_cancel_rejects();
+
+        // The working orders the logon replay listed are followed by the
+        // end of the list, as the Rust client (ibx#487).
+        if shared.orders.take_login_orders_end()
+            && !self.core.open_orders_listing(shared, crate::client_core::OpenOrdersRequest::Open).is_empty()
+        {
+            self.wrapper.call_method0(py, "open_order_end")?;
+        }
 
         for request in released {
             if let Err(e) = self.answer_open_orders(py, shared, request) {
@@ -891,8 +899,8 @@ impl EClient {
         // Account updates (ibx#475): values, portfolio rows each followed by
         // the account time, the time after the batch, and for the first image
         // the end, once per subscription.
-        if let Some(batch) = self.core.prepare_account_updates(shared) {
-            let account_name = self.account();
+        let account_name = self.account();
+        if let Some(batch) = self.core.prepare_account_updates(shared, &account_name) {
             for field in &batch.fields {
                 call_wrapper!(self.wrapper, py, "update_account_value", (field.key.as_str(), field.value.as_str(), field.currency.as_str(), account_name.as_str()));
             }

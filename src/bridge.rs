@@ -59,6 +59,12 @@ pub struct FillExec {
     /// `req_executions`, with no live callback and no commission report
     /// (`jextend.ba.a(dq, aQ)`: the reports go to the order's client).
     pub other_client: bool,
+    /// An execution the server gave again (97=Y: the replay of the day at
+    /// the logon, the fill-up after a reconnect): kept for
+    /// `req_executions`, with no live callback and no commission report,
+    /// as the reference's API clients get none for them (ibx#487, captured
+    /// 07/10/2026 and 30/09/2026).
+    pub replayed: bool,
 }
 
 /// The execution of a combo report (ibx#470): the reference shows the
@@ -591,6 +597,9 @@ pub struct OrderState {
     /// Set from the logon, or from a lost auth link, to the end of the order
     /// replay of the logon: open-order requests wait for the replay (ibx#251).
     open_orders_held: AtomicBool,
+    /// The order replay of the logon just ended: the client's working
+    /// orders it listed are followed by the end of the list (ibx#487).
+    login_orders_end: AtomicBool,
     /// The combo of each combo order sent this session (ibx#470).
     combo_views: Mutex<HashMap<OrderId, ComboView>>,
     /// Orders the engine dropped with no status for the client: filled
@@ -625,6 +634,7 @@ impl OrderState {
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             order_cache: Mutex::new(HashMap::new()),
             open_orders_held: AtomicBool::new(false),
+            login_orders_end: AtomicBool::new(false),
             forgotten_orders: Mutex::new(Vec::new()),
             api_order_ids: Mutex::new(HashMap::new()),
             book_seqs: Mutex::new(HashMap::new()),
@@ -676,6 +686,17 @@ impl OrderState {
     #[doc(hidden)]
     pub fn set_open_orders_held(&self, held: bool) {
         self.open_orders_held.store(held, Ordering::Release);
+    }
+
+    /// The order replay of the logon ended (ibx#487). Hot-loop side.
+    #[doc(hidden)]
+    pub fn set_login_orders_end(&self) {
+        self.login_orders_end.store(true, Ordering::Release);
+    }
+
+    /// True once after the order replay of the logon ended (ibx#487).
+    pub fn take_login_orders_end(&self) -> bool {
+        self.login_orders_end.swap(false, Ordering::AcqRel)
     }
 
     /// True while open-order requests wait for the order replay (ibx#251).
@@ -1840,7 +1861,11 @@ impl PortfolioState {
     /// no marks, does not overwrite them (ib-agent#172).
     #[doc(hidden)] pub fn set_position_marks(&self, con_id: i64, market_price: Price, market_value: Price, unrealized_pnl: Price, realized_pnl: Price) {
         let mut map = self.position_infos.lock().unwrap();
+        let next = map.values().map(|p| p.portfolio_seq).max().unwrap_or(0) + 1;
         let entry = map.entry(con_id).or_insert_with(|| PositionInfo { con_id, ..Default::default() });
+        if entry.portfolio_seq == 0 {
+            entry.portfolio_seq = next;
+        }
         entry.market_price = market_price;
         entry.market_value = market_value;
         entry.unrealized_pnl = unrealized_pnl;

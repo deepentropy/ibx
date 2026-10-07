@@ -158,7 +158,7 @@ impl EClient {
             let order_id = exec.order_id;
             self.core.apply_fill_exec(&mut exec, &fill_exec, order_id);
             // An execution of another client's order: nothing for this one.
-            if fill_exec.other_client {
+            if fill_exec.other_client || fill_exec.replayed {
                 self.core.push_silent_execution(contract, exec, fill_exec.time_secs);
                 continue;
             }
@@ -203,6 +203,15 @@ impl EClient {
             if let Some(update) = reported.get(&order_id).filter(|u| code == 201 && u.status != OrderStatus::Cancelled) {
                 self.report_order_update(wrapper, update);
             }
+        }
+
+        // The working orders of this client the logon replay listed are
+        // followed by the end of the list, as the reference's connect
+        // burst; no end when it listed none (`jextend.dL.bq()`, ibx#487).
+        if self.shared.orders.take_login_orders_end()
+            && !self.core.open_orders_listing(&self.shared, crate::client_core::OpenOrdersRequest::Open).is_empty()
+        {
+            wrapper.open_order_end();
         }
 
         // A server reject of a cancel or modify gives no callback, as the
@@ -656,7 +665,7 @@ impl EClient {
         // Account updates (ibx#475): values, portfolio rows each followed by
         // the account time, the time after the batch, and for the first image
         // the end, once per subscription.
-        if let Some(batch) = self.core.prepare_account_updates(&self.shared) {
+        if let Some(batch) = self.core.prepare_account_updates(&self.shared, &self.account_id) {
             for field in &batch.fields {
                 wrapper.update_account_value(&field.key, &field.value, &field.currency, &self.account_id);
             }

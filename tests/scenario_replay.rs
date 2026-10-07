@@ -235,29 +235,12 @@ fn account_summary_whole_answer() {
     check("20260926/account_summary", Options::default());
 }
 
-// reqAccountUpdates and accountDownloadEnd (26/09/2026, ibx#475, ibx#476):
-// the reference answers from the account it keeps since its logon, with
-// no frame; the recording does not hold that session start.
-#[test]
-#[ignore = "ibx#487: needs a recording with the session start (the account values come from the logon subscription)"]
-fn account_updates_and_download_end() {
-    check("20260926/account_updates", Options::default());
-}
-
 // reqPnL and reqPnLSingle (26/09/2026, ibx#478): the reference subscribes
 // the market data of its positions, known since its logon.
 #[test]
-#[ignore = "ibx#487: needs a recording with the session start (positions)"]
+#[ignore = "ibx#487: the P&L of the reference: its quotes, the account request of its partition, its first values (see session_start_first_client)"]
 fn pnl_and_pnl_single() {
     check("20260926b/pnl", Options::default());
-}
-
-// reqAllOpenOrders and reqPositions (02/10/2026, ibx#477): both answered
-// from the reference's state (orders and positions of the session start).
-#[test]
-#[ignore = "ibx#487: needs a recording with the session start (open orders, positions)"]
-fn open_orders_and_positions() {
-    check("20261002/b1_cleanup", Options::default());
 }
 
 // Orders of earlier sessions known from the logon replay (01/10/2026,
@@ -445,4 +428,39 @@ fn real_time_bars_shared() {
 fn plain_trail_follows_the_server() {
     let listings: Vec<u64> = [15585u64, 15768, 15964, 16182, 16349, 16522].iter().flat_map(|&s| s..=s + 5).collect();
     check("20261005/b2_trail", orders().skip_seqs(&listings));
+}
+
+// Session start (07/10/2026, ibx#487): the server frames of the logon
+// burst (the account config, the execution replay of two fills of the
+// morning, the working order, the account and portfolio frames), then the
+// first API client: the working order with the end of the list (no
+// execution and no commission report of the replayed fills), reqPositions,
+// reqAccountUpdates (the values in the order of the reference's map, the
+// ledger keys, the portfolio rows, the time in the machine's zone, the
+// end), reqOpenOrders, reqAllOpenOrders, reqExecutions and the cancel of
+// the working order.
+// Left out: the version notice 2172 (from the logon frame, which the replay
+// has not); the P&L callbacks and the account request of the P&L partition
+// (the test below); the order of the position rows, which is the order of a
+// hash set over the real account id (`session_start_position_order`).
+#[test]
+fn session_start_first_client() {
+    let core = |f: &Fields| f.iter().any(|(t, v)| *t == 6700 && v == "Core");
+    let keep = |l: &str| !(l.starts_with("error|-1|2172|") || l.starts_with("pnl|") || l.starts_with("pnlSingle|")
+        || l.starts_with("error|9831|2150|"));
+    let o = replay(&load_scenario("20261007/session_start"),
+        &Options::default().compare(&[ORDER, SUBSCRIPTION]).skip_frame(core).keep(keep));
+    if std::env::var_os("IBX_SCENARIO_DUMP").is_some() {
+        dump("20261007/session_start", &o);
+    }
+    assert_eq!(o.frame_error, None);
+    let sorted = |lines: Vec<String>| {
+        let mut lines = lines;
+        if let (Some(a), Some(b)) = (lines.iter().position(|l| l.starts_with("position|")), lines.iter().position(|l| l == "positionEnd")) {
+            lines[a..b].sort();
+        }
+        lines
+    };
+    let theirs = sorted(o.theirs.iter().map(|(_, l)| l.clone()).collect());
+    ibx::test_support::scenario::assert_same_callbacks(&sorted(o.ours.clone()), &theirs);
 }

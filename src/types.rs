@@ -2280,6 +2280,9 @@ pub struct PositionInfo {
     pub market_value: Price,     // position mark * PRICE_SCALE
     pub unrealized_pnl: Price,   // * PRICE_SCALE
     pub realized_pnl: Price,     // * PRICE_SCALE
+    /// The place of its first portfolio row among the contracts' (from 1; 0
+    /// before any): updatePortfolio rows go in this order (ibx#487).
+    pub portfolio_seq: u64,
 }
 
 /// Per-position midnight seed from 6040=143 P&L subscription.

@@ -654,7 +654,21 @@ impl Run<'_> {
                     self.out.theirs.extend(lines.map(|l| (r.seq, l)));
                 }
                 "fix_out" => self.reference_sent(&r),
-                "fix_in" => self.server_sent(&r),
+                "fix_in" => {
+                    self.server_sent(&r);
+                    // The server frames of the auth link recorded before the
+                    // first API record hold the order replay of the logon,
+                    // without the end frame of ibx's own request: it ends
+                    // with the last of them (ibx#487).
+                    let rest = &self.recs[self.at + 1..];
+                    let first_api = rest.iter().position(|p| p.leg.starts_with("api")).unwrap_or(rest.len());
+                    if r.conn == "CCP" && !self.recs[..self.at].iter().any(|p| p.leg.starts_with("api"))
+                        && !rest[..first_api].iter().any(|p| p.leg == "fix_in" && p.conn == "CCP")
+                    {
+                        self.links.shared.orders.set_login_orders_end();
+                        self.settle();
+                    }
+                }
                 _ => {}
             }
             if self.out.frame_error.is_some() {
