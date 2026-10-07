@@ -6578,6 +6578,42 @@ fn joining_a_delayed_subscription() {
     assert_eq!(seen, ["subscribe:265598"]);
 }
 
+// ibx#447 (`jextend.v.a(boolean)`, captured 07/10/2026): when the
+// contract's data is frozen its requests go on with the frozen slot,
+// marketDataType 2; a request that joins then is on the frozen slot too;
+// back on real-time data they return to the real-time slot, marketDataType
+// 1, and the frozen slot is let go.
+#[test]
+fn a_frozen_contract_moves_its_requests_to_the_frozen_slot_and_back() {
+    let (client, rx, shared) = test_client();
+    let engine = sharing_engine(rx);
+    client.req_market_data_type(2);
+    client.req_mkt_data(1, &aapl_stk(), "", false, false).unwrap();
+    shared.market.push_md_reject(crate::bridge::MdReject::Frozen { instrument: 5, frozen: 9 });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["market_data_type:1:2"]);
+    assert_eq!(client.core.req_to_instrument.lock().unwrap().get(&1), Some(&9));
+    assert!(!client.core.instrument_to_req.lock().unwrap().contains_key(&5));
+
+    client.req_mkt_data(2, &aapl_stk(), "", false, false).unwrap();
+    assert_eq!(client.core.req_to_instrument.lock().unwrap().get(&2), Some(&9), "joins the frozen slot");
+    assert_eq!(client.core.check_mdt_needed(2, true), Some(2));
+
+    shared.market.push_md_reject(crate::bridge::MdReject::Live { instrument: 9, live: 5 });
+    let mut w = RecordingWrapper::default();
+    client.process_msgs(&mut w);
+    assert_eq!(w.events, ["market_data_type:1:1", "market_data_type:2:1"]);
+    assert_eq!(client.core.instrument_to_req.lock().unwrap().get(&5), Some(&vec![1, 2]));
+    assert!(client.core.md_frozen.lock().unwrap().is_empty());
+
+    client.cancel_mkt_data(1).unwrap();
+    client.cancel_mkt_data(2).unwrap();
+    drop(client);
+    let seen = engine.join().unwrap();
+    assert_eq!(seen, ["subscribe:265598", "unsubscribe:9", "unsubscribe:5"]);
+}
+
 // ibx#444 (`jextend.s.b(boolean,boolean)`, `jextend.ba.a(...)@280`): when
 // the top of book is rejected, a request with the news tick keeps it, with
 // 2117; one without ends with 354, and the others' subscription stays.

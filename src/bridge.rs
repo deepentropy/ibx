@@ -324,6 +324,13 @@ pub enum MdReject {
     /// A request with the news tick refused once its contract was known:
     /// error 10094 with this text, nothing was sent (ibx#458).
     NewsRefused { instrument: InstrumentId, text: String },
+    /// The contract's data is frozen (ibx#447): its requests go on with
+    /// the frozen top of book of slot `frozen` (marketDataType 2).
+    Frozen { instrument: InstrumentId, frozen: InstrumentId },
+    /// The contract of the frozen slot `instrument` has real-time data
+    /// again (ibx#447): its requests go back to slot `live`
+    /// (marketDataType 1) and the frozen slot is let go.
+    Live { instrument: InstrumentId, live: InstrumentId },
 }
 
 impl MdReject {
@@ -333,7 +340,9 @@ impl MdReject {
             MdReject::Delayed { instrument }
             | MdReject::NotSubscribed { instrument, .. }
             | MdReject::NoSecurityDefinition { instrument }
-            | MdReject::NewsRefused { instrument, .. } => instrument,
+            | MdReject::NewsRefused { instrument, .. }
+            | MdReject::Frozen { instrument, .. }
+            | MdReject::Live { instrument, .. } => instrument,
         }
     }
 }

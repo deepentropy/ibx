@@ -25,8 +25,10 @@ use crate::types::*;
 /// ends well within a second of the logon.
 pub const ORDER_REPLAY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// The only market data type the engine delivers (1 = realtime, ibx#234).
+/// The market data type of real-time data (ibx#234).
 const MDT_REALTIME: i32 = 1;
+/// The market data type of frozen data (ibx#447).
+const MDT_FROZEN: i32 = 2;
 
 // ── Tick type constants matching ibapi ──
 
@@ -1114,6 +1116,9 @@ pub struct ClientCore {
     /// available", so a new request gets 10168 or goes delayed at once
     /// (ibx#444).
     pub md_delayed_known: Mutex<HashSet<i64>>,
+    /// The contracts whose data is frozen (ibx#447): real-time slot ->
+    /// frozen slot, where their requests are while it lasts.
+    pub md_frozen: Mutex<HashMap<InstrumentId, InstrumentId>>,
     /// The last request parameters of each instrument (minimum tick, BBO
     /// exchange, snapshot permissions): a request that joins gets them at
     /// once (ibx#444).
@@ -1459,6 +1464,7 @@ impl ClientCore {
             md_generic: Mutex::new(HashMap::new()),
             md_waiting: Mutex::new(Vec::new()),
             md_delayed_known: Mutex::new(HashSet::new()),
+            md_frozen: Mutex::new(HashMap::new()),
             instrument_params: Mutex::new(HashMap::new()),
             instrument_news: Mutex::new(HashMap::new()),
             md_joins: Mutex::new(Vec::new()),
@@ -1521,6 +1527,7 @@ impl ClientCore {
         self.instrument_news.lock().unwrap().clear();
         self.md_joins.lock().unwrap().clear();
         *self.md_modes.lock().unwrap() = Default::default();
+        self.md_frozen.lock().unwrap().clear();
         self.snapshot_reqs.lock().unwrap().clear();
         self.snapshot_count.store(0, Ordering::Release);
         self.reg_snapshots.lock().unwrap().clear();
@@ -2161,6 +2168,7 @@ impl ClientCore {
         }
         // No step of the contract is queued any more (ibx#446).
         shared.market.md_events.listen(instrument, false);
+        self.md_frozen.lock().unwrap().retain(|_, frozen| *frozen != instrument);
         self.instrument_params.lock().unwrap().remove(&instrument);
         self.instrument_news.lock().unwrap().remove(&instrument);
         // A delayed record that is let go loses its "delayed available"
@@ -2212,6 +2220,18 @@ impl ClientCore {
             commands.push(ControlCommand::Unsubscribe { instrument: from });
         }
         for reject in shared.market.drain_md_rejects() {
+            match reject {
+                crate::bridge::MdReject::Frozen { instrument, frozen } => {
+                    self.md_freeze(shared, instrument, frozen, &mut notices);
+                    continue;
+                }
+                crate::bridge::MdReject::Live { instrument, live } => {
+                    self.md_thaw(shared, instrument, live, &mut notices);
+                    commands.push(ControlCommand::Unsubscribe { instrument });
+                    continue;
+                }
+                _ => {}
+            }
             let (code, text, gone) = Self::md_reject_error(&reject);
             // The record keeps "not subscribed, delayed available" (ibx#444).
             if let crate::bridge::MdReject::NotSubscribed { instrument, delayed_available, .. } = &reject {
@@ -2248,6 +2268,63 @@ impl ClientCore {
             }
         }
         (notices, commands)
+    }
+
+    /// The contract of slot `live` is frozen (ibx#447): its requests go on
+    /// with the frozen top of book of slot `frozen`, as the reference's
+    /// subscriber reads the record's frozen view once frozen is confirmed
+    /// (`jextend.v.a(boolean)@36-140`): marketDataType 2 (after the request
+    /// parameters the contract kept, when the request has not had them),
+    /// then every value of the frozen view as it comes, sent again from
+    /// nothing (captured 07/10/2026).
+    fn md_freeze(&self, shared: &SharedState, live: InstrumentId, frozen: InstrumentId, notices: &mut Vec<MdNotice>) {
+        let Some(reqs) = self.instrument_to_req.lock().unwrap().remove(&live) else { return };
+        shared.market.md_events.listen(live, false);
+        let params = self.instrument_params.lock().unwrap().remove(&live);
+        if let Some(p) = params.clone() {
+            self.instrument_params.lock().unwrap().insert(frozen, p);
+        }
+        for iid in self.con_id_to_instrument.lock().unwrap().values_mut() {
+            if *iid == live { *iid = frozen; }
+        }
+        self.md_frozen.lock().unwrap().insert(live, frozen);
+        for req_id in reqs {
+            self.req_to_instrument.lock().unwrap().remove(&req_id);
+            self.md_joins.lock().unwrap().retain(|(r, _)| *r != req_id);
+            if !self.join_md_observers(shared, req_id, frozen, false, None, None) {
+                continue;
+            }
+            if let Some((min_tick, bbo_exchange, permissions)) = params.clone()
+                && self.tick_req_params_sent.lock().unwrap().insert(req_id)
+            {
+                notices.push(MdNotice::TickReqParams { req_id, min_tick, bbo_exchange, permissions });
+            }
+            self.mdt_sent.lock().unwrap().insert(req_id);
+            notices.push(MdNotice::MarketDataType { req_id, market_data_type: MDT_FROZEN });
+        }
+    }
+
+    /// The contract of the frozen slot `frozen` has real-time data again
+    /// (ibx#447): its requests go back to slot `live`, marketDataType 1,
+    /// then every value of the real-time quote (`jextend.v.a(boolean)`
+    /// false: REGULAR, then `s.e(false)`).
+    fn md_thaw(&self, shared: &SharedState, frozen: InstrumentId, live: InstrumentId, notices: &mut Vec<MdNotice>) {
+        self.md_frozen.lock().unwrap().retain(|_, f| *f != frozen);
+        let reqs = self.instrument_to_req.lock().unwrap().remove(&frozen).unwrap_or_default();
+        shared.market.md_events.listen(frozen, false);
+        if let Some(p) = self.instrument_params.lock().unwrap().remove(&frozen) {
+            self.instrument_params.lock().unwrap().entry(live).or_insert(p);
+        }
+        for iid in self.con_id_to_instrument.lock().unwrap().values_mut() {
+            if *iid == frozen { *iid = live; }
+        }
+        for req_id in reqs {
+            self.req_to_instrument.lock().unwrap().remove(&req_id);
+            self.md_joins.lock().unwrap().retain(|(r, _)| *r != req_id);
+            if self.join_md_observers(shared, req_id, live, true, None, None) {
+                notices.push(MdNotice::MarketDataType { req_id, market_data_type: MDT_REALTIME });
+            }
+        }
     }
 
     /// What the requests that joined a running subscription get at once
@@ -2727,14 +2804,13 @@ impl ClientCore {
     /// (ibx#447), which sets its modes as the reference does
     /// (`MarketDataModes`): with delayed on (3, 4, and 2 after them), a
     /// subscription the server rejects with delayed data available goes on
-    /// delayed. A value outside 1..=4 is refused with 321 under id -1, as
-    /// the reference, and changes nothing.
+    /// delayed; with frozen on (2, until 1), the requests made from then on
+    /// ask the contract's market data status and get its frozen data while
+    /// it is frozen (`md_freeze`). A value outside 1..=4 is refused with
+    /// 321 under id -1, as the reference, and changes nothing.
     pub fn set_market_data_type(&self, control_tx: &Sender<ControlCommand>, mdt: i32) -> Option<(i64, String)> {
         if !(1..=4).contains(&mdt) {
             return Some((321, "Error validating request.-'b0' : cause - Invalid market data type".to_string()));
-        }
-        if matches!(mdt, 2 | 4) {
-            log::warn!("req_market_data_type({}): no frozen subscription is sent; the frozen mode is kept (ibx#447)", mdt);
         }
         self.market_data_type.store(mdt, Ordering::Relaxed);
         self.md_modes.lock().unwrap().apply(mdt);
@@ -2809,8 +2885,11 @@ impl ClientCore {
         let mut out = Vec::new();
         for p in params {
             let permissions = p.snapshot_permissions as i64;
-            self.instrument_params.lock().unwrap().insert(p.instrument, (p.min_tick, p.bbo_exchange.clone(), permissions));
-            for req_id in self.md_requests_of(p.instrument) {
+            // The requests of a frozen contract are on its frozen slot
+            // (ibx#447).
+            let instrument = self.md_frozen.lock().unwrap().get(&p.instrument).copied().unwrap_or(p.instrument);
+            self.instrument_params.lock().unwrap().insert(instrument, (p.min_tick, p.bbo_exchange.clone(), permissions));
+            for req_id in self.md_requests_of(instrument) {
                 if self.tick_req_params_sent.lock().unwrap().insert(req_id) {
                     out.push((req_id, self.check_mdt_needed(req_id, true), p.min_tick, p.bbo_exchange.clone(), permissions));
                 }
@@ -2887,6 +2966,8 @@ impl ClientCore {
             MdReject::NoSecurityDefinition { .. } =>
                 (200, crate::engine::hot_loop::ccp::NO_SECURITY_DEFINITION.into(), true),
             MdReject::NewsRefused { text, .. } => (10094, text.clone(), true),
+            // Not errors: `take_md_rejects` moves the requests (ibx#447).
+            MdReject::Frozen { .. } | MdReject::Live { .. } => (0, String::new(), false),
         }
     }
 
@@ -2897,7 +2978,11 @@ impl ClientCore {
     /// confirmed a state that did not exist (ibx#234).
     pub fn check_mdt_needed(&self, req_id: i64, has_data: bool) -> Option<i32> {
         if has_data && self.mdt_sent.lock().unwrap().insert(req_id) {
-            Some(MDT_REALTIME)
+            // A request on the frozen slot of a frozen contract (ibx#447).
+            let frozen = self.md_frozen.lock().unwrap();
+            let on_frozen = !frozen.is_empty()
+                && self.req_to_instrument.lock().unwrap().get(&req_id).is_some_and(|i| frozen.values().any(|f| f == i));
+            Some(if on_frozen { MDT_FROZEN } else { MDT_REALTIME })
         } else {
             None
         }

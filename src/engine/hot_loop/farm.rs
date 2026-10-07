@@ -256,6 +256,27 @@ pub(crate) struct GenericEntry {
     pub(crate) refs: u32,
 }
 
+/// The market data status entry of a contract (ibx#447): the reference
+/// asks it for a request made in frozen mode, and its value tells whether
+/// the contract's data is frozen (`generictick.ad`, request code 398).
+#[derive(Debug, Clone)]
+pub(crate) struct StatusEntry {
+    pub(crate) farm_req: u32,
+    /// The slot of the contract's real-time top of book.
+    pub(crate) instrument: InstrumentId,
+    pub(crate) farm: FarmId,
+    pub(crate) con_id: String,
+    pub(crate) exchange: String,
+    pub(crate) sec_type: String,
+    /// The server tag of its ack.
+    pub(crate) tag: Option<u32>,
+    /// While the contract is frozen: the slot of its frozen top of book.
+    pub(crate) frozen: Option<InstrumentId>,
+}
+
+/// The request code of the market data status entry (ibx#447).
+pub(crate) const MARKET_DATA_STATUS: i32 = 398;
+
 /// A generic tick request of an instrument whose top of book has not gone
 /// out yet (a lookup, a round lot): it goes after it (ibx#450).
 #[derive(Debug, Clone)]
@@ -477,6 +498,13 @@ pub(crate) struct FarmState {
     pub(crate) instrument_md_reqs: Vec<(InstrumentId, Vec<u32>)>,
     /// The client's market data modes from reqMarketDataType (ibx#447).
     pub(crate) md_modes: crate::types::MarketDataModes,
+    /// The market data status entries of the contracts asked in frozen
+    /// mode (ibx#447).
+    pub(crate) status: Vec<StatusEntry>,
+    /// Frozen slots whose contract went back to real-time data away from a
+    /// farm message (its farm was lost): (frozen slot, real-time slot),
+    /// given out by `take_thawed` (ibx#447).
+    thawed: Vec<(InstrumentId, InstrumentId)>,
     /// Depth requests of the client and their entries (#452).
     pub(crate) depth_reqs: Vec<DepthReq>,
     /// The session's logon turns the user book on (`6247=demo`, as on
@@ -538,6 +566,8 @@ impl FarmState {
             snapshot_reqs: Vec::new(),
             instrument_md_reqs: Vec::new(),
             md_modes: crate::types::MarketDataModes::default(),
+            status: Vec::new(),
+            thawed: Vec::new(),
             depth_reqs: Vec::new(),
             user_book: false,
             depth_out: Vec::new(),
@@ -867,6 +897,13 @@ impl FarmState {
             return;
         }
 
+        // The market data status entry's ack (ibx#447).
+        if let Some(e) = self.status.iter_mut().find(|e| e.farm == rx_farm && e.farm_req == req_id) {
+            e.tag = Some(server_tag);
+            log::info!("Market data status ack: server_tag {} -> instrument {}", server_tag, e.instrument);
+            return;
+        }
+
         // A depth entry: its tag, price tick and size increment (#451).
         if self.depth_ack(req_id, server_tag, min_tick, parts.get(8).and_then(|v| v.parse::<f64>().ok()), shared) {
             return;
@@ -1041,7 +1078,7 @@ impl FarmState {
     /// (ibx#441), a news entry (ibx#458) or a generic tick entry. A tag of
     /// nothing known ends the reading (its block's length is not known).
     fn handle_generic_frame(
-        &mut self, msg: &[u8], sink: &mut dyn FixSink, context: &Context, shared: &SharedState,
+        &mut self, msg: &[u8], sink: &mut dyn FixSink, context: &mut Context, shared: &SharedState,
         event_tx: &Option<Sender<Event>>, hb: &mut HeartbeatState,
     ) {
         let Some(body) = find_body_after_tag(msg, b"35=G") else { return };
@@ -1051,6 +1088,8 @@ impl FarmState {
                 Some(626)
             } else if self.news.iter().any(|e| e.live && e.farm == rx_farm && e.tag == Some(tag)) {
                 Some(292)
+            } else if self.status.iter().any(|e| e.farm == rx_farm && e.tag == Some(tag)) {
+                Some(MARKET_DATA_STATUS)
             } else {
                 self.generic.iter().find(|e| e.farm == rx_farm && e.tag == Some(tag)).map(|e| e.code)
             }
@@ -1059,6 +1098,7 @@ impl FarmState {
             match code {
                 Some(626) => self.handle_exchange_map(tag, payload, sink, shared, hb),
                 Some(292) => self.handle_tick_news(tag, payload, shared, event_tx),
+                Some(MARKET_DATA_STATUS) => self.handle_md_status(tag, payload, sink, context, shared, hb),
                 Some(code) => self.handle_generic_block(tag, code, payload, context, shared),
                 None => log::warn!("Generic tick for server tag {} of no known request: dropped", tag),
             }
@@ -1070,7 +1110,7 @@ impl FarmState {
     #[cfg(test)]
     fn handle_exchange_map_frame(&mut self, msg: &[u8], sink: &mut dyn FixSink, shared: &SharedState, hb: &mut HeartbeatState) -> bool {
         let before = self.exchange_map_subs.len();
-        self.handle_generic_frame(msg, sink, &Context::new(), shared, &None, hb);
+        self.handle_generic_frame(msg, sink, &mut Context::new(), shared, &None, hb);
         self.exchange_map_subs.len() < before
     }
 
@@ -1106,6 +1146,119 @@ impl FarmState {
                 at: shared.market.md_events.position(), instrument, code, ticks,
             });
         }
+    }
+
+    /// A market data status block (ibx#447): one 32-bit value, 1 when the
+    /// contract's data is frozen (`generictick.ad.a(int,a,byte[],pa,int,
+    /// MarketDataType,a)@24-74`; captured 07/10/2026: 1 for an option
+    /// before the open, 2 for a stock in the pre-market, which is not
+    /// frozen). Frozen: the frozen top of book is asked, the bid/ask and
+    /// last pair with mode 2 and without the API source, on a slot of its
+    /// own, and the requests of the contract go on with it (marketDataType
+    /// 2). Not frozen any more: they go back to the real-time slot
+    /// (marketDataType 1); the frozen pair is cancelled when they left it.
+    fn handle_md_status(
+        &mut self, tag: u32, payload: &[u8], sink: &mut dyn FixSink, context: &mut Context, shared: &SharedState,
+        hb: &mut HeartbeatState,
+    ) {
+        let rx_farm = self.rx_farm;
+        let Some(pos) = self.status.iter().position(|e| e.farm == rx_farm && e.tag == Some(tag)) else { return };
+        let Some(value) = payload.get(..4).map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]])) else {
+            log::warn!("Market data status of server tag {} too short: {} bytes", tag, payload.len());
+            return;
+        };
+        let frozen = value == 1;
+        let (live, twin, farm) = (self.status[pos].instrument, self.status[pos].frozen, self.status[pos].farm);
+        log::info!("Market data status of instrument {}: {} ({})", live, value, if frozen { "frozen" } else { "not frozen" });
+        match (frozen, twin) {
+            (true, None) => {
+                let Some(info) = self.md_resub_info.iter().find(|(id, ..)| *id == live).cloned() else { return };
+                let Ok(con_id) = self.status[pos].con_id.parse::<i64>() else { return };
+                let Some(twin) = context.market.try_register_unresolved() else {
+                    log::error!("Instrument table full: no slot for the frozen data of con_id {}", con_id);
+                    return;
+                };
+                let (_, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, _, _) = info;
+                context.market.set_symbol(twin, symbol.clone());
+                context.market.set_routing(twin, &sec_type, &exchange);
+                context.market.set_round_lot(twin, context.market.round_lot(live));
+                shared.market.set_instrument_count(context.market.count());
+                self.status[pos].frozen = Some(twin);
+                let sub = MdSubscribe {
+                    con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, instrument: twin,
+                    mode_9887: crate::types::MarketDataModes::entry_mode(true, false), snapshot: false,
+                };
+                self.subscribe_top(&sub, farm, sink, hb);
+                // Sent again from the status when the farm comes back.
+                self.md_resub_info.retain(|(id, ..)| *id != twin);
+                shared.market.push_md_reject(crate::bridge::MdReject::Frozen { instrument: live, frozen: twin });
+            }
+            (false, Some(twin)) => {
+                self.status[pos].frozen = None;
+                shared.market.push_md_reject(crate::bridge::MdReject::Live { instrument: twin, live });
+            }
+            _ => {}
+        }
+    }
+
+    /// The status entry a top-of-book subscription of `instrument` starts
+    /// in frozen mode (ibx#447), with its message; None when the contract
+    /// has one.
+    fn start_status(&mut self, sub: &MdSubscribe, farm: FarmId) -> Option<Vec<(u32, String)>> {
+        if self.status.iter().any(|e| e.instrument == sub.instrument) {
+            return None;
+        }
+        let farm_req = self.next_md_req_id;
+        self.next_md_req_id += 1;
+        let entry = StatusEntry {
+            farm_req, instrument: sub.instrument, farm, con_id: sub.con_id.to_string(),
+            exchange: routing_exchange(&sub.exchange, &sub.sec_type).to_string(),
+            sec_type: fix_sec_type(&sub.sec_type).to_string(), tag: None, frozen: None,
+        };
+        let msg = status_message(&entry, true);
+        self.status.push(entry);
+        Some(msg)
+    }
+
+    /// The real-time slot of a frozen slot (ibx#447).
+    pub(crate) fn frozen_live(&self, frozen: InstrumentId) -> Option<InstrumentId> {
+        self.status.iter().find(|e| e.frozen == Some(frozen)).map(|e| e.instrument)
+    }
+
+    /// The frozen slot of a real-time slot whose contract is frozen
+    /// (ibx#447).
+    pub(crate) fn frozen_slot(&self, live: InstrumentId) -> Option<InstrumentId> {
+        self.status.iter().find(|e| e.instrument == live).and_then(|e| e.frozen)
+    }
+
+    /// The top of book of an instrument ended (ibx#447): its status entry
+    /// goes, with its cancel when it is on the wire, after the pair as the
+    /// reference (captured 07/10/2026).
+    pub(crate) fn stop_status(&mut self, instrument: InstrumentId) -> Vec<(FarmId, Vec<(u32, String)>)> {
+        let Some(pos) = self.status.iter().position(|e| e.instrument == instrument) else { return Vec::new() };
+        let e = self.status.remove(pos);
+        vec![(e.farm, status_message(&e, false))]
+    }
+
+    /// The status entries of a lost farm (ibx#447): they are asked again
+    /// with their top of book; a frozen contract goes back to its
+    /// real-time slot until the status says frozen again.
+    fn status_farm_lost(&mut self, farm: FarmId) {
+        let mut thawed = Vec::new();
+        self.status.retain(|e| {
+            if e.farm != farm { return true; }
+            if let Some(twin) = e.frozen {
+                thawed.push((twin, e.instrument));
+            }
+            false
+        });
+        self.thawed.extend(thawed);
+    }
+
+    /// The frozen slots left without a farm message: (frozen slot,
+    /// real-time slot).
+    pub(crate) fn take_thawed(&mut self) -> Vec<(InstrumentId, InstrumentId)> {
+        std::mem::take(&mut self.thawed)
     }
 
     fn handle_ticker_setup(&mut self, msg: &[u8], context: &mut Context) {
@@ -1408,6 +1561,17 @@ impl FarmState {
             return;
         }
         let realtime = mode_9887 == 0;
+        // In frozen mode the contract's market data status is asked first,
+        // in a message of its own, without the API source (ibx#447): the
+        // reference's frozen observer registers before the request does
+        // (`jextend.s.a(dy,ec,Set)@490-500`, `jclient.record.o.a(b_,int)`
+        // -> `o.a0()`). Its sender sometimes puts the entry after the pair,
+        // then with the API source (captured 05/10/2026 and 07/10/2026).
+        if realtime && !sub.snapshot && self.md_modes.frozen {
+            if let Some(msg) = self.start_status(sub, farm) {
+                sink.send_comp(&borrow_tags(&msg));
+            }
+        }
         let bid_ask_id = self.next_md_req_id;
         let last_id = self.next_md_req_id + 1;
         self.next_md_req_id += 2;
@@ -1445,6 +1609,8 @@ impl FarmState {
 
         let ids: Vec<String> = entries.iter().map(|(r, ..)| r.to_string()).collect();
         let mode_str = mode_9887.to_string();
+        let frozen_mode = mode_9887 == crate::types::MarketDataModes::entry_mode(true, false)
+            || mode_9887 == crate::types::MarketDataModes::entry_mode(true, true);
         let ts = chrono_free_timestamp();
         // A snapshot is asked with the snapshot action and without the
         // streaming-client mark, as the reference asks it (ibx#446).
@@ -1460,7 +1626,9 @@ impl FarmState {
             tags.push((207, exch));
             tags.push((167, sec_type));
             tags.push((264, req_type));
-            if !sub.snapshot { tags.push((6088, "Socket")); }
+            // The frozen pair is not asked by the API client's request
+            // (captured 07/10/2026: no API source on it).
+            if !sub.snapshot && !frozen_mode { tags.push((6088, "Socket")); }
             if !realtime { tags.push((9887, &mode_str)); }
             tags.push((9830, "1"));
         }
@@ -1546,6 +1714,7 @@ impl FarmState {
         // acknowledgement of its code (ibx#441).
         self.exchange_map_subs.retain(|s| s.farm != farm);
         self.generic_farm_lost(farm);
+        self.status_farm_lost(farm);
         let lost: Vec<MdEntry> = self.md_entries.iter().filter(|e| e.farm == farm).cloned().collect();
         self.md_entries.retain(|e| e.farm != farm);
         for e in &lost {
@@ -2391,6 +2560,20 @@ fn md_message_head(action: &str, n: usize) -> Vec<(u32, String)> {
     ]
 }
 
+/// The market data status entry as the reference writes it (ibx#447,
+/// captured 05/10/2026 and 07/10/2026): `262|6008|207|167|264=398`.
+fn status_message(e: &StatusEntry, subscribe: bool) -> Vec<(u32, String)> {
+    let mut msg = md_message_head(if subscribe { "1" } else { "2" }, 1);
+    msg.extend([
+        (262, e.farm_req.to_string()),
+        (6008, e.con_id.clone()),
+        (207, e.exchange.clone()),
+        (167, e.sec_type.clone()),
+        (264, MARKET_DATA_STATUS.to_string()),
+    ]);
+    msg
+}
+
 fn borrow_tags(tags: &[(u32, String)]) -> Vec<(u32, &str)> {
     tags.iter().map(|(t, v)| (*t, v.as_str())).collect()
 }
@@ -3094,7 +3277,7 @@ mod tests {
         farm.handle_subscription_ack(ack.as_bytes(), &mut sink, &mut context, &shared, &mut hb);
         let mut msg = b"8=O\x019=0035\x0135=G\x01".to_vec();
         msg.extend_from_slice(&[0x00, 0x68, 0x00, 0x00, 0x07, 0x2f, 0x08, 0x00, 0x00, 0x00, 0x03, 0x0b, 0x56, 0x6f, 0x50]);
-        farm.handle_generic_frame(&msg, &mut sink, &context, &shared, &None, &mut hb);
+        farm.handle_generic_frame(&msg, &mut sink, &mut context, &shared, &None, &mut hb);
         let got = shared.market.take_generic_ticks(u64::MAX);
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].instrument, got[0].code), (id, 236));

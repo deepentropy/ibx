@@ -3028,3 +3028,77 @@ fn api_b2_regular_hours_live() {
     assert!(w.events.iter().any(|(_, e)| e.starts_with(&format!("open {id} 756733 TRAIL ")) && !e.contains("e308")),
         "the server's stop price");
 }
+
+/// Before the open, on paper, as the gateway in its capture of 07/10/2026
+/// (an AAPL option, closed until 09:30 New York; AAPL itself trades):
+/// - type 1 on the option: marketDataType 1, bid and ask -1;
+/// - type 2 on the option: marketDataType 2 and no type 1, then the kept
+///   bid and ask;
+/// - type 2 on AAPL: marketDataType 1, real-time ticks.
+///
+/// The option is `IBX_FROZEN_CONID` (default: the AAPL 14/10/2026 332.5
+/// call of the capture). The log shows the status entry before the pair and
+/// the frozen pair after the status.
+/// Run with: cargo test --test rust_api_gt api_frozen_option_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_frozen_option_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = B2Wrapper::default();
+    let pump = |client: &EClient, w: &mut B2Wrapper, secs: u64| {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(secs) {
+            client.process_msgs(w);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    pump(&client, &mut w, 3);
+    w.events.clear();
+    w.start = Some(Instant::now());
+    let con_id = std::env::var("IBX_FROZEN_CONID").ok().and_then(|v| v.parse().ok()).unwrap_or(929914886);
+    let option = Contract {
+        con_id, symbol: "AAPL".into(), sec_type: "OPT".into(), exchange: "SMART".into(), currency: "USD".into(),
+        ..Default::default()
+    };
+    let aapl = Contract {
+        symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(),
+        ..Default::default()
+    };
+    client.req_market_data_type(1);
+    client.req_mkt_data(9701, &option, "", false, false).unwrap();
+    pump(&client, &mut w, 8);
+    client.cancel_mkt_data(9701).unwrap();
+    pump(&client, &mut w, 1);
+    client.req_market_data_type(2);
+    client.req_mkt_data(9702, &option, "", false, false).unwrap();
+    pump(&client, &mut w, 8);
+    client.cancel_mkt_data(9702).unwrap();
+    pump(&client, &mut w, 1);
+    client.req_mkt_data(9703, &aapl, "", false, false).unwrap();
+    pump(&client, &mut w, 8);
+    client.cancel_mkt_data(9703).unwrap();
+    client.req_market_data_type(1);
+    pump(&client, &mut w, 2);
+    client.disconnect();
+    for (ms, e) in &w.events {
+        println!("  {ms:>6} ms  {e}");
+    }
+    assert!(w.has("mdt 9701 1") && !w.has("mdt 9701 2"));
+    assert!(w.has("price 9701 1 -1"), "no bid on the real-time data of a closed option");
+    assert!(w.has("mdt 9702 2") && !w.has("mdt 9702 1"), "frozen data, and no real-time type before it");
+    let frozen_quote = |tt: i32| w.events.iter().any(|(_, e)| {
+        e.strip_prefix(&format!("price 9702 {tt} ")).and_then(|p| p.parse::<f64>().ok()).is_some_and(|p| p > 0.0)
+    });
+    assert!(frozen_quote(1) && frozen_quote(2), "the kept bid and ask");
+    assert!(!w.has("price 9702 1 -1"), "the real-time quote does not reach a frozen request");
+    assert!(w.has("mdt 9703 1") && !w.has("mdt 9703 2"), "AAPL is not frozen before the open");
+}

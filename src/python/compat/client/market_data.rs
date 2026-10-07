@@ -210,8 +210,9 @@ impl EClient {
     /// Set the market data type (ibx#447): 1=live, 2=frozen, 3=delayed,
     /// 4=delayed-frozen, as the Rust client. With delayed on, a
     /// subscription the server rejects goes on with delayed data (type 3,
-    /// error 10167); the frozen modes are kept but send no frozen
-    /// subscription. A value outside 1..=4 gives error 321 with id -1.
+    /// error 10167). With frozen on (2, until 1), a streaming request of a
+    /// contract whose data is frozen gets the frozen top of book (type 2).
+    /// A value outside 1..=4 gives error 321 with id -1.
     fn req_market_data_type(&self, py: Python<'_>, market_data_type: i32) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;

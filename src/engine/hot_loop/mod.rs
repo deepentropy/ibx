@@ -649,6 +649,17 @@ impl HotLoop {
         self.send_farm_messages(msgs);
         let msgs = self.farm.stop_news(instrument);
         self.send_farm_messages(msgs);
+        // Its market data status entry last (ibx#447).
+        let msgs = self.farm.stop_status(instrument);
+        self.send_farm_messages(msgs);
+    }
+
+    /// The frozen slots whose farm was lost (ibx#447): their requests go
+    /// back to the real-time slot.
+    fn flush_thawed(&mut self) {
+        for (twin, live) in self.farm.take_thawed() {
+            self.shared.market.push_md_reject(crate::bridge::MdReject::Live { instrument: twin, live });
+        }
     }
 
     /// The server tag cleaner (#292), as the reference runs it every 60 s:
@@ -1208,6 +1219,7 @@ impl HotLoop {
             //       tick-by-tick cancels that are due (ibx#404).
             let now = Instant::now();
             self.clean_server_tags(now);
+            self.flush_thawed();
             self.send_due_tbt_cancels(now);
 
             // 1b'. Farms opened on demand (#445): read, then connect,
@@ -1462,8 +1474,23 @@ impl HotLoop {
                     self.context.lot_ready.retain(|s| s.instrument != instrument);
                     self.context.md_lookups.retain(|(_, s, _)| s.instrument != instrument);
                     self.context.md_resolved.retain(|s| s.instrument != instrument);
+                    // The frozen slot of a frozen contract (ibx#447): the
+                    // frozen pair is cancelled first, then the real-time
+                    // pair and the status entry, as the reference (captured
+                    // 07/10/2026).
+                    let live = self.farm.frozen_live(instrument);
+                    // A real-time slot let go while its requests had not
+                    // moved yet: its frozen slot goes with it.
+                    if let Some(frozen) = self.farm.frozen_slot(instrument) {
+                        self.route_md_cancel(frozen);
+                        self.try_reclaim_instrument(frozen);
+                    }
                     self.route_md_cancel(instrument);
                     self.try_reclaim_instrument(instrument);
+                    if let Some(live) = live {
+                        self.route_md_cancel(live);
+                        self.try_reclaim_instrument(live);
+                    }
                 }
                 ControlCommand::SubscribeTbt { req_id, con_id, symbol, exchange, sec_type, tbt_type, number_of_ticks, ignore_size, reply_tx } => {
                     if let Some(id) = self.register_or_reject(con_id, symbol.clone(), &sec_type, &exchange, &reply_tx) {
@@ -6558,6 +6585,162 @@ mod depth_tests {
             let (ours, theirs) = replay_depth(path);
             eprintln!("{path}: {} callbacks of the reference, {} of the engine", theirs.len(), ours.len());
             assert_same_callbacks(&ours, &theirs);
+        }
+    }
+}
+
+#[cfg(test)]
+mod frozen_tests {
+    use super::*;
+    use super::news_tests::{engine, sent};
+    use crate::bridge::MdReject;
+    use crate::types::PRICE_SCALE;
+
+    const OPT: i64 = 929914886;
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// The captured status frame of the option (b4_447_frozen_option, frame
+    /// 112: server tag 128617, value 1), with another value when asked.
+    fn status_frame(value: u8) -> Vec<u8> {
+        hex(&format!("383d4f01393d303033310133353d470100480001f66904000000{value:02x}01383334393d393039314246453701"))
+    }
+
+    /// reqMarketDataType(2), then the option of the capture.
+    fn frozen_option(engine: &mut HotLoop, tx: &Sender<ControlCommand>) -> InstrumentId {
+        tx.send(ControlCommand::SetMarketDataType { market_data_type: 2 }).unwrap();
+        tx.send(ControlCommand::Subscribe {
+            con_id: OPT, symbol: "AAPL".into(), exchange: "SMART".into(), sec_type: "OPT".into(),
+            last_trade_date: "20261014".into(), strike: 332.5, right: "C".into(), multiplier: "100".into(),
+            mode_9887: 0, snapshot: false, reply_tx: None,
+        }).unwrap();
+        engine.poll_once();
+        engine.context.market.instrument_by_con_id(OPT).unwrap()
+    }
+
+    const PAIR: &str = "|6008=929914886|207=BEST|167=OPT|264=";
+
+    // ibx#447 (captured 07/10/2026, b4_447_frozen_option): in frozen mode
+    // the market data status entry goes first, without the API source, then
+    // the pair. Status 1: the frozen pair is asked with mode 2 and without
+    // the API source, on a slot of its own, and the requests are told. The
+    // captured frames give the frozen quote the client got (close 5.0, bid
+    // 4.75 x 597, ask 5.35 x 675) and leave the real-time slot with the
+    // empty quote. A cancel: the frozen pair, the real-time pair, the status
+    // entry.
+    #[test]
+    fn frozen_status_asks_the_frozen_pair_on_its_own_slot() {
+        let (mut engine, shared, mut farm_side, tx) = engine();
+        let live = frozen_option(&mut engine, &tx);
+        assert_eq!(sent(&mut farm_side), [
+            format!("35=V|263=1|146=1|262=1{PAIR}398|"),
+            format!("35=V|263=1|146=2|262=2{PAIR}442|6088=Socket|9830=1|262=3{PAIR}443|6088=Socket|9830=1|"),
+        ]);
+
+        // Frame 183: the status ack; frame 185: status 1, before the pair's acks.
+        engine.inject_farm_message(b"8=O\x019=0046\x0135=Q\x01128617,1,0.01,0,0,c7,,0,1\x018349=928EC0B4\x01");
+        assert!(shared.market.drain_tick_req_params().is_empty(), "a status ack gives no request parameters");
+        engine.inject_farm_message(&status_frame(1));
+        let frozen = engine.farm.frozen_slot(live).expect("a frozen slot");
+        assert_ne!(frozen, live);
+        assert_eq!(shared.market.drain_md_rejects(), [MdReject::Frozen { instrument: live, frozen }]);
+        assert_eq!(sent(&mut farm_side), [
+            format!("35=V|263=1|146=2|262=4{PAIR}442|9887=2|9830=1|262=5{PAIR}443|9887=2|9830=1|"),
+        ]);
+        // The same status again changes nothing.
+        engine.inject_farm_message(&status_frame(1));
+        assert!(shared.market.drain_md_rejects().is_empty() && sent(&mut farm_side).is_empty());
+
+        // Frames 194-197: the real-time pair's acks, its trade tag, its quote.
+        engine.inject_farm_message(b"8=O\x019=0046\x0135=Q\x01128612,2,0.01,0,3,c7,,1,1\x018349=36A7B14D\x01");
+        engine.inject_farm_message(b"8=O\x019=0046\x0135=Q\x01128612,3,0.01,0,3,c7,,1,1\x018349=3FCCD8EC\x01");
+        engine.inject_farm_message(b"8=O\x019=0044\x0135=L\x01929914886,0.01,128613,,1\x018349=E35764CA\x01");
+        engine.inject_farm_message(&hex("383d4f01393d303034320133353d500100a00001f66404e424000ce42c003c0c84008c00580001383334393d384133324244353101"));
+        // Frames 209-212: the frozen pair's acks (mode 2 in the fourth field), then its quote.
+        engine.inject_farm_message(b"8=O\x019=0046\x0135=Q\x01128622,4,0.01,2,3,c7,,0,1\x018349=FBF56653\x01");
+        engine.inject_farm_message(b"8=O\x019=0046\x0135=Q\x01128622,5,0.01,2,3,c7,,0,1\x018349=7335175A\x01");
+        engine.inject_farm_message(&hex("383d4f01393d303037340133353d500101a00001f66e140034006c00a400a8000001f66e1d01f4a70135288e44004c00540060000001f66e0501db2502550d02172d02a3580001383334393d314334373734313101"));
+        let q = *engine.context.market.quote(frozen);
+        assert_eq!((q.bid, q.ask, q.close), (475 * PRICE_SCALE / 100, 535 * PRICE_SCALE / 100, 5 * PRICE_SCALE));
+        assert_eq!((q.bid_size, q.ask_size), (597 * crate::types::QTY_SCALE, 675 * crate::types::QTY_SCALE));
+        let q = *engine.context.market.quote(live);
+        assert_ne!(q.bid, 475 * PRICE_SCALE / 100, "the real-time slot keeps its own quote");
+
+        // The exchange map of the pair's BBO exchange is asked at its ack
+        // (ibx#441), as for any request.
+        assert_eq!(sent(&mut farm_side), [format!("35=V|263=1|146=1|262=6{PAIR}626|6088=Socket|")]);
+
+        // The requests are on the frozen slot: its cancel ends the whole
+        // subscription (frames 239, 240 and the status entry of 242).
+        tx.send(ControlCommand::Unsubscribe { instrument: frozen }).unwrap();
+        engine.poll_once();
+        assert_eq!(sent(&mut farm_side), [
+            format!("35=V|263=2|146=2|262=4{PAIR}442|9887=2|9830=1|262=5{PAIR}443|9887=2|9830=1|"),
+            format!("35=V|263=2|146=2|262=2{PAIR}442|9830=1|262=3{PAIR}443|9830=1|"),
+            format!("35=V|263=2|146=1|262=1{PAIR}398|"),
+        ]);
+        assert!(engine.farm.status.is_empty());
+        assert_eq!(engine.context.market.con_id(live), None, "the real-time slot is freed");
+        assert_eq!(engine.context.market.con_id(frozen), None, "the frozen slot is freed");
+    }
+
+    // ibx#447: a status other than 1 is not frozen (captured 07/10/2026: 2
+    // for AAPL in the pre-market, marketDataType 1 and no frozen pair).
+    // After frozen, it sends the requests back to the real-time slot; the
+    // frozen pair is cancelled when they left its slot, and the real-time
+    // pair and the status entry stay.
+    #[test]
+    fn a_status_other_than_one_is_not_frozen() {
+        let (mut engine, shared, mut farm_side, tx) = engine();
+        let live = frozen_option(&mut engine, &tx);
+        sent(&mut farm_side);
+        engine.inject_farm_message(b"8=O\x0135=Q\x01128617,1,0.01,0,0,c7,,0,1\x01");
+        engine.inject_farm_message(&status_frame(2));
+        assert!(shared.market.drain_md_rejects().is_empty() && sent(&mut farm_side).is_empty());
+        assert_eq!(engine.farm.frozen_slot(live), None);
+
+        engine.inject_farm_message(&status_frame(1));
+        let frozen = engine.farm.frozen_slot(live).unwrap();
+        shared.market.drain_md_rejects();
+        sent(&mut farm_side);
+        engine.inject_farm_message(&status_frame(2));
+        assert_eq!(shared.market.drain_md_rejects(), [MdReject::Live { instrument: frozen, live }]);
+        assert!(sent(&mut farm_side).is_empty(), "nothing is sent until the requests left the frozen slot");
+        tx.send(ControlCommand::Unsubscribe { instrument: frozen }).unwrap();
+        engine.poll_once();
+        assert_eq!(sent(&mut farm_side), [
+            format!("35=V|263=2|146=2|262=4{PAIR}442|9887=2|9830=1|262=5{PAIR}443|9887=2|9830=1|"),
+        ]);
+        assert_eq!(engine.farm.status.len(), 1);
+        assert_eq!(engine.context.market.con_id(live), Some(OPT));
+
+        // The end of the request: the pair, then the status entry.
+        tx.send(ControlCommand::Unsubscribe { instrument: live }).unwrap();
+        engine.poll_once();
+        assert_eq!(sent(&mut farm_side), [
+            format!("35=V|263=2|146=2|262=2{PAIR}442|9830=1|262=3{PAIR}443|9830=1|"),
+            format!("35=V|263=2|146=1|262=1{PAIR}398|"),
+        ]);
+    }
+
+    // ibx#447: outside frozen mode no status entry is asked (type 1, and
+    // type 3 or 4 alone, which do not set the frozen flag).
+    #[test]
+    fn no_status_entry_outside_frozen_mode() {
+        for market_data_type in [1, 3, 4] {
+            let (mut engine, _shared, mut farm_side, tx) = engine();
+            tx.send(ControlCommand::SetMarketDataType { market_data_type }).unwrap();
+            tx.send(ControlCommand::Subscribe {
+                con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(), sec_type: "STK".into(),
+                last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+                mode_9887: 0, snapshot: false, reply_tx: None,
+            }).unwrap();
+            engine.poll_once();
+            let out = sent(&mut farm_side);
+            assert_eq!(out.len(), 1, "{out:?}");
+            assert!(!out[0].contains("264=398"), "{}", out[0]);
         }
     }
 }
