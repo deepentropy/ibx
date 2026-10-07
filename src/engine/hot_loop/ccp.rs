@@ -1034,7 +1034,7 @@ impl CcpState {
                                 self.optcalc.xml_reply(&id, &xml, ccp_conn, hb, shared);
                             }
                         }
-                        "186" => self.handle_matching_symbols_reply(msg, &parsed, shared),
+                        "186" => self.handle_matching_symbols_reply(msg, &parsed, shared, event_tx),
                         // Option chain parameters (ibx#440): the derivative
                         // answer and the chain answer.
                         "5" => {
@@ -3244,6 +3244,7 @@ impl CcpState {
         msg: &[u8],
         parsed: &std::collections::HashMap<u32, String>,
         shared: &SharedState,
+        event_tx: &Option<Sender<Event>>,
     ) {
         let echoed = parsed.get(&320).and_then(|v| v.trim().parse::<u32>().ok());
         let Some(pos) = echoed.and_then(|rid| self.pending_matching_symbols.iter().position(|p| p.0 == rid)) else {
@@ -3267,11 +3268,15 @@ impl CcpState {
         match parsed.get(&58) {
             Some(text) => shared.reference.push_historical_error(req_id, 10159, format!("{}{}", MATCHING_SYMBOLS_FAILED, text)),
             // An empty result is a legitimate answer ("no such symbol") and
-            // is delivered (ibx#228).
-            None => shared.reference.push_matching_symbols(
-                req_id,
-                crate::control::contracts::parse_matching_symbols_response(msg).unwrap_or_default(),
-            ),
+            // is delivered (ibx#228), on the event channel too (ibx#387).
+            None => {
+                let matches = crate::control::contracts::parse_matching_symbols_response(msg).unwrap_or_default();
+                let for_event = clone_for_event(event_tx, &matches);
+                shared.reference.push_matching_symbols(req_id, matches);
+                if let Some(matches) = for_event {
+                    emit(event_tx, Event::SymbolSamples { req_id, matches });
+                }
+            }
         }
         match self.matching_acked.iter().position(|id| *id == wire_id) {
             Some(i) => { self.matching_acked.swap_remove(i); }
@@ -5823,6 +5828,37 @@ mod tests {
         let delivered = shared.reference.drain_matching_symbols();
         assert_eq!(delivered[0].0, 12);
         assert!(ccp.pending_matching_symbols.is_empty());
+    }
+
+    /// The event channel gets each answer once, an empty one included, and
+    /// nothing for the pending mark or an answer with an error text
+    /// (ibx#387).
+    #[test]
+    fn matching_symbols_answers_go_to_the_event_channel() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let event_tx = Some(event_tx);
+        let mut hb = HeartbeatState::new();
+        ccp.pending_matching_symbols.extend([(1, 11), (2, 12), (3, 13)]);
+
+        let failed = crate::protocol::fix::fix_build(&[
+            (crate::protocol::fix::TAG_MSG_TYPE, "U"), (6040, "186"), (320, "3"), (58, "no service"),
+        ], 1);
+        for msg in [matching_symbols_ack("1"), matching_symbols_msg("1", &[]),
+                    matching_symbols_msg("2", &[("AAPL", "265598")]), failed] {
+            ccp.process_ccp_message(&msg, &mut None, &mut context, &shared, &event_tx, &mut hb, "DU1");
+        }
+
+        let events: Vec<String> = event_rx.try_iter().map(|e| match e {
+            Event::SymbolSamples { req_id, matches } => format!(
+                "{}:{}", req_id, matches.iter().map(|m| m.symbol.as_str()).collect::<Vec<_>>().join(","),
+            ),
+            other => panic!("only matching-symbols answers are expected: {other:?}"),
+        }).collect();
+        assert_eq!(events, ["11:", "12:AAPL"]);
+        // The same answers stay readable from the shared state.
+        assert_eq!(shared.reference.drain_matching_symbols().iter().map(|d| d.0).collect::<Vec<_>>(), [11, 12]);
+        assert_eq!(shared.reference.drain_historical_errors().iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(13, 10159)]);
     }
 
     #[test]

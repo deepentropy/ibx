@@ -97,7 +97,10 @@ pub struct ComboView {
 }
 
 /// Events emitted by the IB engine.
+///
+/// New variants may be added: match with a wildcard arm.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Event {
     /// Market data tick received. Read the latest quote via `Client::quote()`.
     Tick(InstrumentId),
@@ -125,6 +128,11 @@ pub enum Event {
     ContractDetails { req_id: ReqId, details: ContractDefinition },
     /// End of contract details for a request.
     ContractDetailsEnd(ReqId),
+    /// Matching symbols answer (ibx#387): one per answered request, an empty
+    /// list when nothing matches. A refused or failed request comes as an
+    /// error and a replaced or lost one gets no answer, so none of them
+    /// shows here.
+    SymbolSamples { req_id: ReqId, matches: Vec<SymbolMatch> },
     /// Position update.
     /// `position` is fixed-point (QTY_SCALE).
     PositionUpdate { instrument: InstrumentId, con_id: i64, position_fixed: Qty, avg_cost: Price },
