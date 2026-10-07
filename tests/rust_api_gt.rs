@@ -3029,6 +3029,57 @@ fn api_b2_regular_hours_live() {
         "the server's stop price");
 }
 
+/// On paper, as the gateway in its captures of 07/10/2026 (pre-market):
+/// AAPL with "221,232,258,460,577,586,587,595,614,619,623": the mark price
+/// (tick 37), the fundamental ratios (47), the short-term volumes (63 to
+/// 65), the slow mark price (79); "162": 321.
+/// Run with: cargo test --test rust_api_gt api_generic_rest_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn api_generic_rest_live() {
+    let _ = env_logger::try_init();
+    let config = match get_config() {
+        Some(c) => c,
+        None => panic!("IB_USERNAME / IB_PASSWORD not set: a live test fails without credentials"),
+    };
+    let client = EClient::connect(&config).expect("EClient::connect failed");
+    if !client.account_id.starts_with("DU") {
+        client.disconnect();
+        panic!("refusing to run: not a paper account");
+    }
+    let mut w = B2Wrapper::default();
+    let pump = |client: &EClient, w: &mut B2Wrapper, secs: u64| {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(secs) {
+            client.process_msgs(w);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    pump(&client, &mut w, 3);
+    w.events.clear();
+    w.start = Some(Instant::now());
+    let aapl = Contract {
+        symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(),
+        ..Default::default()
+    };
+    client.req_mkt_data(9781, &aapl, "221,232,258,460,577,586,587,595,614,619,623", false, false).unwrap();
+    pump(&client, &mut w, 12);
+    client.cancel_mkt_data(9781).unwrap();
+    client.req_mkt_data(9782, &aapl, "162", false, false).unwrap();
+    pump(&client, &mut w, 3);
+    client.disconnect();
+    for (ms, e) in &w.events {
+        if e.starts_with("error ") || [" 37 ", " 47 ", " 63 ", " 64 ", " 65 ", " 79 "].iter().any(|t| e.contains(t)) {
+            println!("  {ms:>6} ms  {}", e.chars().take(150).collect::<String>());
+        }
+    }
+    for p in ["price 9781 37 ", "string 9781 47 ", "size 9781 63 ", "size 9781 64 ", "size 9781 65 ", "price 9781 79 "] {
+        assert!(w.has(p), "no {p}");
+    }
+    assert!(w.has("error 9782 321 "));
+    assert!(!w.has("error 9781 "), "the list is accepted");
+}
+
 /// Before the open, on paper, as the gateway in its capture of 07/10/2026
 /// (an AAPL option, closed until 09:30 New York; AAPL itself trades):
 /// - type 1 on the option: marketDataType 1, bid and ask -1;

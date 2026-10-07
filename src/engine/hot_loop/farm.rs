@@ -252,6 +252,8 @@ pub(crate) struct GenericEntry {
     pub(crate) sec_type: String,
     /// The server tag of its ack.
     pub(crate) tag: Option<u32>,
+    /// The price tick of its ack.
+    pub(crate) min_tick: f64,
     /// The requests that use it.
     pub(crate) refs: u32,
 }
@@ -893,6 +895,7 @@ impl FarmState {
         // blocks.
         if let Some(e) = self.generic.iter_mut().find(|e| e.farm_req != 0 && e.farm == rx_farm && e.farm_req == req_id) {
             e.tag = Some(server_tag);
+            e.min_tick = min_tick;
             log::info!("Generic tick {} ack: server_tag {} -> instrument {}", e.code, server_tag, e.instrument);
             return;
         }
@@ -1134,11 +1137,15 @@ impl FarmState {
     /// messages.
     fn handle_generic_block(&mut self, tag: u32, code: i32, payload: &[u8], context: &Context, shared: &SharedState) {
         let rx_farm = self.rx_farm;
-        let Some(instrument) = self.generic.iter().find(|e| e.farm == rx_farm && e.tag == Some(tag)).map(|e| e.instrument) else {
+        let Some((instrument, entry_min_tick)) = self.generic.iter().find(|e| e.farm == rx_farm && e.tag == Some(tag))
+            .map(|e| (e.instrument, e.min_tick)) else {
             return;
         };
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
-        let ctx = crate::control::generic_values::DecodeCtx { min_tick: context.market.min_tick(instrument), now_ms };
+        let ctx = crate::control::generic_values::DecodeCtx {
+            min_tick: context.market.min_tick(instrument), now_ms,
+            round_lot: context.market.round_lot(instrument), entry_min_tick,
+        };
         let rec = self.generic_records.entry(instrument).or_default();
         let ticks = crate::control::generic_values::decode(code, payload, rec, ctx);
         if !ticks.is_empty() {
@@ -1423,7 +1430,7 @@ impl FarmState {
             self.generic.push(GenericEntry {
                 farm_req: 0, instrument, farm, code, con_id: con_id.to_string(),
                 exchange: gv::entry_exchange(code, sec_type, routing, primary).to_string(),
-                sec_type: fix_sec_type(sec_type).to_string(), tag: None, refs: 1,
+                sec_type: fix_sec_type(sec_type).to_string(), tag: None, min_tick: 0.0, refs: 1,
             });
             if gv::at_once(code) || confirmed {
                 let i = self.generic.len() - 1;

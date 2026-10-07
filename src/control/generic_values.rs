@@ -51,13 +51,24 @@ pub const DIVIDENDS: i32 = 456;
 /// alias 104).
 pub const HISTORICAL_VOLATILITY: i32 = 512;
 pub const FUTURES_OPEN_INTEREST: i32 = 588;
+/// Pl Price (`generictick.aw`, alias 221): the mark price, tick 37.
+pub const PL_PRICE: i32 = 232;
+/// Fundamentals (`generictick.I`, alias 47): the ratios, tick 47.
+pub const FUNDAMENTALS: i32 = 258;
+/// IPOHLMPRC (`generictick.R`): asked, its ticks (101, 102) not read yet.
+pub const IPO_PRICES: i32 = 586;
+/// Short-Term Volume X Mins (`generictick.aK`): ticks 63, 64, 65.
+pub const SHORT_TERM_VOLUME: i32 = 595;
+/// Creditman Slow Mark Price (`generictick.z`): tick 79.
+pub const SLOW_MARK_PRICE: i32 = 619;
 
 /// The ticks ibx subscribes: the others of a valid list are accepted and
 /// not sent (their decoders are not read yet).
-const SENT: [i32; 18] = [
+const SENT: [i32; 23] = [
     OPTION_VOLUME, OPTION_OPEN_INTEREST, AVERAGE_OPTION_VOLUME, IMPLIED_VOLATILITY, MISC_STATS, AUCTION,
     RT_VOLUME, SHORTABLE, TRADE_COUNT, TRADE_RATE, VOLUME_RATE, LAST_RTH_TRADE, RT_TRADE_VOLUME,
     RT_HISTORICAL_VOLATILITY, DIVIDENDS, HISTORICAL_VOLATILITY, FUTURES_OPEN_INTEREST, 104,
+    PL_PRICE, FUNDAMENTALS, IPO_PRICES, SHORT_TERM_VOLUME, SLOW_MARK_PRICE,
 ];
 
 /// The ticks whose block has a 16-bit length (`jmdclient.br.ax`).
@@ -70,7 +81,8 @@ const LONG_LENGTH: [i32; 29] = [
 const NO_LENGTH: [i32; 6] = [376, 320, 530, 532, 221, 619];
 
 /// How the length of a block of this tick is written: 1 or 2 bytes, 0
-/// when it has none (ibx does not read those).
+/// when it has none (its payload is a list of quote entries, which ends
+/// itself: `entry_list`).
 pub fn length_width(code: i32) -> usize {
     if LONG_LENGTH.contains(&code) {
         2
@@ -89,7 +101,8 @@ pub fn sent(code: i32) -> bool {
 /// Whether the tick goes with the request (`generictick.b.f()` false):
 /// the others wait for the top of book's acknowledgement.
 pub fn at_once(code: i32) -> bool {
-    matches!(code, OPTION_OPEN_INTEREST | IMPLIED_VOLATILITY | RT_VOLUME | RT_TRADE_VOLUME | DIVIDENDS | FUTURES_OPEN_INTEREST)
+    matches!(code, OPTION_OPEN_INTEREST | IMPLIED_VOLATILITY | RT_VOLUME | RT_TRADE_VOLUME | DIVIDENDS | FUTURES_OPEN_INTEREST
+        | PL_PRICE | FUNDAMENTALS | SLOW_MARK_PRICE)
 }
 
 fn one_of(sec_type: &str, set: &[&str]) -> bool {
@@ -104,7 +117,12 @@ fn one_of(sec_type: &str, set: &[&str]) -> bool {
 /// FUT); 101: those and the options (`eh.d()`: OPT, FOP, IOPT); 165, 293 to
 /// 295, 318: any contract; 225: STK, FUT, OPT; 233, 375: a contract with a
 /// volume (not CASH, not CRYPTO); 236: STK, BOND, BILL, FIXED, IOPT; 456:
-/// `eh.K()` (STK, FUT, OPT, IND, FOP, CFD, SLB); 411, 588: FUT.
+/// `eh.K()` (STK, FUT, OPT, IND, FOP, CFD, SLB); 411, 588: FUT. 232 and
+/// 619: any contract (the reference sends them when the top of book is
+/// not restricted, `jextend.s.a(dy,ec,Set)@895-997`; captured 07/10/2026 on
+/// a stock, an option and a future); 258: not CFD, FOP, FUT, IOPT, OPT,
+/// SLB, WAR (`generictick.I`; the logon's fundamentals feature is taken as
+/// on); 586: a stock; 595: any contract its list allows.
 pub fn valid_for(code: i32, sec_type: &str) -> bool {
     if one_of(sec_type, &["BAG"]) {
         return false;
@@ -119,6 +137,9 @@ pub fn valid_for(code: i32, sec_type: &str) -> bool {
         SHORTABLE => one_of(sec_type, &["STK", "BOND", "BILL", "FIXED", "IOPT"]),
         DIVIDENDS => one_of(sec_type, &["STK", "FUT", "OPT", "IND", "FOP", "CFD", "SLB"]),
         RT_HISTORICAL_VOLATILITY | FUTURES_OPEN_INTEREST => one_of(sec_type, &["FUT"]),
+        PL_PRICE | SLOW_MARK_PRICE | SHORT_TERM_VOLUME => true,
+        FUNDAMENTALS => !one_of(sec_type, &["CFD", "FOP", "FUT", "IOPT", "OPT", "SLB", "WAR"]),
+        IPO_PRICES => one_of(sec_type, &["STK"]),
         _ => false,
     }
 }
@@ -126,8 +147,12 @@ pub fn valid_for(code: i32, sec_type: &str) -> bool {
 /// The exchange of a tick's entry: the contract's (`jclient.dy.d()`, the
 /// routing exchange of its top of book), except the auction of a stock
 /// asked on SMART, which goes to its primary exchange when known
-/// (`generictick.h.b(dy)`; captured 05/10/2026: AAPL 225 on NASDAQ).
+/// (`generictick.h.b(dy)`; captured 05/10/2026: AAPL 225 on NASDAQ), and
+/// the fundamentals, always asked on `RTRSFND` (`generictick.I.b(dy)`).
 pub fn entry_exchange<'a>(code: i32, sec_type: &str, exchange: &'a str, primary: &'a str) -> &'a str {
+    if code == FUNDAMENTALS {
+        return "RTRSFND";
+    }
     if code == AUCTION && one_of(sec_type, &["STK"]) && matches!(exchange, "" | "SMART" | "BEST") && !primary.is_empty() {
         primary
     } else {
@@ -184,6 +209,7 @@ enum Field {
     ImpliedVol, HistVol, AvgVolume, Week13Hi, Week13Lo, Week26Hi, Week26Lo, Week52Hi, Week52Lo,
     AuctionVolume, AuctionImbalance, AuctionPrice, RegulatoryImbalance, Shortable, ShortableShares,
     TradeCount, TradeRate, VolumeRate, LastRthTrade, FuturesOpenInterest,
+    PlPrice, SlowMarkPrice, Volume3Min, Volume5Min, Volume10Min,
 }
 
 /// The unset value of an int field (the reference's `Integer.MAX_VALUE`).
@@ -196,6 +222,8 @@ pub struct GenericRecord {
     ints: HashMap<Field, i64>,
     doubles: HashMap<Field, u64>,
     dividends: Option<String>,
+    /// The fundamental ratios as tick 47 gives them.
+    ratios: Option<String>,
     /// RTVolume and RT trade volume: the last value, volume and count.
     rt: [Option<(f64, i64, i32)>; 2],
 }
@@ -225,6 +253,12 @@ impl GenericRecord {
 pub struct DecodeCtx {
     pub min_tick: f64,
     pub now_ms: i64,
+    /// The contract's size multiplier (`jclient.dy.et()`, its round lot):
+    /// the short-term volumes are counts of it.
+    pub round_lot: i64,
+    /// The price tick of the tick's own entry (the third field of its
+    /// acknowledgement): the slow mark price is scaled by it.
+    pub entry_min_tick: f64,
 }
 
 /// sqrt(252): a daily volatility to an annual one (`optionmodel.O.b`).
@@ -394,6 +428,75 @@ pub fn decode(code: i32, payload: &[u8], rec: &mut GenericRecord, ctx: DecodeCtx
                 size(&mut out, 86, v as i64);
             }
         }
+        // `generictick.aw`: the price, then flags; valid with bit 0 and
+        // without bit 27 (`jclient.record.c1.a(int)`), else unset. Tick 37
+        // (captured 07/10/2026: 334.9805908203125 gives 334.98059082).
+        PL_PRICE => {
+            let (Some(px), Some(flags)) = (r.double(), r.int()) else { return out };
+            let valid = flags & 1 != 0 && flags & 0x0800_0000 == 0 && px.is_finite();
+            if rec.set_double(Field::PlPrice, if valid { px } else { f64::MAX }) && valid {
+                price(&mut out, 37, px);
+            }
+        }
+        // `generictick.z`: a list of quote entries (no length); the price
+        // is the entry of type 2 times the price tick of this tick's own
+        // acknowledgement. Tick 79 (captured 07/10/2026: 334890 with tick
+        // 0.001 gives 334.89). A negative value is unset.
+        SLOW_MARK_PRICE => {
+            let Some((entries, _)) = entry_list(payload) else { return out };
+            let Some(&(_, raw)) = entries.iter().find(|(t, _)| *t == 2) else { return out };
+            let px = raw as f64 * ctx.entry_min_tick;
+            let valid = raw >= 0 && px.is_finite();
+            if rec.set_double(Field::SlowMarkPrice, if valid { px } else { f64::MAX }) && valid {
+                price(&mut out, 79, px);
+            }
+        }
+        // `generictick.aK`: a count, then (minutes, volume) pairs; 3, 5
+        // and 10 minutes are ticks 63, 64, 65, each the volume times the
+        // contract's size multiplier (captured 07/10/2026: 35, 76, 193 on
+        // AAPL, round lot 40, give 1400, 3040, 7720).
+        SHORT_TERM_VOLUME => {
+            let Some(n) = r.int() else { return out };
+            let mut seen: [Option<i32>; 3] = [None; 3];
+            for _ in 0..n.max(0) {
+                let (Some(k), Some(v)) = (r.int(), r.int()) else { break };
+                match k {
+                    3 => seen[0] = Some(v),
+                    5 => seen[1] = Some(v),
+                    10 => seen[2] = Some(v),
+                    _ => {}
+                }
+            }
+            for (v, field, tick) in [
+                (seen[0], Field::Volume3Min, 63), (seen[1], Field::Volume5Min, 64), (seen[2], Field::Volume10Min, 65),
+            ] {
+                if let Some(v) = v && rec.set_int(field, v as i64) {
+                    size(&mut out, tick, v as i64 * ctx.round_lot.max(1));
+                }
+            }
+        }
+        // `generictick.I`: a length, the text's size, then the zlib of
+        // `KEY=VALUE;...`. Tick 47 is the pairs in the order of the
+        // reference's map (`ratios_text`); `NOTAVAIL=1` gives nothing.
+        FUNDAMENTALS => {
+            let (Some(n), Some(_size)) = (r.int(), r.int()) else { return out };
+            let Some(packed) = payload.get(8..(4 + n.max(4) as usize).min(payload.len())) else { return out };
+            let mut text = String::new();
+            use std::io::Read;
+            if flate2::read::ZlibDecoder::new(packed).read_to_string(&mut text).is_err() {
+                return out;
+            }
+            let text = ratios_text(&text);
+            if rec.ratios.as_deref() != Some(text.as_str()) {
+                rec.ratios = Some(text.clone());
+                if !text.is_empty() {
+                    out.push(GenTick::Text(47, text));
+                }
+            }
+        }
+        // `generictick.R`: asked as the reference asks it; its ticks (101,
+        // 102) are not read yet (no block with a value captured).
+        IPO_PRICES => {}
         // `generictick.C`: a 4-byte length, then one line of text.
         DIVIDENDS => {
             let Some(rest) = payload.get(4..) else { return out };
@@ -527,6 +630,83 @@ fn dividend_amount(v: f64) -> String {
     format!("{sign}{grouped}.{frac}")
 }
 
+/// The quote entries of a block without a length, as the top-of-book
+/// messages write them (`jmdclient.bl.a(byte[],am,true)`): per entry one
+/// byte (type in 5 bits, "one more follows", width - 1 in 2 bits; type 31:
+/// the type and the width in the next two bytes), then the value, its top
+/// bit the sign. (type, value) of each, and the bytes read; None when cut
+/// short.
+pub fn entry_list(data: &[u8]) -> Option<(Vec<(u64, i64)>, usize)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    loop {
+        let head = *data.get(at)?;
+        at += 1;
+        let (mut tick_type, more, mut width) = ((head >> 3) as u64, head & 0b100 != 0, (head & 0b11) as usize + 1);
+        if tick_type == 31 {
+            tick_type = *data.get(at)? as u64;
+            width = *data.get(at + 1)? as usize;
+            at += 2;
+        }
+        if width == 0 || width > 8 {
+            return None;
+        }
+        let bytes = data.get(at..at + width)?;
+        at += width;
+        let negative = bytes[0] & 0x80 != 0;
+        let magnitude = bytes.iter().enumerate()
+            .fold(0i64, |v, (i, &b)| (v << 8) | (if i == 0 { b & 0x7f } else { b }) as i64);
+        out.push((tick_type, if negative { -magnitude } else { magnitude }));
+        if !more {
+            return Some((out, at));
+        }
+    }
+}
+
+/// Java's `String.hashCode`.
+fn java_hash(s: &str) -> u32 {
+    s.encode_utf16().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32))
+}
+
+/// The fundamental ratios as tick 47 gives them (`generictick.I`,
+/// `feature.company.ratios.C.d()`): the `KEY=VALUE` pairs of the text
+/// joined with `;` in the order of a Java `HashMap` of their keys (bucket
+/// of the key's hash in a table that starts at 16 and doubles while more
+/// than three quarters full; keys of one bucket in the order they came),
+/// without the contract id (`IBCONID`); the dividend per share
+/// (`TTMDIVSHR`) keeps its place with nothing written, so two `;` follow
+/// each other there. `NOTAVAIL=1`, or no pair, gives the empty text.
+/// Checked on the block and the callback captured on 07/10/2026 (AAPL: 66
+/// pairs in, 64 out and the empty place, the same text). The reference keeps the keys it knows
+/// (`ratios.a.c(key)`): every other key is taken as known.
+pub fn ratios_text(text: &str) -> String {
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    for part in text.split(';') {
+        let Some((k, v)) = part.split_once('=') else { continue };
+        if k == "NOTAVAIL" {
+            return String::new();
+        }
+        if k == "IBCONID" {
+            continue;
+        }
+        match pairs.iter_mut().find(|(key, _)| *key == k) {
+            Some(p) => p.1 = v,
+            None => pairs.push((k, v)),
+        }
+    }
+    let mut capacity = 16usize;
+    while pairs.len() * 4 > capacity * 3 {
+        capacity *= 2;
+    }
+    let bucket = |k: &str| {
+        let h = java_hash(k);
+        ((h ^ (h >> 16)) as usize) & (capacity - 1)
+    };
+    pairs.sort_by_key(|(k, _)| bucket(k));
+    pairs.iter().map(|(k, v)| if *k == "TTMDIVSHR" { String::new() } else { format!("{k}={v}") })
+        .collect::<Vec<_>>().join(";")
+}
+
 /// The blocks of a `35=G` body (after its 2-byte bit count): (server tag,
 /// payload). `code_of` names the tick of a server tag (None: unknown, the
 /// reading stops, as the reference cannot know the block's length).
@@ -541,6 +721,11 @@ pub fn blocks(body: &[u8], code_of: impl Fn(u32) -> Option<i32>) -> Vec<(u32, Op
         let (len, head) = match width {
             2 if rest.len() >= 6 => (u16::from_be_bytes([rest[4], rest[5]]) as usize, 6),
             1 if rest.len() >= 5 => (rest[4] as usize, 5),
+            // No length: a list of quote entries, as long as it reads.
+            0 => match entry_list(&rest[4..]) {
+                Some((_, read)) => (read, 4),
+                None => break,
+            },
             _ => break,
         };
         let end = (head + len).min(rest.len());
@@ -561,7 +746,44 @@ mod tests {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 
-    const CTX: DecodeCtx = DecodeCtx { min_tick: 0.01, now_ms: 1791219886917 };
+    const CTX: DecodeCtx = DecodeCtx { min_tick: 0.01, now_ms: 1791219886917, round_lot: 40, entry_min_tick: 0.001 };
+
+    // AAPL, 07/10/2026 (b4_generic_rest, frames 37, 333 and 258): the mark
+    // price, the slow mark price (a block without a length, price tick
+    // 0.001 from its own acknowledgement) and the short-term volumes, as
+    // the reference gave them (ticks 37, 79, 63 to 65).
+    #[test]
+    fn mark_prices_and_short_term_volume() {
+        let mut rec = GenericRecord::default();
+        assert_eq!(decode(PL_PRICE, &hex("4074efb08000000000000001"), &mut rec, CTX), vec![GenTick::Price(37, 334.98059082)]);
+        assert!(decode(PL_PRICE, &hex("4074efb08000000000000001"), &mut rec, CTX).is_empty(), "no change");
+        assert!(decode(PL_PRICE, &hex("4074efb08000000000000000"), &mut GenericRecord::default(), CTX).is_empty(), "not valid");
+
+        let block = hex("0000685616051c2a34006c00a400a800");
+        assert_eq!(entry_list(&block[4..]), Some((vec![(2, 334890), (6, 0), (13, 0), (20, 0), (21, 0)], 12)));
+        let body = [&[0x00, 0x80][..], &block[..]].concat();
+        let blocks = blocks(&body, |tag| (tag == 0x6856).then_some(SLOW_MARK_PRICE));
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(decode(SLOW_MARK_PRICE, blocks[0].2, &mut rec, CTX), vec![GenTick::Price(79, 334.89)]);
+
+        let volumes = hex("00000004000000006ac6133400000003000000230000000500000 04c0000000a000000c100000000".replace(' ', "").as_str());
+        assert_eq!(decode(SHORT_TERM_VOLUME, &volumes, &mut rec, CTX),
+            vec![GenTick::Size(63, 1400.0), GenTick::Size(64, 3040.0), GenTick::Size(65, 7720.0)]);
+        assert!(decode(SHORT_TERM_VOLUME, &volumes, &mut rec, CTX).is_empty());
+    }
+
+    // The ratios in the order of the reference's map; the contract id and
+    // the dividend per share are left out; "not available" gives nothing
+    // (SPY, 07/10/2026, b4_generic_rest2 frame 167).
+    #[test]
+    fn fundamental_ratios_text() {
+        assert_eq!(ratios_text("IBCONID=265598;LATESTADATE=2026-06-27;CURRENCY=USD;MKTCAP=4869057;TTMDIVSHR=1.05;NLOW=243.42"),
+            "CURRENCY=USD;MKTCAP=4869057;NLOW=243.42;;LATESTADATE=2026-06-27");
+        assert_eq!(ratios_text("NOTAVAIL=1"), "");
+        let mut rec = GenericRecord::default();
+        let spy = hex("000000160000000a789cf3f30f710c73f4f4b1350400104002cd0000");
+        assert!(decode(FUNDAMENTALS, &spy, &mut rec, CTX).is_empty());
+    }
 
     // AAPL, 05/10/2026 (b2_generic, frame 9004): open interest and implied
     // volatility, as the reference gave them (ticks 27, 28, 24).

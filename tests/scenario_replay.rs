@@ -464,3 +464,77 @@ fn session_start_first_client() {
     let theirs = sorted(o.theirs.iter().map(|(_, l)| l.clone()).collect());
     ibx::test_support::scenario::assert_same_callbacks(&sorted(o.ours.clone()), &theirs);
 }
+
+// One request per generic tick on AAPL before the open (07/10/2026): 162
+// refused with 321; 221 and 232 as the mark price entry (tick 37); the
+// fundamentals on their own exchange (tick 47); the short-term volumes
+// after the acknowledgement (ticks 63 to 65); the slow mark price (tick
+// 79); 460, 577, 587, 614 and 623 not sent for this stock.
+#[test]
+fn generic_ticks_one_by_one() {
+    // Compared: the errors and the ticks of the generic entries. The top of
+    // book is left out: a request on a contract asked just before gets the
+    // quote the reference kept (ibx#486). The version notice comes from the
+    // logon frame, which the replay has not.
+    fn generic(l: &str) -> bool {
+        let f: Vec<&str> = l.split('|').collect();
+        match f[0] {
+            "error" => f[2] != "2172",
+            "tickPrice" => matches!(f[2], "37" | "78" | "79" | "96" | "97" | "98" | "99"),
+            "tickSize" => matches!(f[2], "63" | "64" | "65"),
+            "tickString" => f[2] == "47",
+            "tickGeneric" => true,
+            _ => false,
+        }
+    }
+    // The option chain request of the recording is not made by the replay.
+    let o = replay(&load_scenario("20261007/b4_generic_rest"), &Options::default().keep(generic));
+    assert_eq!((o.frame_error.as_deref(), o.frames_compared), (None, 36));
+    let theirs: Vec<String> = o.theirs.iter().map(|(_, l)| l.clone()).collect();
+    ibx::test_support::scenario::assert_same_callbacks(&o.ours, &theirs);
+    assert_eq!(o.ours.len(), 22);
+}
+
+// The same ticks in one list on AAPL (07/10/2026): the mark price and the
+// slow mark price with the request, the IPO prices and the short-term
+// volumes after the acknowledgement, each message in request code order.
+// The reference had AAPL's ratios from a request of the minute before: it
+// sent no fundamentals entry and gave tick 47 from what it kept; both are
+// left out, and so is tick 79: ibx's fundamentals entry takes the place of
+// the slow mark price entry among the recorded acknowledgements (its tick
+// is checked in `generic_ticks_one_by_one`). The rest of the recording (an
+// ETF, an option, a future) is not replayed.
+#[test]
+fn generic_ticks_in_one_list() {
+    fn generic(l: &str) -> bool {
+        let f: Vec<&str> = l.split('|').collect();
+        match f[0] {
+            "error" => f[2] != "2172",
+            "tickPrice" => f[2] == "37",
+            "tickSize" => matches!(f[2], "63" | "64" | "65"),
+            _ => false,
+        }
+    }
+    // Without the fundamentals entry and the exchange map entry (the
+    // reference had the map from earlier in its session): their groups of
+    // fields, and as many less in the entry count.
+    fn kept_before(f: &mut Fields) {
+        while let Some(at) = f.iter().position(|(t, v)| *t == 264 && (v == "258" || v == "626")) {
+            let start = f[..at].iter().rposition(|(t, _)| *t == 262).unwrap_or(at);
+            let end = f[at + 1..].iter().position(|(t, _)| *t == 262).map_or(f.len(), |n| at + 1 + n);
+            f.drain(start..end);
+            if let Some(count) = f.iter_mut().find(|(t, _)| *t == 146) {
+                count.1 = (count.1.parse::<usize>().unwrap_or(1) - 1).to_string();
+            }
+        }
+    }
+    let o = replay(&load_scenario("20261007/b4_generic_rest2"),
+        &Options::default().until(9363).keep(generic).frame_mask(kept_before));
+    if std::env::var_os("IBX_SCENARIO_DUMP").is_some() {
+        dump("20261007/b4_generic_rest2", &o);
+    }
+    assert_eq!(o.frame_error, None);
+    let theirs: Vec<String> = o.theirs.iter().map(|(_, l)| l.clone()).collect();
+    ibx::test_support::scenario::assert_same_callbacks(&o.ours, &theirs);
+    assert!(o.ours.len() >= 5, "{:?}", o.ours);
+}
