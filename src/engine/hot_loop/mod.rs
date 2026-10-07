@@ -111,6 +111,9 @@ const HMDS_MAX_RECONNECT_ATTEMPTS: u32 = 6;
 
 impl HotLoop {
     pub fn new(shared: Arc<SharedState>, event_tx: Option<Sender<Event>>, core_id: Option<usize>) -> Self {
+        if let Some(tx) = &event_tx {
+            shared.attach_event_channel(tx);
+        }
         Self {
             shared,
             event_tx,

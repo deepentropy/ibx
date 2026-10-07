@@ -96,6 +96,33 @@ pub struct ComboView {
     pub leg_prices: Vec<f64>,
 }
 
+/// The event channel as the error queues see it (ibx#498): unset, and
+/// free, until a channel is attached.
+#[derive(Default)]
+struct ErrorTap(std::sync::OnceLock<crossbeam_channel::Sender<Event>>);
+
+impl ErrorTap {
+    /// The event of an error, built only when a channel is attached.
+    #[inline]
+    fn event(&self, req_id: i64, code: i64, message: &str) -> Option<Event> {
+        self.0.get().map(|_| Event::Error { req_id, code, message: message.to_string() })
+    }
+
+    /// Send it once the error is in its queue, so the event never shows
+    /// before the queue has it. Non-blocking, as every event: dropped when
+    /// the channel is full.
+    #[inline]
+    fn send(&self, event: Option<Event>) {
+        if let (Some(tx), Some(event)) = (self.0.get(), event) {
+            let _ = tx.try_send(event);
+        }
+    }
+
+    fn attach(&self, tx: &crossbeam_channel::Sender<Event>) {
+        let _ = self.0.set(tx.clone());
+    }
+}
+
 /// Events emitted by the IB engine.
 ///
 /// New variants may be added: match with a wildcard arm.
@@ -133,6 +160,11 @@ pub enum Event {
     /// error and a replaced or lost one gets no answer, so none of them
     /// shows here.
     SymbolSamples { req_id: ReqId, matches: Vec<SymbolMatch> },
+    /// An error or a notice, as the wrapper's `error` gets it (ibx#498):
+    /// `req_id` is the request id, the order id (as in `OrderUpdate`) for
+    /// an order, and -1 for a link status message. A refused market data
+    /// request is not given here.
+    Error { req_id: i64, code: i64, message: String },
     /// Position update.
     /// `position` is fixed-point (QTY_SCALE).
     PositionUpdate { instrument: InstrumentId, con_id: i64, position_fixed: Qty, avg_cost: Price },
@@ -299,6 +331,7 @@ pub struct MarketDataState {
     /// Tick-by-tick requests that ended with an error: the request, the
     /// code and the whole text (ibx#455).
     tbt_errors: Mutex<Vec<(ReqId, i32, String)>>,
+    error_tap: ErrorTap,
 }
 
 /// What a client reports as tickReqParams for a subscription, from its
@@ -380,11 +413,14 @@ impl MarketDataState {
             tick_req_params: Mutex::new(Vec::new()),
             snapshot_acks: Mutex::new(Vec::new()),
             tbt_errors: Mutex::new(Vec::new()),
+            error_tap: ErrorTap::default(),
         }
     }
 
     #[doc(hidden)] pub fn push_tbt_error(&self, req_id: ReqId, code: i32, text: String) {
+        let event = self.error_tap.event(req_id, code as i64, &text);
         self.tbt_errors.lock().unwrap().push((req_id, code, text));
+        self.error_tap.send(event);
     }
 
     pub fn drain_tbt_errors(&self) -> Vec<(ReqId, i32, String)> {
@@ -598,6 +634,7 @@ pub struct OrderState {
     /// Notices of a server report given after the status of that report:
     /// the reject 201 and the cancel 202 (ibx#486).
     order_notices: Mutex<Vec<(i64, i64, String)>>,
+    error_tap: ErrorTap,
     what_if_responses: Mutex<Vec<WhatIfResponse>>,
     completed_orders: Mutex<Vec<CompletedOrder>>,
     /// Enriched order info from CCP exec reports (order_id -> RichOrderInfo).
@@ -638,6 +675,7 @@ impl OrderState {
             cancel_rejects: Mutex::new(Vec::with_capacity(16)),
             order_errors: Mutex::new(Vec::new()),
             order_notices: Mutex::new(Vec::new()),
+            error_tap: ErrorTap::default(),
             what_if_responses: Mutex::new(Vec::with_capacity(8)),
             completed_orders: Mutex::new(Vec::with_capacity(64)),
             order_cache: Mutex::new(HashMap::new()),
@@ -834,13 +872,17 @@ impl OrderState {
     }
 
     #[doc(hidden)] pub fn push_order_error(&self, order_id: i64, code: i64, message: String) {
+        let event = self.error_tap.event(order_id, code, &message);
         self.order_errors.lock().unwrap().push((order_id, code, message));
+        self.error_tap.send(event);
     }
 
     /// A notice of a server report (201, 202), given after the status the
     /// same report gives, as the reference writes them (ibx#486).
     #[doc(hidden)] pub fn push_order_notice(&self, order_id: i64, code: i64, message: String) {
+        let event = self.error_tap.event(order_id, code, &message);
         self.order_notices.lock().unwrap().push((order_id, code, message));
+        self.error_tap.send(event);
     }
 
     #[doc(hidden)] pub fn push_what_if(&self, response: WhatIfResponse) {
@@ -893,6 +935,7 @@ pub struct ReferenceState {
     /// Errors surfaced by HMDS for in-flight reference queries (req_id, code, message).
     /// Drained by the dispatcher and forwarded to `Wrapper::error`. ibx#186.
     historical_errors: Mutex<Vec<(ReqId, i32, String)>>,
+    error_tap: ErrorTap,
     market_rules: Mutex<Vec<MarketRule>>,
     depth_exchanges_cache: Mutex<Vec<DepthMktDataDescription>>,
     depth_exchanges_pending: Mutex<bool>,
@@ -998,6 +1041,7 @@ impl ReferenceState {
             historical_ticks: Mutex::new(Vec::with_capacity(4)),
             historical_schedules: Mutex::new(Vec::with_capacity(4)),
             historical_errors: Mutex::new(Vec::with_capacity(4)),
+            error_tap: ErrorTap::default(),
             market_rules: Mutex::new(Vec::new()),
             depth_exchanges_cache: Mutex::new(Vec::new()),
             depth_exchanges_pending: Mutex::new(false),
@@ -1226,7 +1270,9 @@ impl ReferenceState {
     }
 
     #[doc(hidden)] pub fn push_historical_error(&self, req_id: ReqId, code: i32, message: String) {
+        let event = self.error_tap.event(req_id, code as i64, &message);
         self.historical_errors.lock().unwrap().push((req_id, code, message));
+        self.error_tap.send(event);
     }
 
     #[doc(hidden)] pub fn push_market_rules(&self, rules: Vec<MarketRule>) {
@@ -1943,6 +1989,7 @@ pub struct SharedState {
     /// Link status messages for every client, as errors with id -1: link
     /// lost / restored and farm broken (ibx#399). (code, message).
     connection_notices: Mutex<Vec<(i64, String)>>,
+    error_tap: ErrorTap,
     /// Notifier for waking consumers (e.g. Python event loop) when data arrives.
     notify_mutex: Mutex<bool>,
     notify_condvar: Condvar,
@@ -1958,6 +2005,7 @@ impl SharedState {
             ccp_rtt_ns: AtomicU64::new(0),
             connection_lost: AtomicBool::new(false),
             connection_notices: Mutex::new(Vec::new()),
+            error_tap: ErrorTap::default(),
             notify_mutex: Mutex::new(false),
             notify_condvar: Condvar::new(),
         }
@@ -1980,8 +2028,19 @@ impl SharedState {
 
     /// Queue a link status message for the clients (ibx#399). Hot-loop side.
     #[doc(hidden)]
+    /// Give the errors and notices to the event channel too, as
+    /// `Event::Error` (ibx#498). The first channel attached stays.
+    pub fn attach_event_channel(&self, tx: &crossbeam_channel::Sender<Event>) {
+        self.market.error_tap.attach(tx);
+        self.orders.error_tap.attach(tx);
+        self.reference.error_tap.attach(tx);
+        self.error_tap.attach(tx);
+    }
+
     pub fn push_connection_notice(&self, code: i64, message: String) {
+        let event = self.error_tap.event(-1, code, &message);
         self.connection_notices.lock().unwrap().push((code, message));
+        self.error_tap.send(event);
         self.notify();
     }
 
@@ -2037,6 +2096,36 @@ impl SharedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every error queue gives its entries to an attached event channel,
+    /// with the id and the code the queue holds, and nothing before a
+    /// channel is attached (ibx#498).
+    #[test]
+    fn errors_go_to_the_attached_event_channel() {
+        let shared = SharedState::new();
+        shared.reference.push_historical_error(1, 200, "before".into());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        shared.attach_event_channel(&tx);
+
+        shared.reference.push_historical_error(7, 200, "no security definition".into());
+        shared.market.push_tbt_error(8, 10189, "tick-by-tick".into());
+        shared.orders.push_order_error(9, 110, "price".into());
+        shared.orders.push_order_notice(9, 201, "rejected".into());
+        shared.push_connection_notice(1100, "link lost".into());
+
+        let events: Vec<(i64, i64, String)> = rx.try_iter().map(|e| match e {
+            Event::Error { req_id, code, message } => (req_id, code, message),
+            other => panic!("only errors are expected: {other:?}"),
+        }).collect();
+        assert_eq!(events, [
+            (7, 200, "no security definition".to_string()), (8, 10189, "tick-by-tick".to_string()),
+            (9, 110, "price".to_string()), (9, 201, "rejected".to_string()), (-1, 1100, "link lost".to_string()),
+        ]);
+        // The queues keep every entry for the wrapper.
+        assert_eq!(shared.reference.drain_historical_errors().len(), 2);
+        assert_eq!(shared.orders.drain_order_errors().len() + shared.orders.drain_order_notices().len(), 2);
+        assert_eq!((shared.market.drain_tbt_errors().len(), shared.drain_connection_notices().len()), (1, 1));
+    }
 
     #[test]
     fn seqquote_write_read_roundtrip() {
