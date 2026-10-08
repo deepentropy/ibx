@@ -1004,6 +1004,8 @@ pub struct ReferenceState {
     smart_combo_con_ids: Mutex<HashMap<String, i64>>,
     /// The API client id the new orders carry (ibx#466); 0 until set.
     api_client_id: std::sync::atomic::AtomicI64,
+    /// User name of the session: the submitter of the orders it places (ibx#519).
+    user_name: Mutex<String>,
     /// The algo definitions the server sent (ibx#263).
     algo_definitions: Mutex<crate::control::algo::AlgoDefinitions>,
     /// Most contracts with tick-by-tick data at once, from the logon;
@@ -1086,6 +1088,7 @@ impl ReferenceState {
             omnibus: AtomicBool::new(false),
             smart_combo_con_ids: Mutex::new(HashMap::new()),
             api_client_id: std::sync::atomic::AtomicI64::new(0),
+            user_name: Mutex::new(String::new()),
             algo_definitions: Mutex::new(Default::default()),
             tick_by_tick_limit: AtomicU64::new(u64::MAX),
             tick_by_tick_off: AtomicBool::new(false),
@@ -1672,6 +1675,15 @@ impl ReferenceState {
     /// The API client id the new orders carry (ibx#466).
     pub fn api_client_id(&self) -> i64 {
         self.api_client_id.load(Ordering::Relaxed)
+    }
+
+    /// User name of the session; empty when not known.
+    pub fn user_name(&self) -> String {
+        self.user_name.lock().unwrap().clone()
+    }
+
+    pub fn set_user_name(&self, name: &str) {
+        *self.user_name.lock().unwrap() = name.to_string();
     }
 
     #[doc(hidden)] pub fn set_api_client_id(&self, client_id: i64) {

@@ -649,6 +649,7 @@ impl EClient {
                 self.core.peek_what_if(wi.order_id)
             };
             let (contract_py, order_py) = if let Some((mut contract, mut order)) = tracked {
+                let placed_exchange = contract.exchange.clone();
                 // A preview placed without a conId shows the contract
                 // looked up (ibx#486).
                 if contract.con_id == 0 && wi.state.con_id != 0 && !contract.sec_type.eq_ignore_ascii_case("BAG") {
@@ -656,6 +657,7 @@ impl EClient {
                 }
                 // The order as the reference shows it (its unset values); a
                 // combo shows its combo (ibx#470).
+                crate::client_core::preview_view(&mut contract, &mut order, &placed_exchange, shared);
                 crate::client_core::reported_unset_values(&mut order);
                 crate::client_core::ClientCore::apply_combo_view(wi.order_id, &mut contract, &mut order, shared);
                 let c = Contract::from_api(py, &contract)?;

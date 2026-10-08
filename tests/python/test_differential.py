@@ -56,7 +56,7 @@ def test_a_field_of_an_object_is_named_by_its_path():
     assert kinds(rows) == [("field", "openOrder", "{id+0}", "order.tif")] and rows[0]["known"] == ""
     theirs = run(1, 111)
     theirs[3][3] = {**theirs[3][3], "ocaType": 3}
-    assert [(r["field"], r["known"]) for r in d.compare(theirs, run(1, 111))] == [("order.ocaType", "ibx#519")]
+    assert [(r["field"], r["known"]) for r in d.compare(theirs, run(1, 111))] == [("order.ocaType", "")]
 
 
 def test_callbacks_one_side_lacks():
@@ -121,7 +121,9 @@ def test_a_recorded_scenario_against_itself(tmp_path):
     assert lines[0] == "lmt_cancel: 0 differences, 0 without an issue (reference closed, ibx rth)"
 
 
-def test_the_report_file_and_the_exit_code(tmp_path):
+def test_the_report_file_and_the_exit_code(tmp_path, monkeypatch):
+    # A row an open issue explains carries the issue and does not fail the run.
+    monkeypatch.setattr(d, "KNOWN", [("ibx#1", lambda r: r["field"] == "order.ocaType")])
     reference, ours = tmp_path / "reference", tmp_path / "ibx"
     reference.mkdir(), ours.mkdir()
     theirs = run(1, 111)
@@ -133,7 +135,7 @@ def test_the_report_file_and_the_exit_code(tmp_path):
     with open(out, encoding="utf-8", newline="") as fh:
         rows = list(csv.DictReader(fh))
     assert list(rows[0]) == d.COLUMNS and len(rows) == 1
-    assert (rows[0]["scenario"], rows[0]["field"], rows[0]["known"]) == ("s", "order.ocaType", "ibx#519")
+    assert (rows[0]["scenario"], rows[0]["field"], rows[0]["known"]) == ("s", "order.ocaType", "ibx#1")
     assert "DU7654321" not in out.read_text(encoding="utf-8")
 
     mine = run(4, 222)

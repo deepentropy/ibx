@@ -71,6 +71,7 @@ impl Links {
         // replay of another zone sets its own (`in_zone`).
         crate::gateway::set_machine_zone_for_test(Some(RECORDING_ZONE));
         let shared = Arc::new(SharedState::new());
+        shared.reference.set_user_name("user");
         // Reads return at once: the test steps the engine itself.
         let pair = || {
             let (conn, mut peer) = Peer::pair();
@@ -426,11 +427,20 @@ impl Wrapper for Recorder {
                 "whatIf" => o.what_if.to_string(),
                 "permId" => perm(o.perm_id).to_string(),
                 "clientId" => o.client_id.to_string(),
+                "ocaType" => o.oca_type.to_string(),
+                "clearingIntent" => o.clearing_intent.clone(),
+                "shareholder" => o.shareholder.clone(),
+                "deltaNeutralOrderType" => o.delta_neutral_order_type.clone(),
+                "adjustedOrderType" => o.adjusted_order_type.clone(),
+                "submitter" => super::record::submitter(&o.submitter).to_string(),
                 _ => unreachable!("{k}"),
             }
         };
-        let fields: Vec<String> = OPEN_ORDER_FIELDS.iter().filter(|k| super::record::compared_field(k, &o.order_type))
+        let mut fields: Vec<String> = OPEN_ORDER_FIELDS.iter()
+            .filter(|k| super::record::compared_field(k, &o.order_type, &c.sec_type))
             .map(|k| format!("{k}={}", field(k))).collect();
+        fields.push(format!("exchange={}", c.exchange));
+        fields.push(format!("primaryExchange={}", c.primary_exchange));
         self.lines.push(format!(
             "openOrder|{order_id}|{}|{}|{}|{}|{}", c.con_id, c.symbol, c.sec_type, fields.join(","), state.status,
         ));

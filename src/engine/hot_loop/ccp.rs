@@ -1827,12 +1827,18 @@ impl CcpState {
         {
             let account = parsed.get(&1).cloned().unwrap_or_default();
             let symbol = parsed.get(&55).cloned().unwrap_or_default();
-            let exchange = parsed.get(&207).cloned().unwrap_or_default();
+            // The exchange of the order's contract is the one the order
+            // was routed to (SMART for the smart route), as the reference's
+            // openOrder shows it, not the venue where it rests (ibx#519:
+            // an order of an earlier session resting on a venue shows SMART).
+            let exchange = parsed.get(&6004).filter(|e| !e.is_empty())
+                .map(|e| crate::control::contracts::exchange_from_fix(e).to_string())
+                .or_else(|| parsed.get(&207).cloned())
+                .unwrap_or_default();
             let sec_type = parsed.get(&167).cloned().unwrap_or_default();
             let currency = parsed.get(&15).cloned().unwrap_or_default();
             let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);
             let local_symbol = parsed.get(&6035).cloned().unwrap_or_default();
-            let _routing_exchange = parsed.get(&6004).cloned().unwrap_or_default();
             let perm_id: i64 = perm_id_of(parsed);
             let total_qty: f64 = parsed.get(&38).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let ord_type_tag = parsed.get(&40).map(|s| s.as_str()).unwrap_or("");

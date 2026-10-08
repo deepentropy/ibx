@@ -1014,6 +1014,8 @@ pub struct Gateway {
     /// Name of the contract data farm the logon routes the account to;
     /// empty when the logon names none (ibx#517).
     pub secdef_farm: String,
+    /// User name of the login: the submitter of the session's orders (ibx#519).
+    pub user_name: String,
     /// Rows of the routing tables of the two primary farms, when they came
     /// with the logon (#445). A table that comes later is read by the loop.
     pub md_routing: Option<String>,
@@ -2552,6 +2554,7 @@ impl Gateway {
             farm_host,
             hmds_connected: hmds_conn.is_some(),
             secdef_farm: parse_farm_route(&secdef_route).map(|(_, farm)| farm).unwrap_or_default(),
+            user_name: config.username.clone(),
             md_routing,
             hmds_routing,
             ns_secure_refused: refused,
@@ -2637,6 +2640,8 @@ impl Gateway {
         // Webapp-REST-facing fields from the FIX logon roundtrip.
         shared.reference.set_ccp_session_id(self.server_session_id.clone());
         shared.reference.set_misc_urls(self.misc_urls.clone());
+
+        shared.reference.set_user_name(&self.user_name);
 
         // The state of the data connections, as the reference tells every
         // client after nextValidId and before the version warning (ibx#517).

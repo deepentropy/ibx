@@ -269,21 +269,31 @@ pub fn perm(v: i64) -> &'static str {
     if v == 0 { "0" } else { "{perm}" }
 }
 
-/// The fields of an openOrder the comparison covers. trailStopPrice only
-/// for a plain TRAIL order, whose stop is the one the server reports
-/// (6117, captured 05/10/2026); the reference shows one for other orders
-/// too that is not read yet (a LMT at 272.86 shows 273.86, ibx#491): see
-/// [`compared_field`].
+/// The fields of an openOrder the comparison covers; the exchange and the
+/// primary exchange of its contract follow them. trailStopPrice for the
+/// order types whose value is read: see [`compared_field`].
 pub const OPEN_ORDER_FIELDS: &[&str] = &[
     "action", "totalQuantity", "orderType", "lmtPrice", "auxPrice", "tif", "ocaGroup", "orderRef",
     "parentId", "outsideRth", "goodAfterTime", "goodTillDate", "account", "trailingPercent",
     "trailStopPrice", "whatIf", "permId", "clientId",
+    "ocaType", "clearingIntent", "shareholder", "deltaNeutralOrderType", "adjustedOrderType", "submitter",
 ];
+
+/// The submitter of an order as the comparison shows it: the user name is
+/// masked in the recordings, so only whether there is one.
+pub fn submitter(name: &str) -> &'static str {
+    if name.is_empty() { "" } else { "{user}" }
+}
 
 /// Whether a field of [`OPEN_ORDER_FIELDS`] is compared for an order of
 /// this type.
-pub fn compared_field(field: &str, order_type: &str) -> bool {
-    field != "trailStopPrice" || order_type == "TRAIL"
+pub fn compared_field(field: &str, order_type: &str, sec_type: &str) -> bool {
+    // A plain TRAIL shows the stop the server reports (captured
+    // 05/10/2026); a LMT, PEG BEST or STP the value the reference derives
+    // (ibx#519). A combo shows one on some reports only, and the other
+    // trailing types are not read yet.
+    field != "trailStopPrice"
+        || (matches!(order_type, "TRAIL" | "LMT" | "PEG BEST" | "STP") && sec_type != "BAG")
 }
 
 /// A price field of an openOrder: unset (the client library's MAX, ibx's
@@ -299,8 +309,10 @@ pub fn open_order_line(id: i64, contract: &Value, order: &Value, state: &Value) 
     let field = |k: &str| -> String {
         let v = &order[k];
         match k {
-            "action" | "orderType" | "tif" | "ocaGroup" | "orderRef" | "goodAfterTime" | "goodTillDate" | "account" =>
+            "action" | "orderType" | "tif" | "ocaGroup" | "orderRef" | "goodAfterTime" | "goodTillDate" | "account"
+            | "clearingIntent" | "shareholder" | "deltaNeutralOrderType" | "adjustedOrderType" =>
                 v.as_str().unwrap_or("").to_string(),
+            "submitter" => submitter(v.as_str().unwrap_or("")).to_string(),
             "outsideRth" | "whatIf" => v.as_bool().unwrap_or(false).to_string(),
             "lmtPrice" | "auxPrice" | "trailingPercent" | "trailStopPrice" =>
                 if v.is_null() { "-".into() } else { order_price(num(v)) },
@@ -309,8 +321,12 @@ pub fn open_order_line(id: i64, contract: &Value, order: &Value, state: &Value) 
         }
     };
     let order_type = order["orderType"].as_str().unwrap_or("");
-    let fields: Vec<String> = OPEN_ORDER_FIELDS.iter().filter(|k| compared_field(k, order_type))
+    let sec_type = contract["secType"].as_str().unwrap_or("");
+    let mut fields: Vec<String> = OPEN_ORDER_FIELDS.iter().filter(|k| compared_field(k, order_type, sec_type))
         .map(|k| format!("{k}={}", field(k))).collect();
+    let primary = contract["primaryExchange"].as_str().or(contract["primaryExch"].as_str()).unwrap_or("");
+    fields.push(format!("exchange={}", contract["exchange"].as_str().unwrap_or("")));
+    fields.push(format!("primaryExchange={primary}"));
     format!(
         "openOrder|{id}|{}|{}|{}|{}|{}",
         contract["conId"].as_i64().unwrap_or(0), contract["symbol"].as_str().unwrap_or(""),

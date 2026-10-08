@@ -1568,13 +1568,72 @@ fn reported_price_mgmt(order: &mut ApiOrder, reported: Option<&ApiOrder>) {
 /// lmtPrice and auxPrice 0, volatilityType and referencePriceType 0,
 /// dontUseAutoPriceForHedge true, filledQuantity 0. The other unset values
 /// (minQty, trailingPercent, cashQty, triggerPrice, ...) are shown unset.
+///
+/// And the values it fills by itself, the same on all 198 openOrder and
+/// completedOrder of the recordings (ibx#519): ocaType 3 unless the order
+/// has one of its own (1 to 4), clearingIntent IB, the shareholder text,
+/// and `None` for an adjusted or delta neutral order type that is not set.
 pub fn reported_unset_values(order: &mut ApiOrder) {
+    if !(1..=4).contains(&order.oca_type) { order.oca_type = 3; }
+    if order.clearing_intent.is_empty() { order.clearing_intent = "IB".into(); }
+    if order.shareholder.is_empty() { order.shareholder = NOT_A_SHAREHOLDER.into(); }
+    if order.adjusted_order_type.is_empty() { order.adjusted_order_type = "None".into(); }
+    if order.delta_neutral_order_type.is_empty() { order.delta_neutral_order_type = "None".into(); }
     order.lmt_price = aux_or_zero(order.lmt_price);
     order.aux_price = aux_or_zero(order.aux_price);
     if order.volatility_type == i32::MAX { order.volatility_type = 0; }
     if order.reference_price_type == i32::MAX { order.reference_price_type = 0; }
     order.dont_use_auto_price_for_hedge = true;
     order.filled_quantity = aux_or_zero(order.filled_quantity);
+}
+
+/// The shareholder text of every order the reference shows.
+pub const NOT_A_SHAREHOLDER: &str = "Not an insider or substantial shareholder";
+
+/// What the reference's openOrder shows for an order placed in this
+/// session, beyond the order as placed (ibx#519, the recordings of
+/// 26/09/2026 to 07/10/2026):
+/// - the submitter is the user of the session (an order of an earlier
+///   session has none);
+/// - trailStopPrice of an order with no trail: the limit price + 1 for a
+///   LMT or PEG BEST order (272.86 gives 273.86; a combo is left as placed,
+///   its openOrder shows the value on some reports only), the stop price for
+///   a STP order.
+fn session_order_fields(order: &mut ApiOrder, contract: &ApiContract, user: &str) {
+    if order.submitter.is_empty() {
+        order.submitter = user.to_string();
+    }
+    let unset = |v: f64| v == f64::MAX || v == 0.0;
+    if !unset(order.trail_stop_price) {
+        return;
+    }
+    let is = |t: &str| order.order_type.eq_ignore_ascii_case(t);
+    if (is("LMT") || is("PEG BEST")) && !unset(order.lmt_price) && !contract.sec_type.eq_ignore_ascii_case("BAG") {
+        order.trail_stop_price = order.lmt_price + 1.0;
+    } else if is("STP") && !unset(order.aux_price) {
+        order.trail_stop_price = order.aux_price;
+    }
+}
+
+/// The contract of an openOrder: the one the contract data gave, with the
+/// exchange the order was placed on and no primary exchange, as the
+/// reference shows it (ibx#519: SMART on every report of an order placed
+/// on SMART).
+fn placed_contract(contract: &mut ApiContract, placed_exchange: &str) {
+    if contract.sec_type.eq_ignore_ascii_case("BAG") {
+        return;
+    }
+    if !placed_exchange.is_empty() {
+        contract.exchange = placed_exchange.to_string();
+    }
+    contract.primary_exchange.clear();
+}
+
+/// The order and the contract of a preview as the reference's openOrder
+/// shows them: those of an order of the session (ibx#519).
+pub fn preview_view(contract: &mut ApiContract, order: &mut ApiOrder, placed_exchange: &str, shared: &SharedState) {
+    session_order_fields(order, contract, &shared.reference.user_name());
+    placed_contract(contract, placed_exchange);
 }
 
 fn reported_trail_limit(order: &mut ApiOrder, reported: &ApiOrder) {
@@ -3551,12 +3610,26 @@ impl ClientCore {
                 let dropped = self.rth_dropped.lock().unwrap().contains(&order_id);
                 order.outside_rth = (order.outside_rth && !dropped)
                     || info.as_ref().is_some_and(|i| i.order.outside_rth);
+                session_order_fields(&mut order, &t.contract, &shared.reference.user_name());
                 (t.contract, order, t.last_fill_price, client_id)
             }
-            // An order the server reported: its own client id.
-            (None, Some(i)) => { let client_id = i.order.client_id as i64; (i.contract, i.order, 0.0, client_id) }
+            // An order the server reported: its own client id, and no
+            // submitter (ibx#519).
+            (None, Some(i)) => {
+                let client_id = i.order.client_id as i64;
+                let mut order = i.order;
+                // An order this client placed and saw end keeps its
+                // submitter (the leg fills after a combo's Filled report).
+                order.submitter = if self.finished_orders.lock().unwrap().contains(&order_id) {
+                    shared.reference.user_name()
+                } else {
+                    String::new()
+                };
+                (i.contract, order, 0.0, client_id)
+            }
             (None, None) => return None,
         };
+        let placed_exchange = contract.exchange.clone();
         let bag = contract.sec_type.eq_ignore_ascii_case("BAG");
         let mut contract = if contract.con_id != 0 && !bag {
             self.get_contract(contract.con_id, shared).unwrap_or(contract)
@@ -3565,6 +3638,7 @@ impl ClientCore {
         } else {
             contract
         };
+        placed_contract(&mut contract, &placed_exchange);
         let mut order = order;
         reported_unset_values(&mut order);
         Self::apply_combo_view(order_id, &mut contract, &mut order, shared);
@@ -3871,6 +3945,8 @@ impl ClientCore {
                         reported_trail_limit(&mut order, &info.order);
                     }
                     reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
+                    session_order_fields(&mut order, &o.contract, &shared.reference.user_name());
+                    placed_contract(&mut contract, &o.contract.exchange);
                     reported_unset_values(&mut order);
                     Self::apply_combo_view(oid, &mut contract, &mut order, shared);
                     result.push((oid, TrackedOrder {
@@ -3898,6 +3974,7 @@ impl ClientCore {
                     info.contract
                 };
                 let mut order = info.order;
+                order.submitter.clear();
                 reported_unset_values(&mut order);
                 result.push((oid, TrackedOrder {
                     contract,

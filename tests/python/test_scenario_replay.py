@@ -26,12 +26,14 @@ UNSET = sys.float_info.max
 
 
 def contract_dict(c):
-    return {"conId": c.conId, "symbol": c.symbol, "secType": c.secType}
+    return {"conId": c.conId, "symbol": c.symbol, "secType": c.secType, "exchange": c.exchange,
+            "primaryExchange": c.primaryExchange}
 
 
 ORDER_FIELDS = ["action", "totalQuantity", "orderType", "lmtPrice", "auxPrice", "tif", "ocaGroup", "orderRef",
                 "parentId", "outsideRth", "goodAfterTime", "goodTillDate", "account", "trailingPercent", "trailStopPrice",
-                "whatIf", "permId", "clientId"]
+                "whatIf", "permId", "clientId", "ocaType", "clearingIntent", "shareholder", "deltaNeutralOrderType",
+                "adjustedOrderType", "submitter"]
 
 
 def order_dict(o):
