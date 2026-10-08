@@ -1277,6 +1277,9 @@ pub struct ClientCore {
     pub what_if_orders: Mutex<HashMap<OrderId, std::collections::VecDeque<(ApiContract, ApiOrder)>>>,
     // Ids of tracked orders that were filled or cancelled: never sent again (ibx#463).
     pub finished_orders: Mutex<HashSet<OrderId>>,
+    /// Ids of tracked orders placed again under the same id (a modify):
+    /// their openOrder shows no derived trail stop price (ibx#521).
+    pub modified_orders: Mutex<HashSet<OrderId>>,
     /// Executions of other clients' orders, by execution id without its
     /// revision: their commission reports are not given.
     pub silent_executions: Mutex<HashSet<String>>,
@@ -1595,21 +1598,22 @@ pub const NOT_A_SHAREHOLDER: &str = "Not an insider or substantial shareholder";
 /// 26/09/2026 to 07/10/2026):
 /// - the submitter is the user of the session (an order of an earlier
 ///   session has none);
-/// - trailStopPrice of an order with no trail: the limit price + 1 for a
-///   LMT or PEG BEST order (272.86 gives 273.86; a combo is left as placed,
-///   its openOrder shows the value on some reports only), the stop price for
-///   a STP order.
-fn session_order_fields(order: &mut ApiOrder, contract: &ApiContract, user: &str) {
+/// - trailStopPrice of a LMT or PEG BEST order, a combo too: the limit
+///   price + 1 from its placement, whatever the caller gave, and no value
+///   once the order was modified (ibx#521, the reference on 08/10/2026:
+///   272.34 gives 273.34, also for an order placed with 277.34; unset after
+///   a modify, on its callbacks and on a later listing). PEG BEST after a
+///   modify is not recorded and follows LMT;
+/// - trailStopPrice of a STP order: its stop price, the new one after a
+///   modify.
+fn session_order_fields(order: &mut ApiOrder, user: &str, modified: bool) {
     if order.submitter.is_empty() {
         order.submitter = user.to_string();
     }
     let unset = |v: f64| v == f64::MAX || v == 0.0;
-    if !unset(order.trail_stop_price) {
-        return;
-    }
     let is = |t: &str| order.order_type.eq_ignore_ascii_case(t);
-    if (is("LMT") || is("PEG BEST")) && !unset(order.lmt_price) && !contract.sec_type.eq_ignore_ascii_case("BAG") {
-        order.trail_stop_price = order.lmt_price + 1.0;
+    if is("LMT") || is("PEG BEST") {
+        order.trail_stop_price = if modified || unset(order.lmt_price) { f64::MAX } else { order.lmt_price + 1.0 };
     } else if is("STP") && !unset(order.aux_price) {
         order.trail_stop_price = order.aux_price;
     }
@@ -1632,7 +1636,7 @@ fn placed_contract(contract: &mut ApiContract, placed_exchange: &str) {
 /// The order and the contract of a preview as the reference's openOrder
 /// shows them: those of an order of the session (ibx#519).
 pub fn preview_view(contract: &mut ApiContract, order: &mut ApiOrder, placed_exchange: &str, shared: &SharedState) {
-    session_order_fields(order, contract, &shared.reference.user_name());
+    session_order_fields(order, &shared.reference.user_name(), false);
     placed_contract(contract, placed_exchange);
 }
 
@@ -1720,6 +1724,7 @@ impl ClientCore {
             held_open_orders: Mutex::new(Vec::new()),
             what_if_orders: Mutex::new(HashMap::new()),
             finished_orders: Mutex::new(HashSet::new()),
+            modified_orders: Mutex::new(HashSet::new()),
             silent_executions: Mutex::new(HashSet::new()),
             highest_order_id: Arc::new(AtomicI64::new(0)),
             order_id_saver: Mutex::new(None),
@@ -3546,6 +3551,7 @@ impl ClientCore {
             o.contract = contract;
             o.order = order;
             o.instrument = instrument;
+            self.modified_orders.lock().unwrap().insert(order_id);
             return;
         }
         let remaining = order.total_quantity;
@@ -3610,7 +3616,8 @@ impl ClientCore {
                 let dropped = self.rth_dropped.lock().unwrap().contains(&order_id);
                 order.outside_rth = (order.outside_rth && !dropped)
                     || info.as_ref().is_some_and(|i| i.order.outside_rth);
-                session_order_fields(&mut order, &t.contract, &shared.reference.user_name());
+                let modified = self.modified_orders.lock().unwrap().contains(&order_id);
+                session_order_fields(&mut order, &shared.reference.user_name(), modified);
                 (t.contract, order, t.last_fill_price, client_id)
             }
             // An order the server reported: its own client id, and no
@@ -3618,13 +3625,14 @@ impl ClientCore {
             (None, Some(i)) => {
                 let client_id = i.order.client_id as i64;
                 let mut order = i.order;
-                // An order this client placed and saw end keeps its
-                // submitter (the leg fills after a combo's Filled report).
-                order.submitter = if self.finished_orders.lock().unwrap().contains(&order_id) {
-                    shared.reference.user_name()
-                } else {
-                    String::new()
-                };
+                // An order this client placed and saw end is still an
+                // order of the session (the leg fills after a combo's
+                // Filled report).
+                order.submitter.clear();
+                if self.finished_orders.lock().unwrap().contains(&order_id) {
+                    let modified = self.modified_orders.lock().unwrap().contains(&order_id);
+                    session_order_fields(&mut order, &shared.reference.user_name(), modified);
+                }
                 (i.contract, order, 0.0, client_id)
             }
             (None, None) => return None,
@@ -3945,7 +3953,8 @@ impl ClientCore {
                         reported_trail_limit(&mut order, &info.order);
                     }
                     reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
-                    session_order_fields(&mut order, &o.contract, &shared.reference.user_name());
+                    let modified = self.modified_orders.lock().unwrap().contains(&oid);
+                    session_order_fields(&mut order, &shared.reference.user_name(), modified);
                     placed_contract(&mut contract, &o.contract.exchange);
                     reported_unset_values(&mut order);
                     Self::apply_combo_view(oid, &mut contract, &mut order, shared);
