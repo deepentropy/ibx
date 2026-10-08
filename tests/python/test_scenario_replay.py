@@ -295,14 +295,6 @@ def test_global_cancel_of_orders_of_earlier_sessions():
     assert len(assert_same(out)) == 18
 
 
-# A combo directed to ARCA with no definition (26/09/2026): 200, then its
-# cancel gives orderStatus ApiCancelled (the order id stays pending).
-def test_directed_combo_without_definition_then_cancel():
-    out = replay("20260926b/i105_combo_directed", compare=["order"])
-    theirs = assert_same(out)
-    assert theirs[-1].startswith("orderStatus|") and "|ApiCancelled|" in theirs[-1]
-
-
 # A SMART combo bought and sold (30/09/2026, ibx#474, ibx#471): the fills of
 # the combo and its legs, commissions. As the Rust test: QQQ's top of book
 # and the positions are left out (the reference's session state).
@@ -338,7 +330,9 @@ def test_account_summary_whole_answer():
     assert any(l.startswith("accountSummary|9002|All|CashBalance|933115.05|USD") for l in theirs)
 
 
-# A combo with no definition (200), then its cancel: ApiCancelled (ibx#487).
+# A combo directed to ARCA with no definition (26/09/2026): 200, then its
+# cancel gives orderStatus ApiCancelled (the order id stays pending)
+# (ibx#487).
 def test_directed_combo_without_definition_then_cancel():
     out = replay("20260926b/i105_combo_directed")
     theirs = assert_same(out)

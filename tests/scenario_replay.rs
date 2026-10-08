@@ -139,18 +139,12 @@ fn overnight_time_in_force() {
 // (ibx#486). Left out as in src/golden/orders.rs: TRAIL MIT, TRAIL LIT,
 // PASSV REL, RPI and PEG BEST (ibx#469). The commission reports (no order
 // id) are those of the fills of the orders left out.
-#[test]
-fn rth_order_types() {
-    check("20260928/rth_order_types", Options::default().mask(known).skip_orders(&[1, 2, 3, 4, 5, 6, 7]).until(6581)
-        .keep(|l| !l.starts_with("commissionAndFeesReport")));
-}
-
 // The exchange map cancel of QQQ (seq 5489) has no 6088: the QQQ request
 // was cancelled before the map came; those of AAPL and SPY in other
 // recordings have 6088=Socket, their requests still running (02/10/2026
 // seq 2461 and 2590, 28/09/2026 seq 5292 and 22088) (ibx#487).
 #[test]
-fn exchange_map_cancel_source() {
+fn rth_order_types() {
     let o = check("20260928/rth_order_types", Options::default().mask(known).skip_orders(&[1, 2, 3, 4, 5, 6, 7]).until(6581)
         .keep(|l| !l.starts_with("commissionAndFeesReport")));
     assert!(o.frames_compared > 10, "{}", o.frames_compared);
@@ -238,7 +232,7 @@ fn account_summary_whole_answer() {
 // reqPnL and reqPnLSingle (26/09/2026, ibx#478): the reference subscribes
 // the market data of its positions, known since its logon.
 #[test]
-#[ignore = "ibx#487: the P&L of the reference: its quotes, the account request of its partition, its first values (see session_start_first_client)"]
+#[ignore = "ibx#511: the P&L of the reference: its quotes, the account request of its partition, its first values (see session_start_first_client)"]
 fn pnl_and_pnl_single() {
     check("20260926b/pnl", Options::default());
 }
@@ -283,7 +277,7 @@ fn keep_up_to_date_bars_and_first_updates() {
 // 9531; ibx in request order. The rule of the reference's order is not
 // read yet.
 #[test]
-#[ignore = "ibx#429: the order of the updates of keepUpToDate requests that share a live bar stream"]
+#[ignore = "ibx#512: the order of the updates of keepUpToDate requests that share a live bar stream"]
 fn keep_up_to_date_update_order() {
     check("20261002/b1_429_keep_up_to_date", Options::default());
 }
@@ -312,7 +306,7 @@ fn historical_ticks() {
 // parameters in the reverse order of the requests, each with an XML
 // declaration; ibx sends them in request order with none.
 #[test]
-#[ignore = "ibx#457: scanner subscriptions in reverse order, XML declaration"]
+#[ignore = "ibx#513: scanner subscriptions in reverse order, XML declaration"]
 fn two_scanner_subscriptions() {
     check("20260926b/scanner_two", Options::default().compare(&[SCANNER, LOOKUP]));
 }
@@ -320,7 +314,7 @@ fn two_scanner_subscriptions() {
 // News ticks on a contract asked twice (02/10/2026, ibx#458): the
 // reference's subscription of tick 292 lists the news providers (6472).
 #[test]
-#[ignore = "ibx#458: 292 subscription without the provider list 6472"]
+#[ignore = "ibx#514: 292 subscription without the provider list 6472"]
 fn news_ticks_twice() {
     check("20261002/b1_458_news_dup", Options::default().compare(&[MARKET_DATA, HISTORICAL]));
 }
@@ -442,7 +436,7 @@ fn plain_trail_follows_the_server() {
 // Left out: the version notice 2172 (from the logon frame, which the replay
 // has not); the P&L callbacks and the account request of the P&L partition
 // (the test below); the order of the position rows, which is the order of a
-// hash set over the real account id (`session_start_position_order`).
+// hash set over the real account id: the rows are compared sorted.
 #[test]
 fn session_start_first_client() {
     let core = |f: &Fields| f.iter().any(|(t, v)| *t == 6700 && v == "Core");
