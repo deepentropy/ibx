@@ -71,8 +71,14 @@ pub struct HotLoop {
     /// Connection states last reported to the clients; `None` until the
     /// first observation (ibx#399).
     links: Option<Links>,
+    /// What the clients were last told about each data connection
+    /// (ibx#520); set with `links`.
+    told: DataLinks,
     /// Market-data farm name, for the farm status messages.
     farm_name: String,
+    /// Contract data farm of the logon, for its status messages; empty
+    /// when the logon names none (ibx#520).
+    secdef_farm_name: String,
     // ── Subsystems ──
     pub(crate) farm: FarmState,
     pub(crate) ccp: CcpState,
@@ -145,7 +151,9 @@ impl HotLoop {
             hmds_reconnect_attempt: 0,
             hmds_next_attempt_at: None,
             links: None,
+            told: DataLinks::default(),
             farm_name: "usfarm".to_string(),
+            secdef_farm_name: String::new(),
             permission_change: Default::default(),
         }
     }
@@ -1198,7 +1206,9 @@ impl HotLoop {
         // The links are known from the start: one lost in the first pass
         // is reported too (ibx#488: the first look took it as the start).
         if self.links.is_none() {
-            self.links = Some(self.current_links());
+            let now = self.current_links();
+            self.links = Some(now);
+            self.told = DataLinks::of(now);
         }
 
         while self.running {
@@ -1313,14 +1323,30 @@ impl HotLoop {
     }
 
     /// A lost link is reported to every client at once, as the reference
-    /// does (ibx#399): 1100 for the auth connection, 2103 / 2105 for the
-    /// market-data and historical farms. The clients stay connected. A farm
-    /// that is up again after its logon gives 2104 / 2106 with its name, as
-    /// in the reference; the auth link gives 1102 after its replay instead
+    /// does (ibx#399): 1100 for the auth connection, 2103 / 2105 / 2157 for
+    /// the market data, historical data and contract data connections. The
+    /// clients stay connected. A connection that is up again gives 2104 /
+    /// 2106 / 2158 with its name; the auth link gives 1102 after its replay
     /// (`maybe_report_restored`).
+    ///
+    /// The reference reports its data connections broken when the auth
+    /// link is lost, also when only that link was closed, and OK again
+    /// after the new logon (recorded 25/09/2026 and 30/09/2026): a data
+    /// connection is told OK only while it is up and the auth link is up
+    /// (ibx#520). The connections themselves are left as they are. Contract
+    /// data is read on the auth link: its notices follow that link.
+    ///
+    /// Order, as recorded: 1100, 2103, 2105, 2157 at the loss; 2106, 2158,
+    /// 2104 at the return (there the reference's order is the order in
+    /// which its connections come back).
     fn report_link_changes(&mut self) {
         let now = self.current_links();
-        let Some(before) = self.links.replace(now) else { return };
+        let ok = DataLinks::of(now);
+        let Some(before) = self.links.replace(now) else {
+            self.told = ok;
+            return;
+        };
+        let told = std::mem::replace(&mut self.told, ok);
         if before == now {
             return;
         }
@@ -1330,23 +1356,32 @@ impl HotLoop {
             self.shared.orders.set_open_orders_held(true);
             self.shared.push_connection_notice(1100, LINK_LOST.to_string());
         }
-        if before.farm && !now.farm {
-            self.shared.push_connection_notice(2103, format!("Market data farm connection is broken:{}", self.farm_name));
-        }
-        if !before.farm && now.farm {
-            self.shared.push_connection_notice(2104, format!("Market data farm connection is OK:{}", self.farm_name));
-        }
+        // The scanner follows the historical data connection itself.
         if before.hmds && !now.hmds {
-            let name = self.hmds_farm_name().to_string();
-            self.shared.push_connection_notice(2105, format!("HMDS data farm connection is broken:{}", name));
             self.hmds.scanner_link_lost(&self.shared);
         }
         if !before.hmds && now.hmds {
             self.hmds.scanner_link_restored(&mut self.hmds_conn, &mut self.hb, &self.shared);
         }
-        if !before.hmds && now.hmds {
-            let name = self.hmds_farm_name().to_string();
-            self.shared.push_connection_notice(2106, format!("HMDS data farm connection is OK:{}", name));
+        let hmds_name = self.hmds_farm_name().to_string();
+        let secdef = !self.secdef_farm_name.is_empty();
+        if told.farm && !ok.farm {
+            self.shared.push_connection_notice(2103, format!("Market data farm connection is broken:{}", self.farm_name));
+        }
+        if told.hmds && !ok.hmds {
+            self.shared.push_connection_notice(2105, format!("HMDS data farm connection is broken:{}", hmds_name));
+        }
+        if secdef && told.secdef && !ok.secdef {
+            self.shared.push_connection_notice(2157, format!("Sec-def data farm connection is broken:{}", self.secdef_farm_name));
+        }
+        if !told.hmds && ok.hmds {
+            self.shared.push_connection_notice(2106, format!("HMDS data farm connection is OK:{}", hmds_name));
+        }
+        if secdef && !told.secdef && ok.secdef {
+            self.shared.push_connection_notice(2158, format!("Sec-def data farm connection is OK:{}", self.secdef_farm_name));
+        }
+        if !told.farm && ok.farm {
+            self.shared.push_connection_notice(2104, format!("Market data farm connection is OK:{}", self.farm_name));
         }
     }
 
@@ -1372,6 +1407,11 @@ impl HotLoop {
         let mut farms = vec![(self.farm_name.clone(), links.farm)];
         if hmds_expected {
             farms.push((self.hmds_farm_name().to_string(), links.hmds));
+        }
+        // The contract data farm is the third name of the reference's list
+        // (recorded 30/09/2026); here it is up with the auth link (ibx#520).
+        if !self.secdef_farm_name.is_empty() {
+            farms.push((self.secdef_farm_name.clone(), links.ccp));
         }
         let names = |up: bool| farms.iter().filter(|f| f.1 == up).map(|f| f.0.as_str()).collect::<Vec<_>>().join("; ");
         let message = if all_up {
@@ -2209,6 +2249,11 @@ impl HotLoop {
         }
     }
 
+    /// Set the contract data farm name used in the farm status messages.
+    pub fn set_secdef_farm_name(&mut self, name: String) {
+        self.secdef_farm_name = name;
+    }
+
     /// Set cached auth credentials for farm auto-reconnect.
     pub fn set_reconnect_auth(&mut self, auth: ReconnectAuth) {
         self.reconnect_auth = Some(auth);
@@ -2793,6 +2838,22 @@ struct Links {
     ccp: bool,
     farm: bool,
     hmds: bool,
+}
+
+/// Whether the clients were told each data connection is OK (ibx#520).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct DataLinks {
+    farm: bool,
+    hmds: bool,
+    secdef: bool,
+}
+
+impl DataLinks {
+    /// A data connection is told OK while it is up and the auth link is
+    /// up; contract data is read on the auth link.
+    fn of(links: Links) -> Self {
+        Self { farm: links.farm && links.ccp, hmds: links.hmds && links.ccp, secdef: links.ccp }
+    }
 }
 
 /// Period of the server tag cleaner, how long a market data record stays
@@ -3460,7 +3521,8 @@ mod tests {
         assert!(engine.ccp.disconnected, "reset at 62 s");
         engine.report_link_changes();
         let notices = shared.drain_connection_notices();
-        assert_eq!(notices.iter().map(|n| n.0).collect::<Vec<_>>(), vec![1100]);
+        // 1100, and the data connections told broken with it (ibx#520).
+        assert_eq!(notices.iter().map(|n| n.0).collect::<Vec<_>>(), vec![1100, 2103, 2105]);
         assert!(!shared.take_connection_lost(), "the clients stay connected");
     }
 
@@ -3555,7 +3617,8 @@ mod tests {
         assert!(!engine.farm.disconnected);
         assert!(!shared.orders.open_orders_held());
         engine.report_link_changes();
-        assert_eq!(shared.drain_connection_notices().iter().map(|n| n.0).collect::<Vec<_>>(), vec![1100]);
+        // 1100, and the data connections told broken with it (ibx#520).
+        assert_eq!(shared.drain_connection_notices().iter().map(|n| n.0).collect::<Vec<_>>(), vec![1100, 2103, 2105]);
         assert!(shared.orders.open_orders_held(), "open-order requests wait from the 1100 (ibx#251)");
     }
 
@@ -3673,20 +3736,74 @@ mod tests {
         engine.farm.disconnected = false;
         engine.hmds.disconnected = false;
         engine.report_link_changes();
+        // In the order of the reference's return (recorded 30/09/2026).
         assert_eq!(shared.drain_connection_notices(), vec![
-            (2104, "Market data farm connection is OK:eufarm".to_string()),
             (2106, "HMDS data farm connection is OK:ushmds".to_string()),
+            (2104, "Market data farm connection is OK:eufarm".to_string()),
         ]);
         engine.report_link_changes();
         assert!(shared.drain_connection_notices().is_empty(), "reported once");
 
-        // The auth link coming back gives no farm notice.
+    }
+
+    // ibx#520: the loss of the auth link alone is told for every data
+    // connection, and its return too, as the reference (25/09/2026: 1100
+    // then the three broken notices; 30/09/2026: 2106, 2158, 2104 and then
+    // 1102 with three names).
+    #[test]
+    fn auth_link_loss_and_return_are_told_for_every_data_connection() {
+        let (mut engine, shared, _servers) = engine_with_links();
+        engine.set_secdef_farm_name("secdefil".into());
+        engine.report_link_changes();
+        assert!(shared.drain_connection_notices().is_empty(), "first look: nothing to report");
+
         engine.ccp.disconnected = true;
+        engine.report_link_changes();
+        assert_eq!(shared.drain_connection_notices(), vec![
+            (1100, LINK_LOST.to_string()),
+            (2103, "Market data farm connection is broken:usfarm".to_string()),
+            (2105, "HMDS data farm connection is broken:ushmds".to_string()),
+            (2157, "Sec-def data farm connection is broken:secdefil".to_string()),
+        ]);
+        assert!(!engine.farm.disconnected && !engine.hmds.disconnected, "the data connections are left as they are");
+
+        // A data connection really lost during the outage, and back before
+        // the auth link: already told broken, nothing more.
+        engine.farm.disconnected = true;
+        engine.report_link_changes();
+        engine.farm.disconnected = false;
+        engine.report_link_changes();
+        assert!(shared.drain_connection_notices().is_empty());
+
+        engine.ccp.disconnected = false;
+        engine.report_link_changes();
+        assert_eq!(shared.drain_connection_notices(), vec![
+            (2106, "HMDS data farm connection is OK:ushmds".to_string()),
+            (2158, "Sec-def data farm connection is OK:secdefil".to_string()),
+            (2104, "Market data farm connection is OK:usfarm".to_string()),
+        ]);
+        engine.ccp.status_replay_end_at = Some(Instant::now());
+        engine.maybe_report_restored();
+        assert_eq!(shared.drain_connection_notices(), vec![(1102,
+            format!("{LINK_RESTORED} All data farms are connected: usfarm; ushmds; secdefil."))]);
+    }
+
+    // A data connection still down when the auth link returns is told OK
+    // when it comes up itself.
+    #[test]
+    fn a_data_connection_down_at_the_return_is_told_when_it_is_up() {
+        let (mut engine, shared, _servers) = engine_with_links();
+        engine.report_link_changes();
+        engine.ccp.disconnected = true;
+        engine.hmds.disconnected = true;
         engine.report_link_changes();
         let _ = shared.drain_connection_notices();
         engine.ccp.disconnected = false;
         engine.report_link_changes();
-        assert!(shared.drain_connection_notices().is_empty(), "1102 comes after the replay, not here");
+        assert_eq!(shared.drain_connection_notices().iter().map(|n| n.0).collect::<Vec<_>>(), vec![2104]);
+        engine.hmds.disconnected = false;
+        engine.report_link_changes();
+        assert_eq!(shared.drain_connection_notices().iter().map(|n| n.0).collect::<Vec<_>>(), vec![2106]);
     }
 
     // ibx#399: with every transport down the loop spun at ~1M passes/s and

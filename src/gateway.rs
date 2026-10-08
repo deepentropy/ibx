@@ -2713,6 +2713,7 @@ impl Gateway {
         hot_loop.set_depth_limit(self.depth_limit);
         hot_loop.set_user_book(self.user_book);
         hot_loop.set_farm_name(self.farm_name.clone());
+        hot_loop.set_secdef_farm_name(self.secdef_farm.clone());
         hot_loop.ccp.data_permissions = self.logon.data_permissions.clone();
         hot_loop.set_reconnect_auth(reconnect_auth);
         hot_loop.farm_conn = Some(farm_conn);
