@@ -72,10 +72,11 @@ fn aapl_with_delayed_data_asked_before_the_open() {
 // from the cancelled request (bid 340.45 x 320, ask 340.52 x 40, the last
 // ones of request 9001); the first 35=P then gives the trade and daily
 // fields only. ibx frees the contract's quote at the cancel and sends
-// everything at the first 35=P. Found by this test (ibx#486); the rule for
-// how long the record keeps its values is not read yet.
+// everything at the first 35=P. Found by this test (ibx#508); the record
+// keeps its values 45 s at least (capture of 07/10/2026), how long is not
+// read yet.
 #[test]
-#[ignore = "ibx#486: the reference keeps a contract's quote after the cancel and gives it to the next request"]
+#[ignore = "ibx#508: the reference keeps a contract's quote after the cancel and gives it to the next request"]
 fn a_new_request_gets_the_quote_kept_from_a_cancelled_one() {
     assert!(replay_and_compare("l1_aapl_preopen_delayed", None, &[9100]) > 10);
 }

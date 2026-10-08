@@ -372,9 +372,10 @@ fn why_held_is_trigger_for_a_stop() {
 }
 
 // The first openOrder of a STP order shows lmtPrice 250.03 (SELL stop at
-// 250, no 44 on the wire), the next ones none.
+// 250, no 44 on the wire), the next ones none. Not reproduced on
+// 07/10/2026: four STP orders showed no limit price (ibx#510).
 #[test]
-#[ignore = "ibx#486: the first openOrder of a STP order has a limit price the wire does not carry"]
+#[ignore = "not reproduced (ibx#510): the first openOrder of a STP order had a limit price the wire does not carry"]
 fn stp_first_open_order_limit_price() {
     replay_and_compare("orders_premarket_order_types", all, Known { stp_lmt: false, ..KNOWN }, &[]);
 }
@@ -382,18 +383,12 @@ fn stp_first_open_order_limit_price() {
 // A bracket in the client library's form: parent and take-profit with
 // transmit off, the stop with transmit on; the reference holds the first
 // two and sends the three new orders together. ibx refuses transmit off
-// (ibx#226).
+// (ibx#226, ibx#509).
 #[test]
-#[ignore = "ibx#486, ibx#226: transmit=false orders are refused instead of held for the group"]
+#[ignore = "ibx#509: transmit=false orders are refused instead of held for the group"]
 fn bracket_with_transmit_off() {
     replay_and_compare("orders_bracket", all, KNOWN, &[]);
     replay_and_compare("orders_bracket_b", all, KNOWN, &[]);
-}
-
-#[test]
-#[ignore = "ibx#470: the option combos refused with 460 get no answer"]
-fn option_combos_refused_with_460() {
-    replay_and_compare("orders_rth_order_types", all, KNOWN, &[]);
 }
 
 // The reference gives a preview a ClOrdID of its own with version 0, and
@@ -409,7 +404,7 @@ fn what_if_clord_id_and_perm_id() {
 
 // A combo preview (QQQ,SPY BAG, conId 0 in the request).
 #[test]
-#[ignore = "ibx#486: the combo what-if of b1_462 is not sent by the replay"]
+#[ignore = "replay limit: the combo what-if of b1_462 is not sent by the replay"]
 fn what_if_of_a_combo() {
     replay_and_compare("orders_b1_462_whatif", all, KNOWN, &[]);
 }
@@ -422,7 +417,7 @@ fn what_if_of_a_combo() {
 // cached); ibx asks no schedule for an order, knows no zone, and sends the
 // order.
 #[test]
-#[ignore = "ibx#486: the contract's zone comes from a schedule the reference had before the recording"]
+#[ignore = "ibx#510: the contract's zone comes from a schedule the reference had before the recording"]
 fn condition_time_in_another_zone() {
     replay_and_compare("orders_b1_416_time_condition", all, KNOWN, &[]);
 }
@@ -449,7 +444,7 @@ fn overnight_directed_order() {
 // tag of the logon or of the contract replies of the recording names the
 // option permission.
 #[test]
-#[ignore = "ibx#486: the data behind 460 is not in the logon or the contract replies"]
+#[ignore = "ibx#510: the data behind 460 is not in the logon or the contract replies"]
 fn option_combo_without_permission() {
     replay_and_compare("orders_rth_order_types", all, KNOWN, &[1, 2, 3, 4, 5, 6, 7]);
 }
@@ -457,7 +452,7 @@ fn option_combo_without_permission() {
 // The algo refusals 441 / 443 need the algo definitions the reference
 // read from the server; this replay does not load them.
 #[test]
-#[ignore = "ibx#486: algo definitions are not part of the order replay"]
+#[ignore = "replay limit: algo definitions are not part of the order replay"]
 fn algo_refusals() {
     replay_and_compare("orders_b1_263_algo_refusals", all, KNOWN, &[]);
 }

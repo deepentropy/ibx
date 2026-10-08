@@ -17,7 +17,7 @@ use ibx::test_support::scenario::{load_scenario, replay, Options, Outcome};
 use ibx::test_support::Fields;
 
 /// Known differences the order scenarios mask on both sides, each with its
-/// own ignored test in src/golden/orders.rs (ibx#486): the first openOrder
+/// own ignored test in src/golden/orders.rs (ibx#510): the first openOrder
 /// of a STP order shows a limit price the wire does not carry
 /// (`stp_first_open_order_limit_price`).
 fn known(line: &str) -> String {
@@ -210,7 +210,7 @@ fn directed_combo_without_definition_then_cancel() {
 // A bracket in the client library's form (26/09/2026): parent and
 // take-profit with transmit off, the stop with transmit on.
 #[test]
-#[ignore = "ibx#226: transmit=false orders are refused instead of held for the group"]
+#[ignore = "ibx#509: transmit=false orders are refused instead of held for the group"]
 fn bracket() {
     check("20260926/bracket", orders());
     check("20260926b/bracket", orders());
@@ -474,7 +474,7 @@ fn session_start_first_client() {
 fn generic_ticks_one_by_one() {
     // Compared: the errors and the ticks of the generic entries. The top of
     // book is left out: a request on a contract asked just before gets the
-    // quote the reference kept (ibx#486). The version notice comes from the
+    // quote the reference kept (ibx#508). The version notice comes from the
     // logon frame, which the replay has not.
     fn generic(l: &str) -> bool {
         let f: Vec<&str> = l.split('|').collect();
