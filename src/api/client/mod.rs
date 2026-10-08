@@ -226,6 +226,10 @@ impl EClient {
             .name("ib-engine-hotloop".into())
             .spawn(move || { hot_loop.run_with_panic_recovery(); })?;
 
+        // The highest order id of this client's earlier sessions (ibx#518).
+        let core = ClientCore::new();
+        core.keep_order_ids(&account_id);
+
         Ok(Self {
             shared,
             control_tx,
@@ -233,7 +237,7 @@ impl EClient {
             account_id,
             connected: AtomicBool::new(true),
             close_notified: AtomicBool::new(false),
-            core: ClientCore::new(),
+            core,
             session_token_bytes,
             token_type,
             connection_time: crate::client_core::connection_time_now(),
@@ -326,6 +330,7 @@ impl EClient {
             let _ = h.join();
         }
         self.connected.store(false, Ordering::Release);
+        self.core.stop_keeping_order_ids();
         self.core.reset();
     }
 }

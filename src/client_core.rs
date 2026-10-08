@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Sender;
 
@@ -1283,8 +1283,12 @@ pub struct ClientCore {
     /// The highest order id this client placed (orders and what-ifs), as
     /// the reference records it for the client when an order goes on
     /// (`jextend.bH.Z()@78`, `jextend.H.c(int)`): a new order at or below
-    /// it is refused with 103 (ibx#462).
-    pub highest_order_id: AtomicI64,
+    /// it is refused with 103 (ibx#462). Shared with the thread that keeps
+    /// it on disk (ibx#518).
+    pub highest_order_id: Arc<AtomicI64>,
+    /// Keeps `highest_order_id` on disk while the client is connected, as
+    /// the reference keeps it in its saved settings (ibx#518).
+    pub order_id_saver: Mutex<Option<crate::order_ids::Saver>>,
     /// The next order id `take_order_id` hands out, at least the next
     /// valid id.
     pub reserved_order_id: AtomicI64,
@@ -1658,7 +1662,8 @@ impl ClientCore {
             what_if_orders: Mutex::new(HashMap::new()),
             finished_orders: Mutex::new(HashSet::new()),
             silent_executions: Mutex::new(HashSet::new()),
-            highest_order_id: AtomicI64::new(0),
+            highest_order_id: Arc::new(AtomicI64::new(0)),
+            order_id_saver: Mutex::new(None),
             reserved_order_id: AtomicI64::new(0),
             market_data_type: AtomicI32::new(1),
             mdt_sent: Mutex::new(HashSet::new()),
@@ -3721,6 +3726,28 @@ impl ClientCore {
             return duplicate();
         }
         None
+    }
+
+    /// Start keeping this client's highest order id on disk, raised first
+    /// to the value its earlier sessions saved (ibx#518). Called at the
+    /// connect, once the client id is known; a file that cannot be used is
+    /// logged and the client goes on without it.
+    pub fn keep_order_ids(&self, account: &str) {
+        let Some(path) = crate::order_ids::default_path() else { return };
+        let client_id = self.client_id.load(Ordering::Relaxed);
+        let mut saver = self.order_id_saver.lock().unwrap();
+        // The saver of the last connect saves its value before the new one reads.
+        *saver = None;
+        match crate::order_ids::Saver::start(path, account, client_id, self.highest_order_id.clone()) {
+            Ok(s) => *saver = Some(s),
+            Err(e) => log::warn!("Order ids are not kept across sessions: {}", e),
+        }
+    }
+
+    /// Save this client's highest order id and stop keeping it (at the
+    /// disconnect).
+    pub fn stop_keeping_order_ids(&self) {
+        *self.order_id_saver.lock().unwrap() = None;
     }
 
     /// Note an order id this client placed: the highest one bounds the

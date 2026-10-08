@@ -199,6 +199,10 @@ impl EClient {
         let _ = port; // unused but kept for ibapi signature compat
         // The clientId of this client's executions (ibx#474).
         self.core.client_id.store(client_id as i64, Ordering::Relaxed);
+        // The highest order id of this client id's earlier sessions (ibx#518).
+        if let Some(account) = self.account_id.lock().unwrap().as_deref() {
+            self.core.keep_order_ids(account);
+        }
         // The client id every new order carries (ibx#466).
         if let Some(shared) = self.shared.lock().unwrap().as_ref() {
             shared.reference.set_api_client_id(client_id as i64);
@@ -243,6 +247,7 @@ impl EClient {
         *self.event_rx.lock().unwrap() = None;
         *self.account_id.lock().unwrap() = None;
         *self.connection_time.lock().unwrap() = None;
+        self.core.stop_keeping_order_ids();
         self.core.reset();
         Ok(())
     }

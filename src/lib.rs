@@ -7,6 +7,7 @@ pub mod control;
 pub mod gateway;
 pub mod logging;
 pub mod md_events;
+pub mod order_ids;
 pub mod protocol;
 pub mod types;
 
