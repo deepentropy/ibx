@@ -65,7 +65,7 @@ def test_callbacks_one_side_lacks():
     ours.insert(3, ["openOrderEnd"])
     rows = d.compare(reference, ours)
     assert kinds(rows) == [("missing_in_ibx", "error", "-1|2104", ""), ("extra_in_ibx", "openOrderEnd", "", "")]
-    assert rows[0]["known"] == "ibx#517" and rows[1]["known"] == ""
+    assert rows[0]["known"] == "" and rows[1]["known"] == ""
 
 
 def test_data_callbacks_are_compared_by_the_kinds_of_rows():
@@ -125,7 +125,7 @@ def test_the_report_file_and_the_exit_code(tmp_path):
     reference, ours = tmp_path / "reference", tmp_path / "ibx"
     reference.mkdir(), ours.mkdir()
     theirs = run(1, 111)
-    theirs.insert(3, ["error", -1, None, 2104, "Market data farm connection is OK:usfarm", ""])
+    theirs[3][3] = {**theirs[3][3], "ocaType": 3}
     write_run(reference, {"s": theirs})
     write_run(ours, {"s": run(4, 222, "DU7654321")})
     out = tmp_path / "report.csv"
@@ -133,7 +133,7 @@ def test_the_report_file_and_the_exit_code(tmp_path):
     with open(out, encoding="utf-8", newline="") as fh:
         rows = list(csv.DictReader(fh))
     assert list(rows[0]) == d.COLUMNS and len(rows) == 1
-    assert (rows[0]["scenario"], rows[0]["kind"], rows[0]["known"]) == ("s", "missing_in_ibx", "ibx#517")
+    assert (rows[0]["scenario"], rows[0]["field"], rows[0]["known"]) == ("s", "order.ocaType", "ibx#519")
     assert "DU7654321" not in out.read_text(encoding="utf-8")
 
     mine = run(4, 222)

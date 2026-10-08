@@ -78,8 +78,6 @@ OPEN_ORDER_519 = {"order.ocaType", "order.clearingIntent", "order.shareholder", 
 
 # Open issues that explain a row: (issue, test of the row).
 KNOWN = [
-    ("ibx#517", lambda r: r["callback"] == "error" and r["kind"] == "missing_in_ibx"
-     and r["key"].split("|")[-1] in ("2104", "2106", "2158")),
     ("ibx#519", lambda r: r["callback"] == "openOrder" and r["kind"] == "field" and r["field"] in OPEN_ORDER_519),
 ]
 
