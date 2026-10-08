@@ -290,10 +290,11 @@ pub fn submitter(name: &str) -> &'static str {
 pub fn compared_field(field: &str, order_type: &str, sec_type: &str) -> bool {
     // A plain TRAIL shows the stop the server reports (captured
     // 05/10/2026); a LMT, PEG BEST or STP the value the reference derives
-    // (ibx#519). A combo shows one on some reports only, and the other
-    // trailing types are not read yet.
+    // (ibx#519); TRAIL MIT, TRAIL LIT and TRAIL LIMIT the one the order
+    // was placed with. A combo is left out: the reference shows the limit
+    // price + 1 until the order is modified, and none after (ibx#521).
     field != "trailStopPrice"
-        || (matches!(order_type, "TRAIL" | "LMT" | "PEG BEST" | "STP") && sec_type != "BAG")
+        || (matches!(order_type, "TRAIL" | "LMT" | "PEG BEST" | "STP" | "TRAIL MIT" | "TRAIL LIT" | "TRAIL LIMIT") && sec_type != "BAG")
 }
 
 /// A price field of an openOrder: unset (the client library's MAX, ibx's
