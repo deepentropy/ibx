@@ -106,6 +106,33 @@ def test_an_open_order_listing_is_compared_whatever_its_order():
     assert d.compare(live, listing([1, 2])[:-1]) != []
 
 
+def test_connection_notices_after_the_connect_are_explained_by_the_session():
+    def side(*notices):
+        return [["nextValidId", 1]] + [["error", -1, None, code, text, ""] for code, text in notices] + [["openOrderEnd"]]
+
+    connect = [(2104, "Market data farm connection is OK:usfarm"), (2106, "HMDS data farm connection is OK:ushmds"),
+               (2158, "Sec-def data farm connection is OK:secdefil")]
+    later = (2104, "Market data farm connection is OK:cashfarm")
+    # A farm the reference had open and ibx had not: explained, not a failure.
+    rows = d.compare(side(*connect, later), side(*connect))
+    assert [(r["key"], r["known"]) for r in rows] == [("-1|2104", "session: state of the data connections")]
+    # A notice of the connect that is missing is not explained (ibx#517).
+    rows = d.compare(side(*connect), side(*connect[1:]))
+    assert [(r["kind"], r["key"], r["known"]) for r in rows] == [("missing_in_ibx", "-1|2104", "")]
+
+
+def test_sets_enum_internals_and_request_windows():
+    theirs = [["securityDefinitionOptionParameter", 1, "SMART", 265598, "AAPL", "100", "{'b', 'a'}", "{2.0, 1.0}"],
+              ["historicalDataEnd", 2, "20260926 15:46:37 US/Eastern", "20260926 16:16:37 US/Eastern"],
+              ["contractDetails", 3, {"longName": "X", "fundAssetType": {"_value_": 1, "__objclass__": "<cycle>"}}]]
+    ours = [["securityDefinitionOptionParameter", 1, "SMART", 265598, "AAPL", "100", "{'a', 'b'}", "{1.0, 2.0}"],
+            ["historicalDataEnd", 2, "20261008 16:10:40 US/Eastern", "20261008 16:40:40 US/Eastern"],
+            ["contractDetails", 3, {"longName": "X"}]]
+    assert d.compare(theirs, ours) == []
+    ours[1][3] = "20261008 16:40:40"
+    assert [r["field"] for r in d.compare(theirs, ours)] == ["end"]
+
+
 def test_accounts_are_masked():
     assert d.mask_accounts('"DU1234567" U7654321 DUXXXXXXX x') == '"DUXXXXXXX" DUXXXXXXX DUXXXXXXX x'
 

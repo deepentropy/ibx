@@ -27,6 +27,8 @@ How two callback lists are compared:
   the reference lists its order book by a hash of the permId, a value of the
   session, so the order of a listing changes from one run to the next
   (ibx#522).
+- The start and the end of ``historicalDataEnd`` follow the time of the
+  request: their form is compared (digits as 9), not their value.
 - Prices of the orders follow the reference price of the day the scenario
   ran: they are compared for presence unless both sides ran on the same day
   (``--strict-prices``).
@@ -76,8 +78,23 @@ ORDER_ID_FIELDS = {"orderId", "parentId"}
 # Errors whose id is an order id even when the order was never placed.
 ORDER_ERRORS = {103, 104, 105, 110, 135, 161, 201, 202, 399, 10147, 10148}
 
-# Open issues that explain a row: (issue, test of the row).
+# Notices about the state of the data connections: which ones a client
+# gets depends on what the reference had open at that moment.
+CONNECTION_NOTICES = {"2103", "2104", "2105", "2106", "2107", "2108", "2119", "2120", "2157", "2158", "2159", "2160"}
+
+
+def _connection_notice(r):
+    # The three notices of the connect are compared as they are (ibx#517).
+    return not r.get("at_connect") and r["callback"] == "error" and (
+        r["key"].split("|")[-1] in CONNECTION_NOTICES
+        or (r["field"] == "errorString" and " farm " in r["reference"] and " farm " in r["ibx"]))
+
+
+# What explains a row: (an open issue or a reason, test of the row).
 KNOWN = [
+    ("session: state of the data connections", _connection_notice),
+    ("recording older than notice 2172", lambda r: r["callback"] == "error" and r["kind"] == "extra_in_ibx"
+     and r["key"] == "-1|2172"),
 ]
 
 COLUMNS = ["scenario", "reference_session", "ibx_session", "kind", "callback", "key", "field", "reference", "ibx",
@@ -210,11 +227,16 @@ def empty(v):
 def flat(prefix, v, out):
     if isinstance(v, dict):
         for k, x in v.items():
-            flat(f"{prefix}.{k}", x, out)
+            # Internals of a Python enum, written by the callback log.
+            if not str(k).startswith("_"):
+                flat(f"{prefix}.{k}", x, out)
     elif isinstance(v, list):
         for i, x in enumerate(v):
             flat(f"{prefix}[{i}]", x, out)
-    elif not empty(v):
+    elif not empty(v) and v != "<cycle>":
+        if isinstance(v, str) and v.startswith("{") and v.endswith("}") and ":" not in v:
+            # A Python set, written in no order: its items sorted.
+            v = "{" + ", ".join(sorted(x.strip() for x in v[1:-1].split(","))) + "}"
         out[prefix] = number(mask_accounts(v) if isinstance(v, str) else v)
 
 
@@ -245,6 +267,9 @@ def comparable(call, session, strict_prices):
         v = fields[path]
         if leaf in NOT_COMPARED:
             del fields[path]
+        elif name == "historicalDataEnd" and leaf in ("start", "end") and isinstance(v, str):
+            # The window of the request follows the time it was made: its form only.
+            fields[path] = re.sub(r"\d", "9", v)
         elif leaf in SESSION_FIELDS or name == "nextValidId":
             fields[path] = "{set}"
         elif leaf in PRICE_FIELDS and not strict_prices:
@@ -297,9 +322,19 @@ def compare(reference, ours, strict_prices=False):
     reference = [c for c in reference if c[0] not in LEFT_OUT]
     ours = [c for c in ours if c[0] not in LEFT_OUT]
 
-    def add(kind, callback, key, field="", ref="", ibx=""):
+    def add(kind, callback, key, field="", ref="", ibx="", at_connect=False):
         rows.append({"kind": kind, "callback": callback, "key": key, "field": field,
-                     "reference": text(ref), "ibx": text(ibx)})
+                     "reference": text(ref), "ibx": text(ibx), "at_connect": at_connect})
+
+    def connect_notices(calls):
+        """Places of the first market data, historical data and contract data notice of a side."""
+        first = {}
+        for i, (name, key, _) in enumerate(calls):
+            kind = {"2103": "md", "2104": "md", "2105": "hist", "2106": "hist", "2157": "sec", "2158": "sec"}.get(
+                key.split("|")[-1]) if name == "error" and key.startswith("-1|") else None
+            if kind:
+                first.setdefault(kind, i)
+        return set(first.values())
 
     # Data callbacks: the kinds of rows each side got.
     theirs_shape = {shape_of(c) for c in reference if c[0] in SHAPE}
@@ -313,20 +348,23 @@ def compare(reference, ours, strict_prices=False):
     ref_session, our_session = Session(reference), Session(ours)
     a = listings_by_id([comparable(c, ref_session, strict_prices) for c in reference if c[0] not in SHAPE])
     b = listings_by_id([comparable(c, our_session, strict_prices) for c in ours if c[0] not in SHAPE])
+    at_a, at_b = connect_notices(a), connect_notices(b)
     matcher = difflib.SequenceMatcher(None, [c[:2] for c in a], [c[:2] for c in b], autojunk=False)
     for op, i1, i2, j1, j2 in matcher.get_opcodes():
         if op == "equal":
-            for (name, key, theirs), (_, _, mine) in zip(a[i1:i2], b[j1:j2]):
+            for k, ((name, key, theirs), (_, _, mine)) in enumerate(zip(a[i1:i2], b[j1:j2])):
                 for field in sorted(set(theirs) | set(mine)):
                     if theirs.get(field) != mine.get(field):
-                        add("field", name, key, field, theirs.get(field), mine.get(field))
+                        add("field", name, key, field, theirs.get(field), mine.get(field),
+                            at_connect=i1 + k in at_a or j1 + k in at_b)
             continue
-        for name, key, fields in a[i1:i2]:
-            add("missing_in_ibx", name, key, ref=fields.get("errorString", fields.get("status", "")))
-        for name, key, fields in b[j1:j2]:
-            add("extra_in_ibx", name, key, ibx=fields.get("errorString", fields.get("status", "")))
+        for i, (name, key, fields) in enumerate(a[i1:i2], i1):
+            add("missing_in_ibx", name, key, ref=fields.get("errorString", fields.get("status", "")), at_connect=i in at_a)
+        for j, (name, key, fields) in enumerate(b[j1:j2], j1):
+            add("extra_in_ibx", name, key, ibx=fields.get("errorString", fields.get("status", "")), at_connect=j in at_b)
     for row in rows:
-        row["known"] = " ".join(issue for issue, explains in KNOWN if explains(row))
+        row["known"] = "; ".join(issue for issue, explains in KNOWN if explains(row))
+        del row["at_connect"]
     return rows
 
 
