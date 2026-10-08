@@ -52,7 +52,11 @@ def test_a_field_that_differs_is_one_row():
 def test_a_field_of_an_object_is_named_by_its_path():
     ours = run(1, 111)
     ours[3][3] = {**ours[3][3], "tif": "GTC"}
-    assert kinds(d.compare(run(1, 111), ours)) == [("field", "openOrder", "{id+0}", "order.tif")]
+    rows = d.compare(run(1, 111), ours)
+    assert kinds(rows) == [("field", "openOrder", "{id+0}", "order.tif")] and rows[0]["known"] == ""
+    theirs = run(1, 111)
+    theirs[3][3] = {**theirs[3][3], "ocaType": 3}
+    assert [(r["field"], r["known"]) for r in d.compare(theirs, run(1, 111))] == [("order.ocaType", "ibx#519")]
 
 
 def test_callbacks_one_side_lacks():

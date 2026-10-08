@@ -71,10 +71,16 @@ ORDER_ID_FIELDS = {"orderId", "parentId"}
 # Errors whose id is an order id even when the order was never placed.
 ORDER_ERRORS = {103, 104, 105, 110, 135, 161, 201, 202, 399, 10147, 10148}
 
+# The openOrder fields of ibx#519.
+OPEN_ORDER_519 = {"order.ocaType", "order.clearingIntent", "order.shareholder", "order.submitter",
+                  "order.adjustedOrderType", "order.deltaNeutralOrderType", "order.trailStopPrice",
+                  "contract.primaryExchange", "contract.exchange"}
+
 # Open issues that explain a row: (issue, test of the row).
 KNOWN = [
     ("ibx#517", lambda r: r["callback"] == "error" and r["kind"] == "missing_in_ibx"
      and r["key"].split("|")[-1] in ("2104", "2106", "2158")),
+    ("ibx#519", lambda r: r["callback"] == "openOrder" and r["kind"] == "field" and r["field"] in OPEN_ORDER_519),
 ]
 
 COLUMNS = ["scenario", "reference_session", "ibx_session", "kind", "callback", "key", "field", "reference", "ibx",
