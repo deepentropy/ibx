@@ -22,6 +22,11 @@ How two callback lists are compared:
   account, the order ids (kept as their distance to ``nextValidId``), permId,
   execId, times, and ``nextValidId`` itself. The time of an error is not
   compared at all.
+- The orders of an open order listing (the ``openOrder`` / ``orderStatus``
+  pairs before an ``openOrderEnd``) are compared in the order of their ids:
+  the reference lists its order book by a hash of the permId, a value of the
+  session, so the order of a listing changes from one run to the next
+  (ibx#522).
 - Prices of the orders follow the reference price of the day the scenario
   ran: they are compared for presence unless both sides ran on the same day
   (``--strict-prices``).
@@ -261,6 +266,22 @@ def shape_of(call):
     return name, "|".join(str(args[i]) for i in SHAPE[name] if i < len(args))
 
 
+def listings_by_id(calls):
+    """The calls with the orders of every open order listing in the order of
+    their ids: the openOrder / orderStatus pairs right before an
+    openOrderEnd."""
+    out = list(calls)
+    for end in [i for i, c in enumerate(out) if c[0] == "openOrderEnd"]:
+        start = end
+        while (start >= 2 and out[start - 2][0] == "openOrder" and out[start - 1][0] == "orderStatus"
+               and out[start - 2][1] == out[start - 1][1]):
+            start -= 2
+        pairs = [out[i:i + 2] for i in range(start, end, 2)]
+        pairs.sort(key=lambda pair: [int(n) for n in re.findall(r"-?\d+", pair[0][1])])
+        out[start:end] = [c for pair in pairs for c in pair]
+    return out
+
+
 # ── The comparison ──
 
 
@@ -290,8 +311,8 @@ def compare(reference, ours, strict_prices=False):
 
     # The other callbacks, in order.
     ref_session, our_session = Session(reference), Session(ours)
-    a = [comparable(c, ref_session, strict_prices) for c in reference if c[0] not in SHAPE]
-    b = [comparable(c, our_session, strict_prices) for c in ours if c[0] not in SHAPE]
+    a = listings_by_id([comparable(c, ref_session, strict_prices) for c in reference if c[0] not in SHAPE])
+    b = listings_by_id([comparable(c, our_session, strict_prices) for c in ours if c[0] not in SHAPE])
     matcher = difflib.SequenceMatcher(None, [c[:2] for c in a], [c[:2] for c in b], autojunk=False)
     for op, i1, i2, j1, j2 in matcher.get_opcodes():
         if op == "equal":

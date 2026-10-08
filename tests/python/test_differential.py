@@ -89,6 +89,23 @@ def test_the_quantity_of_an_order_message_is_not_taken_for_its_id():
     assert fields["errorString"] == text and key == "{id+0}|399"
 
 
+def test_an_open_order_listing_is_compared_whatever_its_order():
+    def listing(ids):
+        out = [["nextValidId", 1]]
+        for i in ids:
+            out += [["openOrder", i, CONTRACT, {**ORDER, "orderId": i}, {"status": "Submitted"}],
+                    ["orderStatus", i, "Submitted", 0.0, 1.0, 0.0, 111, 0, 0.0, 7, "", 0.0]]
+        return out + [["openOrderEnd"]]
+
+    # The reference lists by a hash of the permId (ibx#522): 1, 2, 3 on one side, 3, 2, 1 on the other.
+    assert d.compare(listing([1, 2, 3]), listing([3, 2, 1])) == []
+    assert kinds(d.compare(listing([1, 2, 3]), listing([3, 1]))) == [
+        ("missing_in_ibx", "openOrder", "{id+1}", ""), ("missing_in_ibx", "orderStatus", "{id+1}", "")]
+    # Callbacks of orders outside a listing keep their order.
+    live = listing([2, 1])[:-1]
+    assert d.compare(live, listing([1, 2])[:-1]) != []
+
+
 def test_accounts_are_masked():
     assert d.mask_accounts('"DU1234567" U7654321 DUXXXXXXX x') == '"DUXXXXXXX" DUXXXXXXX DUXXXXXXX x'
 
