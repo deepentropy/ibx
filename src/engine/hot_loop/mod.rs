@@ -1150,10 +1150,7 @@ impl HotLoop {
         if self.context.md_resolved.is_empty() { return; }
         for sub in std::mem::take(&mut self.context.md_resolved) {
             let into = if sub.mode_9887 == 0 {
-                self.context.market.active_instruments()
-                    .filter(|&(slot, con_id)| con_id == sub.con_id && slot != sub.instrument)
-                    .map(|(slot, _)| slot)
-                    .find(|&slot| self.joins_top(slot, sub.snapshot))
+                self.running_top_slot(sub.con_id, Some(sub.instrument), sub.snapshot)
             } else {
                 None
             };
@@ -1175,6 +1172,17 @@ impl HotLoop {
                 self.route_md_subscribe(&sub);
             }
         }
+    }
+
+    /// The slot of contract `con_id`, other than `except`, whose top of book
+    /// a new request can share (`joins_top`). A contract can have several
+    /// slots: the one found by its conId (an order's, or the first request's)
+    /// and the slots of requests made by symbol (ibx#533, ibx#534).
+    fn running_top_slot(&self, con_id: i64, except: Option<InstrumentId>, snapshot: bool) -> Option<InstrumentId> {
+        self.context.market.active_instruments()
+            .filter(|&(slot, c)| c == con_id && Some(slot) != except)
+            .map(|(slot, _)| slot)
+            .find(|&slot| self.joins_top(slot, snapshot))
     }
 
     /// A new top-of-book request of an instrument shares the one already
@@ -1567,6 +1575,20 @@ impl HotLoop {
         for cmd in cmds {
             match cmd {
                 ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, snapshot, reply_tx } => {
+                    // The top of book of the contract runs on another slot
+                    // than the one its conId finds (a request made by
+                    // symbol after an order on the contract): the request
+                    // shares it there, nothing is sent (ibx#534).
+                    let found = self.context.market.instrument_by_con_id(con_id);
+                    if con_id != 0 && mode_9887 == 0 && !found.is_some_and(|slot| self.joins_top(slot, snapshot))
+                        && let Some(slot) = self.running_top_slot(con_id, found, snapshot)
+                    {
+                        log::info!("Market data for con_id {} joins the subscription of instrument {}", con_id, slot);
+                        if let Some(tx) = &reply_tx {
+                            let _ = tx.send(Ok(slot));
+                        }
+                        continue;
+                    }
                     // No conId: resolved first, as the reference (ibx#278).
                     let key = (con_id != 0).then_some(con_id);
                     if let Some(id) = self.register_slot_or_reject(key, symbol.clone(), &sec_type, &exchange, &reply_tx) {
@@ -5516,6 +5538,18 @@ mod sharing_tests {
         assert_eq!(shared.market.drain_md_merges(), [(second, first, 0)]);
         assert!(sent(&mut farm_side).is_empty(), "no second subscription of the contract");
         assert_eq!(engine.context.market.instrument_by_con_id(265598), Some(order_slot));
+
+        // ibx#534, paper 09/10/2026: a request with the conId then shares
+        // the running one too, where the conId alone finds the order's slot.
+        let (reply, answer) = crossbeam_channel::bounded(1);
+        tx.send(ControlCommand::Subscribe {
+            con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(), sec_type: "STK".into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            mode_9887: 0, snapshot: false, reply_tx: Some(reply),
+        }).unwrap();
+        engine.poll_once();
+        assert_eq!(answer.recv().unwrap().unwrap(), first, "the slot of the running request");
+        assert!(sent(&mut farm_side).is_empty(), "no second subscription of the contract");
     }
 }
 
