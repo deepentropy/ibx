@@ -5,7 +5,8 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use crossbeam_channel::{Sender, bounded};
+use crate::engine::park::ControlSender;
+use crossbeam_channel::Sender;
 use native_tls::TlsConnector;
 use num_bigint::BigUint;
 use sha1::{Digest, Sha1};
@@ -24,7 +25,6 @@ use crate::protocol::connection::Connection;
 use crate::protocol::fix::{self, fix_build, fix_parse, fix_read_deadline, SOH};
 use crate::protocol::fixcomp;
 use crate::protocol::ns;
-use crate::types::ControlCommand;
 
 /// Parse the `PRIV_LAB_MISC_URLS` blob (FIX tag 6321) into a `{key: value}` map.
 ///
@@ -2664,7 +2664,7 @@ impl Gateway {
         ccp_conn: Connection,
         hmds_conn: Option<Connection>,
         core_id: Option<usize>,
-    ) -> (HotLoop, Sender<ControlCommand>) {
+    ) -> (HotLoop, ControlSender) {
         self.into_hot_loop_with_farms(shared, event_tx, farm_conn, ccp_conn, hmds_conn, core_id)
     }
 
@@ -2677,8 +2677,7 @@ impl Gateway {
         ccp_conn: Connection,
         hmds_conn: Option<Connection>,
         core_id: Option<usize>,
-    ) -> (HotLoop, Sender<ControlCommand>) {
-        let (tx, rx) = bounded(64);
+    ) -> (HotLoop, ControlSender) {
         let reconnect_auth = ReconnectAuth {
             host: String::new(), // Filled by caller (Python EClient or Rust API)
             username: String::new(), // Filled by caller
@@ -2705,7 +2704,7 @@ impl Gateway {
             });
         }
         let mut hot_loop = HotLoop::new(shared, event_tx, core_id);
-        hot_loop.set_control_rx(rx);
+        let tx = hot_loop.control_channel();
         hot_loop.set_account_id(self.account_id.clone());
         hot_loop.set_scale_us_lots(self.scale_us_lots);
         hot_loop.set_price_mgmt(self.price_mgmt, self.price_mgmt_exclusions.as_deref());

@@ -848,6 +848,7 @@ mod tests {
     fn a_request_on_the_pnl_quote_starts_from_a_catch_up() {
         let (core, shared) = (ClientCore::new(), SharedState::new());
         let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx = crate::engine::park::ControlSender::from(tx);
         core.pnl_quotes.lock().unwrap().active.insert(756733, 5);
         core.register_mkt_data(&shared, &tx, 1, 756733, "SPY", "SMART", "STK", "USD", &Default::default(), false, "", 0)
             .unwrap();

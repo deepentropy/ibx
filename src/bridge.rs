@@ -11,7 +11,7 @@
 //! - External callers read snapshots and poll events without blocking the hot loop.
 
 use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use std::collections::HashMap;
 use crate::control::historical::{HistoricalBar, HistoricalResponse, HeadTimestampResponse};
@@ -99,27 +99,67 @@ pub struct ComboView {
 /// The event channel as the error queues see it (ibx#498): unset, and
 /// free, until a channel is attached.
 #[derive(Default)]
-struct ErrorTap(std::sync::OnceLock<crossbeam_channel::Sender<Event>>);
+struct ErrorTap {
+    events: std::sync::OnceLock<crossbeam_channel::Sender<Event>>,
+    /// Wakes the consumer that waits for data: an error is written by the
+    /// engine or by the thread of the caller (a request refused locally),
+    /// and the second has no pass of the engine behind it (ibx#530).
+    notifier: std::sync::OnceLock<Arc<Notifier>>,
+}
 
 impl ErrorTap {
     /// The event of an error, built only when a channel is attached.
     #[inline]
     fn event(&self, req_id: i64, code: i64, message: &str) -> Option<Event> {
-        self.0.get().map(|_| Event::Error { req_id, code, message: message.to_string() })
+        self.events.get().map(|_| Event::Error { req_id, code, message: message.to_string() })
     }
 
     /// Send it once the error is in its queue, so the event never shows
     /// before the queue has it. Non-blocking, as every event: dropped when
-    /// the channel is full.
+    /// the channel is full. The waiting consumer is woken.
     #[inline]
     fn send(&self, event: Option<Event>) {
-        if let (Some(tx), Some(event)) = (self.0.get(), event) {
+        if let (Some(tx), Some(event)) = (self.events.get(), event) {
             let _ = tx.try_send(event);
+        }
+        if let Some(notifier) = self.notifier.get() {
+            notifier.notify();
         }
     }
 
     fn attach(&self, tx: &crossbeam_channel::Sender<Event>) {
-        let _ = self.0.set(tx.clone());
+        let _ = self.events.set(tx.clone());
+    }
+
+    fn wakes(&self, notifier: &Arc<Notifier>) {
+        let _ = self.notifier.set(notifier.clone());
+    }
+}
+
+/// The wake of a consumer that waits for data (e.g. the Python event loop).
+#[derive(Default)]
+struct Notifier {
+    pending: Mutex<bool>,
+    condvar: Condvar,
+}
+
+impl Notifier {
+    fn notify(&self) {
+        let mut pending = self.pending.lock().unwrap();
+        *pending = true;
+        self.condvar.notify_one();
+    }
+
+    /// Returns true if notified, false if timed out.
+    fn wait(&self, timeout: std::time::Duration) -> bool {
+        let mut pending = self.pending.lock().unwrap();
+        if *pending {
+            *pending = false;
+            return true;
+        }
+        let (mut pending, result) = self.condvar.wait_timeout(pending, timeout).unwrap();
+        let had_data = std::mem::take(&mut *pending);
+        had_data || !result.timed_out()
     }
 }
 
@@ -2045,13 +2085,12 @@ pub struct SharedState {
     connection_notices: Mutex<Vec<(i64, String)>>,
     error_tap: ErrorTap,
     /// Notifier for waking consumers (e.g. Python event loop) when data arrives.
-    notify_mutex: Mutex<bool>,
-    notify_condvar: Condvar,
+    notifier: Arc<Notifier>,
 }
 
 impl SharedState {
     pub fn new() -> Self {
-        Self {
+        let shared = Self {
             market: MarketDataState::new(),
             orders: OrderState::new(),
             reference: ReferenceState::new(),
@@ -2060,9 +2099,12 @@ impl SharedState {
             connection_lost: AtomicBool::new(false),
             connection_notices: Mutex::new(Vec::new()),
             error_tap: ErrorTap::default(),
-            notify_mutex: Mutex::new(false),
-            notify_condvar: Condvar::new(),
+            notifier: Arc::new(Notifier::default()),
+        };
+        for tap in [&shared.market.error_tap, &shared.orders.error_tap, &shared.reference.error_tap, &shared.error_tap] {
+            tap.wakes(&shared.notifier);
         }
+        shared
     }
 
     /// Signal that the session is over. Hot-loop side (ibx#242).
@@ -2124,26 +2166,12 @@ impl SharedState {
     /// Signal that new data is available. Called by hot loop after pushing data.
     #[inline]
     pub fn notify(&self) {
-        let mut pending = self.notify_mutex.lock().unwrap();
-        *pending = true;
-        self.notify_condvar.notify_one();
+        self.notifier.notify();
     }
 
     /// Wait for data notification with a timeout. Returns true if notified, false if timed out.
     pub fn wait_for_data(&self, timeout: std::time::Duration) -> bool {
-        let mut pending = self.notify_mutex.lock().unwrap();
-        if *pending {
-            *pending = false;
-            return true;
-        }
-        let (lock, result) = self.notify_condvar.wait_timeout(pending, timeout).unwrap();
-        let had_data = *lock;
-        if had_data {
-            // Reset the flag via a mutable reference obtained from the MutexGuard's deref.
-            drop(lock);
-            *self.notify_mutex.lock().unwrap() = false;
-        }
-        had_data || !result.timed_out()
+        self.notifier.wait(timeout)
     }
 }
 

@@ -78,6 +78,13 @@ jiff = "0.2.28"
 # Scenario files of the replay tests (test-support only)
 serde_json = { version = "1", optional = true }
 
+# The engine's wait on its sockets (ibx#530)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
+
 [dev-dependencies]
 serde_json = "1"
 # Property tests of the network decoders (ibx#488).

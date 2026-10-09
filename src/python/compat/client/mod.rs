@@ -14,7 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crossbeam_channel::{Receiver, SendError, Sender, TrySendError};
+use crate::engine::park::ControlSender;
+use crossbeam_channel::{Receiver, SendError, TrySendError};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
@@ -49,7 +50,7 @@ pub struct EClient {
     /// Set by connect(), cleared by disconnect().
     pub(crate) shared: Mutex<Option<Arc<SharedState>>>,
     /// Set by connect(), cleared by disconnect().
-    pub(crate) control_tx: Mutex<Option<Sender<ControlCommand>>>,
+    pub(crate) control_tx: Mutex<Option<ControlSender>>,
     pub(crate) _thread: Mutex<Option<thread::JoinHandle<()>>>,
     /// Set by connect(), cleared by disconnect().
     pub(crate) account_id: Mutex<Option<String>>,
@@ -134,6 +135,11 @@ impl EClient {
     /// owns its own state, sockets, and engine thread, and ``connect()`` does
     /// not serialize across instances. If you pin engines via ``core_id``, give
     /// each a distinct value. See ibx#203 / ibx#207.
+    ///
+    /// An engine pinned with ``core_id`` polls without pause and keeps that
+    /// core busy; without it the engine thread rests while there is nothing
+    /// to do and is woken by the first byte received or the first request
+    /// (ibx#530).
     #[pyo3(signature = (host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None, code_provider=None))]
     fn connect(
         &self,
@@ -326,7 +332,7 @@ impl EClient {
     }
 
     /// Clone the control channel sender, or return "Not connected".
-    pub(crate) fn tx(&self) -> PyResult<Sender<ControlCommand>> {
+    pub(crate) fn tx(&self) -> PyResult<ControlSender> {
         self.control_tx.lock().unwrap().clone()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))
     }
@@ -393,7 +399,7 @@ fn python_code_provider(callable: Py<PyAny>) -> crate::auth::session::CodeProvid
 /// with the lock released, so a slow engine stalls only this caller, not
 /// every Python thread (ibx#271). Hold no mutex guard across this call.
 #[inline]
-pub(crate) fn send_cmd(py: Python<'_>, tx: &Sender<ControlCommand>, cmd: ControlCommand) -> PyResult<()> {
+pub(crate) fn send_cmd(py: Python<'_>, tx: &ControlSender, cmd: ControlCommand) -> PyResult<()> {
     match tx.try_send(cmd) {
         Ok(()) => Ok(()),
         Err(TrySendError::Full(cmd)) => py.detach(|| tx.send(cmd)).map_err(engine_stopped),

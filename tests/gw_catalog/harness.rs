@@ -33,7 +33,7 @@ pub fn lmt(action: &str, qty: f64, price: f64) -> Order {
 pub struct Engine {
     pub client: EClient,
     pub shared: Arc<SharedState>,
-    control: Sender<ControlCommand>,
+    control: ibx::engine::park::ControlSender,
     ccp: Peer,
     /// The market data farm, open for the whole test: a closed one is a
     /// lost link (2103) among the errors.

@@ -485,6 +485,7 @@ dependencies = [
  "hmac",
  "ibx",
  "jiff",
+ "libc",
  "log",
  "mac_address",
  "md-5",
@@ -503,6 +504,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "windows-sys",
  "x509-cert",
  "zeroize",
 ]

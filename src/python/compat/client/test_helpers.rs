@@ -29,7 +29,7 @@ impl EClient {
         };
         let (event_tx, event_rx) = crossbeam_channel::bounded(256);
         *self.shared.lock().unwrap() = Some(shared);
-        *self.control_tx.lock().unwrap() = Some(tx);
+        *self.control_tx.lock().unwrap() = Some(tx.into());
         *self.event_rx.lock().unwrap() = Some(event_rx);
         *self.account_id.lock().unwrap() = Some(account_id);
         // Store event_tx so _test_push_disconnect_event can use it.

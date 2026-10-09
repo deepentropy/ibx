@@ -10,7 +10,7 @@ use ibx::protocol::connection::Frame;
 /// on it: conId, symbol, security type and exchange, then the currency.
 /// The reply carries the instrument id once the hot loop runs.
 fn register_as_client(
-    control_tx: &crossbeam_channel::Sender<ControlCommand>,
+    control_tx: &ibx::engine::park::ControlSender,
     con_id: i64,
     symbol: &str,
     sec_type: &str,

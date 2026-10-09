@@ -30,9 +30,10 @@ fn test_client() -> (EClient, crossbeam_channel::Receiver<ControlCommand>, Arc<S
 /// slot) at once. Without it each market data request waits for the
 /// registration timeout (5 s). Send `Shutdown` to end it; it returns the
 /// number of commands it got before.
-fn test_client_with_engine() -> (EClient, crossbeam_channel::Sender<ControlCommand>, thread::JoinHandle<usize>, Arc<SharedState>) {
+fn test_client_with_engine() -> (EClient, ibx::engine::park::ControlSender, thread::JoinHandle<usize>, Arc<SharedState>) {
     let shared = Arc::new(SharedState::new());
     let (tx, rx) = crossbeam_channel::unbounded();
+    let tx = ibx::engine::park::ControlSender::from(tx);
     let engine = thread::spawn(move || {
         let mut count = 0;
         while let Ok(cmd) = rx.recv() {

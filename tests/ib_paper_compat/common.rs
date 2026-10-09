@@ -222,7 +222,7 @@ pub(super) fn run_hot_loop(hot_loop: HotLoop) -> std::thread::JoinHandle<HotLoop
 
 /// Shutdown a hot loop and reclaim connections.
 pub(super) fn shutdown_and_reclaim(
-    control_tx: &crossbeam_channel::Sender<ControlCommand>,
+    control_tx: &ibx::engine::park::ControlSender,
     join: std::thread::JoinHandle<HotLoop>,
     account_id: String,
 ) -> Conns {

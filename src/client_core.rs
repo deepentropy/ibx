@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crossbeam_channel::Sender;
+use crate::engine::park::ControlSender;
 
 use crate::api::types::{
     Contract as ApiContract, CommissionAndFeesReport as ApiCommissionAndFeesReport,
@@ -1819,7 +1819,7 @@ impl ClientCore {
     /// keeps the slot of its order.
     #[allow(clippy::too_many_arguments)]
     pub fn order_instrument(
-        &self, control_tx: &Sender<ControlCommand>, order_id: OrderId, what_if: bool,
+        &self, control_tx: &ControlSender, order_id: OrderId, what_if: bool,
         con_id: i64, symbol: &str, exchange: &str, sec_type: &str, currency: &str,
     ) -> Result<InstrumentId, String> {
         if con_id != 0 || sec_type.eq_ignore_ascii_case("BAG") {
@@ -1840,7 +1840,7 @@ impl ClientCore {
     /// Returns `Err` if the control channel is closed.
     /// Tell the engine the currency of a contract before an order on it,
     /// when it does not have it yet (tag 15, ibx#466).
-    pub fn note_currency(&self, control_tx: &Sender<ControlCommand>, con_id: i64, currency: &str) {
+    pub fn note_currency(&self, control_tx: &ControlSender, con_id: i64, currency: &str) {
         if currency.is_empty() || con_id == 0 {
             return;
         }
@@ -1861,7 +1861,7 @@ impl ClientCore {
 
     pub fn find_or_register_instrument(
         &self,
-        control_tx: &Sender<ControlCommand>,
+        control_tx: &ControlSender,
         con_id: i64,
         symbol: &str,
         exchange: &str,
@@ -1903,7 +1903,7 @@ impl ClientCore {
     pub fn register_mkt_data(
         &self,
         shared: &SharedState,
-        control_tx: &Sender<ControlCommand>,
+        control_tx: &ControlSender,
         req_id: i64,
         con_id: i64,
         symbol: &str,
@@ -2079,7 +2079,7 @@ impl ClientCore {
     /// oldest first, as the reference's line manager subscribes the
     /// records it kept waiting once the count is under the limit
     /// (ibx#444). They get no second 101.
-    pub fn promote_waiting_md(&self, shared: &SharedState, control_tx: &Sender<ControlCommand>) {
+    pub fn promote_waiting_md(&self, shared: &SharedState, control_tx: &ControlSender) {
         loop {
             if self.md_waiting.lock().unwrap().is_empty()
                 || self.md_lines_in_use() >= shared.reference.snapshot_rate_limit() as usize
@@ -2205,7 +2205,7 @@ impl ClientCore {
     /// contract being fetched gets 10169.
     #[allow(clippy::too_many_arguments)]
     pub fn start_regulatory_snapshot(
-        &self, shared: &SharedState, control_tx: &Sender<ControlCommand>, req_id: i64,
+        &self, shared: &SharedState, control_tx: &ControlSender, req_id: i64,
         con_id: i64, symbol: &str, exchange: &str, sec_type: &str,
     ) -> Result<(), String> {
         if con_id == 0 {
@@ -2234,7 +2234,7 @@ impl ClientCore {
 
     /// Stop a regulatory snapshot (cancelMktData): nothing more is sent
     /// for it. False when the request is not one.
-    pub fn cancel_regulatory_snapshot(&self, req_id: i64, control_tx: &Sender<ControlCommand>) -> bool {
+    pub fn cancel_regulatory_snapshot(&self, req_id: i64, control_tx: &ControlSender) -> bool {
         let mut fetches = self.reg_snapshots.lock().unwrap();
         let Some(pos) = fetches.iter().position(|f| f.req_id == req_id) else { return false };
         let f = fetches.remove(pos);
@@ -2247,7 +2247,7 @@ impl ClientCore {
     /// ticks or their error.
     #[allow(clippy::type_complexity)]
     pub fn poll_regulatory_snapshots(
-        &self, shared: &SharedState, control_tx: &Sender<ControlCommand>,
+        &self, shared: &SharedState, control_tx: &ControlSender,
     ) -> Vec<(i64, Result<Vec<crate::control::regsnapshot::SnapshotTick>, (i64, String)>)> {
         use crate::control::regsnapshot::{SnapshotFields, Step};
         {
@@ -2308,7 +2308,7 @@ impl ClientCore {
     /// request needs them. Never waits: a registration reply is read on a
     /// later call. Checked when positions or requests change, and every
     /// second.
-    pub fn maintain_pnl_quotes(&self, shared: &SharedState, control_tx: &Sender<ControlCommand>) {
+    pub fn maintain_pnl_quotes(&self, shared: &SharedState, control_tx: &ControlSender) {
         let n_pnl = self.pnl_reqs.lock().unwrap().len();
         let singles: Vec<i64> = self.pnl_single_reqs.lock().unwrap().values().copied().collect();
         let mut q = self.pnl_quotes.lock().unwrap();
@@ -2767,7 +2767,7 @@ impl ClientCore {
     pub fn register_tbt(
         &self,
         _shared: &SharedState,
-        control_tx: &Sender<ControlCommand>,
+        control_tx: &ControlSender,
         req_id: i64,
         con_id: i64,
         symbol: &str,
@@ -2801,7 +2801,7 @@ impl ClientCore {
     /// 05/10/2026: a symbol lookup, then the query with the conId found);
     /// the request has no slot until then.
     pub fn register_tbt_by_symbol(
-        &self, control_tx: &Sender<ControlCommand>, req_id: i64, contract: &crate::api::types::Contract,
+        &self, control_tx: &ControlSender, req_id: i64, contract: &crate::api::types::Contract,
         tbt_type: TbtType, number_of_ticks: i32, ignore_size: bool,
     ) -> Result<(), String> {
         let request = ControlCommand::SubscribeTbt {
@@ -3088,7 +3088,7 @@ impl ClientCore {
     /// ask the contract's market data status and get its frozen data while
     /// it is frozen (`md_freeze`). A value outside 1..=4 is refused with
     /// 321 under id -1, as the reference, and changes nothing.
-    pub fn set_market_data_type(&self, control_tx: &Sender<ControlCommand>, mdt: i32) -> Option<(i64, String)> {
+    pub fn set_market_data_type(&self, control_tx: &ControlSender, mdt: i32) -> Option<(i64, String)> {
         if !(1..=4).contains(&mdt) {
             return Some((321, "Error validating request.-'b0' : cause - Invalid market data type".to_string()));
         }
@@ -6661,6 +6661,7 @@ mod tests {
 
         let core = ClientCore::new();
         let (tx, rx) = crossbeam_channel::unbounded();
+        let tx = crate::engine::park::ControlSender::from(tx);
         core.note_currency(&tx, 1, "EUR");
         core.note_currency(&tx, 1, "EUR");
         core.note_currency(&tx, 1, "");
@@ -6801,6 +6802,7 @@ mod tests {
     fn currency_noted_and_pnl_quotes_idle() {
         let core = ClientCore::new();
         let (tx, _rx) = crossbeam_channel::unbounded();
+        let tx = crate::engine::park::ControlSender::from(tx);
         assert!(core.currency_noted(1, ""));
         assert!(core.currency_noted(0, "EUR"));
         assert!(!core.currency_noted(1, "EUR"));

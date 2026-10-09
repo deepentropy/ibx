@@ -7,7 +7,7 @@ use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver};
 
 use ibx::bridge::{Event, SharedState};
 use ibx::gateway::{Gateway, GatewayConfig};
@@ -67,7 +67,7 @@ impl BenchConfig {
 pub struct BenchSession {
     pub shared: Arc<SharedState>,
     pub event_rx: Receiver<Event>,
-    pub control_tx: Sender<ControlCommand>,
+    pub control_tx: ibx::engine::park::ControlSender,
     pub connect_time: Duration,
     pub account_id: String,
     _join: Option<std::thread::JoinHandle<()>>,

@@ -144,7 +144,7 @@ impl ibx::api::wrapper::Wrapper for Listing {
 }
 
 /// The engine on a signed in-memory auth link, with a Rust client on top.
-fn session(shared: &Arc<SharedState>) -> (EClient, Peer, crossbeam_channel::Sender<ControlCommand>, std::thread::JoinHandle<()>) {
+fn session(shared: &Arc<SharedState>) -> (EClient, Peer, ibx::engine::park::ControlSender, std::thread::JoinHandle<()>) {
     let (farm_conn, _farm) = Peer::pair();
     let (mut ccp_conn, mut ccp) = Peer::pair();
     let mac_key: Vec<u8> = (1..=20).collect();

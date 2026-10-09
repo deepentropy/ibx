@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Sender;
+use crate::engine::park::ControlSender;
 
 use super::HotLoop;
 use crate::bridge::SharedState;
@@ -28,7 +28,7 @@ fn link(capacity: Option<usize>) -> (Connection, Peer) {
 /// a lost link is never dialled again.
 struct Running {
     handle: JoinHandle<HotLoop>,
-    control: Sender<ControlCommand>,
+    control: ControlSender,
     shared: Arc<SharedState>,
 }
 

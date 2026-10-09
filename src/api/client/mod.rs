@@ -45,6 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use crate::engine::park::ControlSender;
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::api::types::{
@@ -95,6 +96,11 @@ pub struct EClientConfig {
     pub paper: bool,
     /// CPU core to pin this engine's hot loop to. `None` = no pinning. When
     /// running multiple engines, use a **distinct** core per engine.
+    ///
+    /// A pinned engine polls its connections and its commands without
+    /// pause and keeps that core busy. Without pinning the engine thread
+    /// rests while there is nothing to do and is woken by the first byte
+    /// received or the first command sent (ibx#530).
     pub core_id: Option<usize>,
 }
 
@@ -138,7 +144,7 @@ fn cache_reconnect_credentials(hot_loop: &mut crate::engine::hot_loop::HotLoop, 
 /// with a log line and no error, as the reference drops it (ibx#285).
 pub struct EClient {
     pub(crate) shared: Arc<SharedState>,
-    pub(crate) control_tx: Sender<ControlCommand>,
+    pub(crate) control_tx: ControlSender,
     pub(crate) thread: Mutex<Option<thread::JoinHandle<()>>>,
     pub account_id: String,
     pub(crate) connected: AtomicBool,
@@ -248,13 +254,13 @@ impl EClient {
     #[doc(hidden)]
     pub fn from_parts(
         shared: Arc<SharedState>,
-        control_tx: Sender<ControlCommand>,
+        control_tx: impl Into<ControlSender>,
         handle: thread::JoinHandle<()>,
         account_id: String,
     ) -> Self {
         Self {
             shared,
-            control_tx,
+            control_tx: control_tx.into(),
             thread: Mutex::new(Some(handle)),
             account_id,
             connected: AtomicBool::new(true),

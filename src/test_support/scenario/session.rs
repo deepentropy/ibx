@@ -8,7 +8,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crossbeam_channel::Sender;
+use crate::engine::park::ControlSender;
 
 use crate::api::client::EClient;
 use crate::api::types::{
@@ -18,7 +18,6 @@ use crate::api::wrapper::Wrapper;
 use crate::bridge::SharedState;
 use crate::engine::hot_loop::HotLoop;
 use crate::test_support::{parse_fields, Fields, Peer};
-use crate::types::ControlCommand;
 
 use super::record::{attr_mask, n, order_price, perm, OPEN_ORDER_FIELDS};
 use super::runner::Link;
@@ -55,7 +54,7 @@ pub struct Links {
     pub engine: HotLoop,
     pub shared: Arc<SharedState>,
     /// The engine's command channel, for an API client to take.
-    pub control_tx: Sender<ControlCommand>,
+    pub control_tx: ControlSender,
     pub farm: Peer,
     pub ccp: Peer,
     pub hmds: Peer,
