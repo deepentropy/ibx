@@ -132,6 +132,25 @@ def test_an_industry_the_reference_kept_from_an_earlier_request_is_explained():
     assert [r["known"] for r in d.compare(theirs, ours) if r["field"].endswith("industry")] == [""]
 
 
+def test_a_scenario_on_the_login_of_its_batch_has_no_connect_notices(tmp_path):
+    reference, ours = tmp_path / "reference", tmp_path / "ibx"
+    reference.mkdir(), ours.mkdir()
+    notices = [["error", -1, None, 2104, "Market data farm connection is OK:usfarm", ""],
+               ["error", -1, None, 2172, "The version ...", ""]]
+    theirs = run(1, 111)
+    theirs[3:3] = notices
+    write_run(reference, {"first": theirs, "later": theirs})
+    write_run(ours, {"first": run(1, 111), "later": run(1, 111)})
+    with open(ours / "run.jsonl", "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"event": "scenario", "name": "first", "market_session": "rth"}) + "\n")
+        fh.write(json.dumps({"event": "scenario", "name": "later", "market_session": "rth", "shared_login": True}) + "\n")
+    rows, _ = d.report(str(ours), None, str(reference))
+    known = {(r["scenario"], r["key"]): r["known"] for r in rows}
+    # The scenario that opened the login is compared as before; the later one is explained.
+    assert known[("first", "-1|2104")] == "" and known[("later", "-1|2104")] == d.ONE_LOGIN
+    assert known[("later", "-1|2172")] == d.ONE_LOGIN
+
+
 def test_sets_enum_internals_and_request_windows():
     theirs = [["securityDefinitionOptionParameter", 1, "SMART", 265598, "AAPL", "100", "{'b', 'a'}", "{2.0, 1.0}"],
               ["historicalDataEnd", 2, "20260926 15:46:37 US/Eastern", "20260926 16:16:37 US/Eastern"],

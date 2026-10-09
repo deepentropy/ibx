@@ -29,6 +29,9 @@ How two callback lists are compared:
   (ibx#522).
 - The start and the end of ``historicalDataEnd`` follow the time of the
   request: their form is compared (digits as 9), not their value.
+- An ibx run made on one login for its batch (the manifest says so) has the
+  notices of a connect once, not at every scenario: their absence is marked
+  as session state.
 - Prices of the orders follow the reference price of the day the scenario
   ran: they are compared for presence unless both sides ran on the same day
   (``--strict-prices``).
@@ -168,6 +171,12 @@ def mask_accounts(text):
     return ACCOUNT.sub(ACCOUNT_MASK, text)
 
 
+# Scenarios of an ibx run made on the session of its batch, not on a
+# connection of their own: (run folder, scenario).
+SHARED_LOGIN = set()
+ONE_LOGIN = "session: one login for the batch, no connection of its own"
+
+
 def read_run(folder):
     """A run folder: {scenario: [[callback, args...], ...]} and {scenario: market session}."""
     calls, sessions = {}, {}
@@ -184,6 +193,8 @@ def read_run(folder):
                 r = json.loads(line)
                 if r.get("event") == "scenario":
                     sessions[r["name"]] = r.get("market_session", "")
+                    if r.get("shared_login"):
+                        SHARED_LOGIN.add((os.path.abspath(folder), r["name"]))
     calls.pop("setup", None)
     return calls, sessions
 
@@ -396,6 +407,13 @@ def report(ibx_folder, fixtures=None, reference_folder=None, strict_prices=False
             lines.append(f"{scenario}: no reference")
             continue
         found = compare(reference, calls, strict_prices)
+        if (os.path.abspath(ibx_folder), scenario) in SHARED_LOGIN:
+            # The notices of a connect come once per login: the reference
+            # opens a connection for every scenario, ibx one for the batch.
+            for r in found:
+                if (r["callback"] == "error" and r["kind"] == "missing_in_ibx" and r["key"].startswith("-1|")
+                        and r["key"].split("|")[-1] in CONNECTION_NOTICES | {"2172"}):
+                    r["known"] = ONE_LOGIN
         rows.extend({**head, **r} for r in found)
         unknown = sum(not r["known"] for r in found)
         lines.append(f"{scenario}: {len(found)} differences, {unknown} without an issue"
