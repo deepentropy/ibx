@@ -151,6 +151,14 @@ def test_a_scenario_on_the_login_of_its_batch_has_no_connect_notices(tmp_path):
     assert known[("later", "-1|2172")] == d.ONE_LOGIN
 
 
+def test_the_class_named_by_an_error_321_is_left_out():
+    theirs = [["error", 9, None, 321, "Error validating request.-'D' : cause - End date not supported", ""]]
+    ours = [["error", 9, None, 321, "Error validating request.-'bM' : cause - End date not supported", ""]]
+    assert d.compare(theirs, ours) == []
+    ours[0][4] = "Error validating request.-'bM' : cause - Another text"
+    assert [r["field"] for r in d.compare(theirs, ours)] == ["errorString"]
+
+
 def test_sets_enum_internals_and_request_windows():
     theirs = [["securityDefinitionOptionParameter", 1, "SMART", 265598, "AAPL", "100", "{'b', 'a'}", "{2.0, 1.0}"],
               ["historicalDataEnd", 2, "20260926 15:46:37 US/Eastern", "20260926 16:16:37 US/Eastern"],

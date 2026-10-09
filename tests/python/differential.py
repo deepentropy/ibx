@@ -32,6 +32,8 @@ How two callback lists are compared:
 - An ibx run made on one login for its batch (the manifest says so) has the
   notices of a connect once, not at every scenario: their absence is marked
   as session state.
+- The class named in the text of an error 321 depends on how the client
+  encoded its request: it is left out.
 - Prices of the orders follow the reference price of the day the scenario
   ran: they are compared for presence unless both sides ran on the same day
   (``--strict-prices``).
@@ -286,6 +288,11 @@ def comparable(call, session, strict_prices):
     for path in list(fields):
         leaf = re.split(r"[.\]]", path)[-1] or path
         v = fields[path]
+        if name == "error" and leaf == "errorString" and isinstance(v, str):
+            # The class a 321 names is the class of the request as the client
+            # encoded it: not the same letters for the two clients (as in the
+            # scenario replays, `session_values`).
+            v = fields[path] = re.sub(r"(Error validating request\.-')[^']*'", r"\1{class}'", v)
         if leaf in NOT_COMPARED:
             del fields[path]
         elif name == "historicalDataEnd" and leaf in ("start", "end") and isinstance(v, str):
