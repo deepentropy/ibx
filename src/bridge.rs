@@ -860,6 +860,26 @@ impl OrderState {
         self.api_order_ids.lock().unwrap().insert(order_id, api_id);
     }
 
+    /// The engine now holds an order of an earlier session under `to`
+    /// instead of `from` (ibx#538): what is kept for it moves, and it keeps
+    /// the API order id it shows.
+    #[doc(hidden)] pub fn rekey_order(&self, from: OrderId, to: OrderId) {
+        let shown = self.api_order_id(from);
+        {
+            let mut ids = self.api_order_ids.lock().unwrap();
+            ids.remove(&from);
+            ids.insert(to, shown);
+        }
+        let mut cache = self.order_cache.lock().unwrap();
+        if let Some(info) = cache.remove(&from) { cache.insert(to, info); }
+        drop(cache);
+        let mut seqs = self.book_seqs.lock().unwrap();
+        if let Some(seq) = seqs.remove(&from) { seqs.insert(to, seq); }
+        drop(seqs);
+        let mut views = self.combo_views.lock().unwrap();
+        if let Some(view) = views.remove(&from) { views.insert(to, view); }
+    }
+
     /// An order's place in the reference's book, and the most orders the
     /// book held (engine side).
     #[doc(hidden)] pub fn note_book(&self, order_id: OrderId, seq: u64, peak: usize) {

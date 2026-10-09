@@ -72,7 +72,7 @@ impl EClient {
         // If orderId is already tracked, this is a modification: replace it
         // with the full wanted state (ibx#247). A what-if never modifies:
         // it previews a new order (ibx#462).
-        let working = if order.what_if { None } else { self.core.tracked_order(oid) };
+        let working = if order.what_if { None } else { self.core.working_order(&self.shared, oid) };
         if working.is_some() {
             let refusal = self.core.tracked_contract(oid)
                 .and_then(|placed| ClientCore::combo_modify_refusal(contract, &placed));

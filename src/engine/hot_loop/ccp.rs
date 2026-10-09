@@ -1363,7 +1363,7 @@ impl CcpState {
                 .filter(|&id| id != 0 && id != server_id && context.order(id).is_none()
                     && !context.server_ids.contains_key(&id));
             if let Some(api_id) = api_id {
-                context.bind_server_id(api_id, server_id);
+                context.hold_recovered(api_id, server_id);
                 clord_id = api_id;
             }
             let con_id: i64 = parsed.get(&6008).and_then(|s| s.parse().ok()).unwrap_or(0);

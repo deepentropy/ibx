@@ -966,6 +966,9 @@ fn gcd(a: u32, b: u32) -> u32 {
 /// sent (ibx#463; captured 25/09/2026).
 pub const MODIFY_OF_FINISHED_ORDER: (i64, &str) = (104, "Cannot modify a filled order.");
 
+/// A new order under the id of an order of this client that is working (ibx#538).
+pub const DUPLICATE_ORDER_ID: (i64, &str) = (103, "Duplicate order id");
+
 /// The reference's refusal of a fractional quantity (ib-agent#192 B3).
 pub const FRACTIONAL_VIA_API: (i64, &str) = (10243,
     "Fractional-sized order cannot be placed via API. Please use desktop version to place this order.");
@@ -5536,6 +5539,20 @@ impl ClientCore {
     /// checked against).
     pub fn tracked_order(&self, order_id: OrderId) -> Option<ApiOrder> {
         self.open_orders.lock().unwrap().get(&order_id).map(|t| t.order.clone())
+    }
+
+    /// The working order a `placeOrder` of `order_id` modifies: the order
+    /// this session placed, or this client's own working order of an
+    /// earlier session, which the server reported at the logon (ibx#538:
+    /// the reference finds an order by its client id and order id, so that
+    /// order is the order, and a placeOrder of its id changes it).
+    pub fn working_order(&self, shared: &SharedState, order_id: OrderId) -> Option<ApiOrder> {
+        self.tracked_order(order_id).or_else(|| {
+            let me = self.client_id.load(Ordering::Relaxed);
+            shared.orders.get_order_info(order_id)
+                .filter(|info| is_open_status(&info.order_state.status) && i64::from(info.order.client_id) == me)
+                .map(|info| info.order)
+        })
     }
 
     /// The contract a tracked order was placed with.

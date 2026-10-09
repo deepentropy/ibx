@@ -245,6 +245,33 @@ pub(crate) fn drain_and_send_orders(
         // A new order goes out under a server id of the reference's order
         // id generator; its API order id is its key, sent in 6121.
         if !what_if {
+            // An order of an earlier session can be held under the id of
+            // this new order (ibx#538). Another client's goes back under
+            // its own server id: the reference keeps the orders of each
+            // client id apart, and the new order must not go out under
+            // that order's identity (the server refused it as a duplicate
+            // and the caller was told nothing). This client's own working
+            // order is the order with that id: a new order under its id is
+            // refused, and the order is left as it is.
+            let mut own = None;
+            for id in order_req.new_order_ids() {
+                match context.earlier_session_order(id) {
+                    Some(true) => own = Some(id),
+                    Some(false) => {
+                        if let Some(server) = context.release_recovered_key(id) {
+                            shared.orders.rekey_order(id, server);
+                            log::info!("Order id {} of this session: the order of another client held under it is now under {}", id, server);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            if let Some(id) = own {
+                log::warn!("Order {} refused: an order of this client with that id is working", id);
+                let (code, message) = crate::client_core::DUPLICATE_ORDER_ID;
+                shared.orders.push_order_error(id, code, message.into());
+                continue;
+            }
             for id in order_req.new_order_ids() {
                 context.assign_server_id(id);
             }
