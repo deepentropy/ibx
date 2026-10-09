@@ -1141,12 +1141,22 @@ impl HotLoop {
     /// the round-lot step as any other. A contract another request already
     /// has a top of book for is not asked again: the request joins that
     /// subscription, as the reference attaches it to the contract's record
-    /// (ibx#444, captured 02/10/2026), and its own slot goes.
+    /// (ibx#444, captured 02/10/2026), and its own slot goes. Every slot
+    /// of the contract is looked at, not only the one found by its conId:
+    /// that one can be a slot an order made, with no market data, while
+    /// the top of book runs on the slot of an earlier request like this
+    /// one (ibx#533).
     fn send_md_resolved(&mut self) {
         if self.context.md_resolved.is_empty() { return; }
         for sub in std::mem::take(&mut self.context.md_resolved) {
-            let into = self.context.market.instrument_by_con_id(sub.con_id)
-                .filter(|&into| into != sub.instrument && sub.mode_9887 == 0 && self.joins_top(into, sub.snapshot));
+            let into = if sub.mode_9887 == 0 {
+                self.context.market.active_instruments()
+                    .filter(|&(slot, con_id)| con_id == sub.con_id && slot != sub.instrument)
+                    .map(|(slot, _)| slot)
+                    .find(|&slot| self.joins_top(slot, sub.snapshot))
+            } else {
+                None
+            };
             if let Some(into) = into {
                 let news = self.take_waiting_news(sub.instrument);
                 if let Some(text) = news.iter().find_map(|(_, refusal)| refusal.clone()) {
@@ -5467,6 +5477,45 @@ mod sharing_tests {
         assert!(sent(&mut farm_side).is_empty());
         assert_eq!(engine.context.market.con_id(second), None, "the slot is freed");
         assert_eq!(engine.context.market.instrument_by_con_id(265598), Some(first));
+    }
+
+    // ibx#533, paper 09/10/2026: an order made a slot for the contract, with
+    // no market data. Two symbol-only requests follow: the first runs on its
+    // own slot, and the second joins it, although the slot found by the
+    // conId is the order's.
+    #[test]
+    fn a_looked_up_contract_joins_the_request_before_it_past_the_slot_of_an_order() {
+        use crate::control::contracts::tests::pipe_msg;
+        let (mut engine, shared, mut farm_side, tx) = engine();
+        let (c2, _ccp_side) = socket_pair();
+        engine.ccp_conn = Some(Connection::new_mem(c2));
+        let order_slot = engine.context.market.register(265598);
+        let mut by_symbol = |engine: &mut HotLoop| {
+            let (reply, answer) = crossbeam_channel::bounded(1);
+            tx.send(ControlCommand::SubscribeBySymbol {
+                symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(),
+                filters: Default::default(), mode_9887: 0, snapshot: false, reply_tx: Some(reply),
+            }).unwrap();
+            engine.poll_once();
+            let slot = answer.recv().unwrap().unwrap();
+            let lookup = format!("{}", engine.context.md_lookups[0].0);
+            let mut context = std::mem::replace(&mut engine.context, Context::new());
+            let body = format!("35=d|43=N|320={lookup}|322=*|323=4|55=AAPL|167=STK|207=BEST|6008=265598|15=USD|");
+            assert!(farm::md_contract_reply(&mut context, &shared, &lookup, &pipe_msg(&body)));
+            engine.context = context;
+            engine.send_md_resolved();
+            engine.send_lot_ready();
+            slot
+        };
+        let first = by_symbol(&mut engine);
+        assert_ne!(first, order_slot);
+        assert!(shared.market.drain_md_merges().is_empty(), "the slot of the order has no market data to join");
+        assert!(engine.joins_top(first, false), "the first request runs or waits on its own slot");
+        let _ = sent(&mut farm_side);
+        let second = by_symbol(&mut engine);
+        assert_eq!(shared.market.drain_md_merges(), [(second, first, 0)]);
+        assert!(sent(&mut farm_side).is_empty(), "no second subscription of the contract");
+        assert_eq!(engine.context.market.instrument_by_con_id(265598), Some(order_slot));
     }
 }
 
