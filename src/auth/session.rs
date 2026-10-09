@@ -512,11 +512,15 @@ pub fn recv_secure<R: Read>(
     stream: &mut R,
     channel: &mut SecureChannel,
 ) -> io::Result<Vec<u8>> {
+    recv_secure_impl(stream, channel, None)
+}
+
+fn recv_secure_impl<R: Read>(stream: &mut R, channel: &mut SecureChannel, limit: Option<usize>) -> io::Result<Vec<u8>> {
     let mut inner: Option<Vec<u8>> = None;
     loop {
         let bytes = match inner.take() {
             Some(plain) => plain,
-            None => ns::ns_recv(stream)?.0,
+            None => match limit { Some(max) => ns::ns_recv_limited(stream, max)?.0, None => ns::ns_recv(stream)?.0 },
         };
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let parts: Vec<&str> = text.split(';').collect();
@@ -528,9 +532,14 @@ pub fn recv_secure<R: Read>(
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid msg type"))?;
         match msg_type {
             NS_AUTH_START => return Ok(bytes),
-            NS_SECURE_ERROR | NS_ERROR_RESPONSE => return Err(ns_error(msg_type, &parts[2..])),
+            NS_SECURE_ERROR | NS_ERROR_RESPONSE => return Err(if limit.is_some() {
+                io::Error::new(io::ErrorKind::PermissionDenied, "bounded authentication refused by server")
+            } else { ns_error(msg_type, &parts[2..]) }),
             NS_REDIRECT => {
                 let target = parts.get(2).unwrap_or(&"");
+                if limit.is_some() && (target.len() > 253 || !target.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:".contains(&b))) {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid bounded authentication redirect"));
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::ConnectionReset,
                     format!("REDIRECT:{}", target),
@@ -542,7 +551,7 @@ pub fn recv_secure<R: Read>(
             NS_SECURE_MESSAGE => {
                 let ct = B64
                     .decode(parts.get(2).copied().unwrap_or(""))
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, if limit.is_some() { "invalid bounded secure-message encoding".to_string() } else { e.to_string() }))?;
                 let plain = channel
                     .decrypt(&ct)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -611,6 +620,11 @@ impl AuthStart {
     /// Parse the plain text of an auth start. Refuses any other message
     /// type. Empty fields keep their position.
     pub fn parse(plain: &[u8]) -> io::Result<Self> {
+        Self::parse_inner(plain, true)
+    }
+
+    // Controlled authentication never logs peer-supplied factor entries.
+    fn parse_inner(plain: &[u8], log_unknown: bool) -> io::Result<Self> {
         let text = String::from_utf8_lossy(plain);
         let text = text.strip_prefix("MISC").unwrap_or(&text);
         let fields: Vec<&str> = text.split(';').collect();
@@ -618,16 +632,25 @@ impl AuthStart {
         if msg_type != Some(NS_AUTH_START) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Expected the auth start, got message type {:?}", fields.get(1).copied().unwrap_or("")),
+                if log_unknown { format!("Expected the auth start, got message type {:?}", fields.get(1).copied().unwrap_or("")) } else { "invalid bounded authentication start".to_string() },
             ));
         }
         let number = |i: usize| fields.get(i).and_then(|f| f.trim().parse::<u32>().ok()).unwrap_or(0);
+        if !log_unknown {
+            let entries: Vec<_> = fields.get(4).copied().unwrap_or("")
+                .split(',').filter(|e| !e.trim().is_empty()).collect();
+            if entries.len() > 16 || entries.iter().any(|entry|
+                entry.len() > 64 || SecondFactor::parse(entry).is_none())
+            {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid bounded second-factor list"));
+            }
+        }
         let second_factors = fields.get(4).copied().unwrap_or("")
             .split(',')
             .filter(|e| !e.trim().is_empty())
             .filter_map(|e| {
                 let factor = SecondFactor::parse(e);
-                if factor.is_none() {
+                if factor.is_none() && log_unknown {
                     log::warn!("Auth start: second-factor entry {:?} not understood", e);
                 }
                 factor
@@ -690,14 +713,50 @@ pub fn recv_auth_start<R: Read>(stream: &mut R, channel: &mut SecureChannel) -> 
     AuthStart::parse(&recv_secure(stream, channel)?)
 }
 
+/// Read a bounded authentication start, without echoing rejected peer content.
+/// Valid redirects retain their host for caller-controlled address admission.
+pub fn recv_auth_start_limited<R: Read>(stream: &mut R, channel: &mut SecureChannel, max_frame_bytes: usize) -> io::Result<AuthStart> {
+    let payload = recv_secure_impl(stream, channel, Some(max_frame_bytes))?;
+    AuthStart::parse_inner(&payload, false).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid bounded authentication start"))
+}
+
 /// Receive a framed message and classify as text or binary.
 pub fn recv_msg<R: Read>(stream: &mut R) -> io::Result<RecvMsg> {
+    recv_msg_impl(stream, None)
+}
+
+/// Read a size-bounded NS/XYZ authentication frame with content-free parse errors.
+pub fn recv_msg_limited<R: Read>(stream: &mut R, max_frame_bytes: usize) -> io::Result<RecvMsg> {
+    recv_msg_impl(stream, Some(max_frame_bytes))
+}
+
+// Validate announced string spans before handing bounded frames to the permissive
+// legacy XYZ parser. Every parsed/copied string then lies inside the admitted frame.
+fn validate_bounded_xyz(payload: &[u8]) -> io::Result<()> {
+    if payload.len() < 16 { return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid bounded XYZ frame")); }
+    let mut offset: usize = 16;
+    while offset < payload.len() {
+        let header_end = offset.checked_add(4).filter(|end| *end <= payload.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid bounded XYZ field"))?;
+        let len = u32::from_be_bytes(payload[offset..header_end].try_into().unwrap()) as usize;
+        let padded = len.checked_add((4 - len % 4) % 4)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid bounded XYZ field"))?;
+        offset = header_end.checked_add(padded).filter(|end| *end <= payload.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid bounded XYZ field"))?;
+    }
+    Ok(())
+}
+
+fn recv_msg_impl<R: Read>(stream: &mut R, limit: Option<usize>) -> io::Result<RecvMsg> {
     loop {
-        let (payload, _) = ns::ns_recv(stream)?;
+        let (payload, _) = match limit { Some(max) => ns::ns_recv_limited(stream, max)?, None => ns::ns_recv(stream)? };
         if ns::is_ns_text(&payload) && is_backup_host_notice(&String::from_utf8_lossy(&payload)) {
             continue;
         }
-        return classify_payload(&payload);
+        return if limit.is_some() {
+            if !ns::is_ns_text(&payload) { validate_bounded_xyz(&payload)?; }
+            classify_payload(&payload).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "unparseable bounded authentication frame"))
+        } else { classify_payload(&payload) };
     }
 }
 
@@ -712,7 +771,14 @@ struct NsFramePoller {
 impl NsFramePoller {
     /// The next frame payload, or `None` when a read timed out first.
     fn poll<R: Read>(&mut self, stream: &mut R) -> io::Result<Option<Vec<u8>>> {
+        self.poll_impl(stream, None, None)
+    }
+
+    fn poll_impl<R: Read>(&mut self, stream: &mut R, limit: Option<usize>, deadline: Option<std::time::Instant>) -> io::Result<Option<Vec<u8>>> {
         loop {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "mobile push approval deadline expired"));
+            }
             let needed = if self.buf.len() < 8 {
                 8 - self.buf.len()
             } else {
@@ -729,7 +795,11 @@ impl NsFramePoller {
                         format!("NS frame length {:#010x} is negative", len),
                     ));
                 }
-                let total = 8 + len as usize;
+                if limit.is_some_and(|max| len as usize > max) {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "bounded push frame limit exceeded"));
+                }
+                let total = 8usize.checked_add(len as usize).ok_or_else(||
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid push frame length"))?;
                 if self.buf.len() >= total {
                     let payload = self.buf[8..total].to_vec();
                     self.buf.drain(..total);
@@ -813,6 +883,39 @@ fn extract_srp_data(fields: &[String], username: &str) -> Vec<String> {
 ///
 /// Returns the session key K as BigUint.
 pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -> io::Result<BigUint> {
+    do_srp_impl(stream, username, password, None)
+}
+
+/// Authenticate with finite peer frame and SRP arithmetic input sizes.
+/// This is resource admission, not a new cryptographic group-strength guarantee.
+/// The default native group remains supported; remote inputs are capped at 8192 bits.
+pub fn do_srp_bounded<S: Read + Write>(stream: &mut S, username: &str, password: &str, max_frame_bytes: usize, group_max_bits: usize) -> io::Result<BigUint> {
+    validate_srp_limits(max_frame_bytes, group_max_bits)?;
+    do_srp_impl(stream, username, password, Some((max_frame_bytes, group_max_bits)))
+}
+
+fn validate_srp_limits(frame_bytes: usize, group_bits: usize) -> io::Result<()> {
+    if frame_bytes == 0 || group_bits > 8192 || (group_bits as u64) < srp::srp_n().bits() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid bounded SRP resource limits"));
+    }
+    Ok(())
+}
+
+fn check_srp_hex(value: &str, group_bits: usize) -> io::Result<()> {
+    if value.is_empty() || value.len() > group_bits.div_ceil(4) || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid or oversized bounded SRP integer"));
+    }
+    Ok(())
+}
+
+fn check_srp_group(n: &BigUint, g: &BigUint, group_bits: usize) -> io::Result<()> {
+    if n.bits() == 0 || n.bits() > group_bits as u64 || g.bits() > group_bits as u64 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid or oversized bounded SRP group"));
+    }
+    Ok(())
+}
+
+fn do_srp_impl<S: Read + Write>(stream: &mut S, username: &str, password: &str, limits: Option<(usize, usize)>) -> io::Result<BigUint> {
     let n = srp::srp_n();
     let g = BigUint::from(srp::SRP_G);
 
@@ -821,7 +924,7 @@ pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -
     stream.write_all(&xyz::xyz_wrap(&msg1))?;
 
     // State 2: Receive AUTH_PARAMS
-    let recv2 = recv_msg(stream)?;
+    let recv2 = recv_msg_impl(stream, limits.map(|(bytes, _)| bytes))?;
     let fields2 = match recv2 {
         RecvMsg::Xyz { state, fields, .. } => {
             if state != 2 {
@@ -841,6 +944,9 @@ pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -
     };
 
     let data_fields = extract_srp_data(&fields2, username);
+    if let Some((_, bits)) = limits {
+        for value in data_fields.iter().take(2) { check_srp_hex(value, bits)?; }
+    }
     // Server may provide N and g, or we use defaults
     let (n, g) = if data_fields.len() >= 2 {
         if let (Some(server_n), Some(server_g)) = (
@@ -855,6 +961,8 @@ pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -
         (n, g)
     };
 
+    if let Some((_, bits)) = limits { check_srp_group(&n, &g, bits)?; }
+
     // Generate client keys: a (private), A = g^a mod N
     let mut a_bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut a_bytes);
@@ -867,7 +975,7 @@ pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -
     stream.write_all(&xyz::xyz_wrap(&msg3))?;
 
     // State 4: Receive SERVER_PARAMS (salt, B)
-    let recv4 = recv_msg(stream)?;
+    let recv4 = recv_msg_impl(stream, limits.map(|(bytes, _)| bytes))?;
     let (state4, fields4) = match recv4 {
         RecvMsg::Xyz { state, fields, .. } => (state, fields),
         _ => {
@@ -882,7 +990,7 @@ pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -
         let result = fields4.get(9).map(|s| s.as_str()).unwrap_or("FAILED");
         return Err(io::Error::new(
             io::ErrorKind::Other,
-            format!("SRP early error (state 7): {}", result),
+            if limits.is_some() { "bounded SRP rejected by server".to_string() } else { format!("SRP early error (state 7): {}", result) },
         ));
     }
     if state4 != 4 {
@@ -902,8 +1010,15 @@ pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -
 
     let salt_hex = &data_fields[0];
     let b_hex = &data_fields[1];
+    if let Some((_, bits)) = limits {
+        check_srp_hex(b_hex, bits)?;
+        // Salt is also parsed into a BigUint for M1; admit it before any decode/parse.
+        if salt_hex.len() > bits.div_ceil(4) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized bounded SRP salt"));
+        }
+    }
     let salt_bytes = hex::decode(salt_hex)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, if limits.is_some() { "invalid bounded SRP salt".to_string() } else { e.to_string() }))?;
     let b_pub = BigUint::parse_bytes(b_hex.as_bytes(), 16).ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "Invalid B hex")
     })?;
@@ -929,7 +1044,7 @@ pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -
     stream.write_all(&xyz::xyz_wrap(&msg5))?;
 
     // State 6: Receive AUTH_RESULT
-    let recv6 = recv_msg(stream)?;
+    let recv6 = recv_msg_impl(stream, limits.map(|(bytes, _)| bytes))?;
     let (state6, fields6) = match recv6 {
         RecvMsg::Xyz { state, fields, .. } => (state, fields),
         _ => {
@@ -957,7 +1072,7 @@ pub fn do_srp<S: Read + Write>(stream: &mut S, username: &str, password: &str) -
     } else {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("SRP Authentication FAILED (state={}): {}", state6, result),
+            if limits.is_some() { "bounded SRP authentication failed".to_string() } else { format!("SRP Authentication FAILED (state={}): {}", state6, result) },
         ))
     }
 }
@@ -985,7 +1100,18 @@ const MAX_FARM_MSG_SIZE: usize = 65536;
 /// This returns exactly the framed message and leaves any surplus bytes in
 /// `carry` so the caller can hand them to the next reader. Discarding that tail
 /// dropped the logon ACK and stalled the exchange (ibx#237).
-fn recv_8eq1<S: Read>(stream: &mut S, carry: &mut Vec<u8>) -> io::Result<Vec<u8>> {
+fn recv_8eq1<R: Read>(stream: &mut R, carry: &mut Vec<u8>) -> io::Result<Vec<u8>> {
+    recv_8eq1_impl(stream, carry, None)
+}
+
+fn recv_8eq1_with_limits<R: Read>(stream: &mut R, carry: &mut Vec<u8>, limits: Option<(usize, usize)>) -> io::Result<Vec<u8>> {
+    match limits {
+        Some((bytes, _)) => recv_8eq1_impl(stream, carry, Some(bytes)),
+        None => recv_8eq1(stream, carry),
+    }
+}
+
+fn recv_8eq1_impl<R: Read>(stream: &mut R, carry: &mut Vec<u8>, limit: Option<usize>) -> io::Result<Vec<u8>> {
     let mut tmp = [0u8; 4096];
     // Tolerate transient WouldBlock/TimedOut (os error 35 on macOS) from the
     // short poll timeout until an overall deadline; a slow segment from a
@@ -993,8 +1119,14 @@ fn recv_8eq1<S: Read>(stream: &mut S, carry: &mut Vec<u8>) -> io::Result<Vec<u8>
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_secs_f64(TIMEOUT_FARM_LOGON);
     loop {
+        if limit.is_some_and(|max| carry.len() > max) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bounded farm authentication carry limit exceeded"));
+        }
         // A prior call may already have buffered a full message.
         if let Some(total) = try_frame_8eq1(carry)? {
+            if limit.is_some_and(|max| total > max) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "bounded farm authentication frame limit exceeded"));
+            }
             let msg = carry[..total].to_vec();
             carry.drain(..total);
             return Ok(msg);
@@ -1019,6 +1151,9 @@ fn recv_8eq1<S: Read>(stream: &mut S, carry: &mut Vec<u8>) -> io::Result<Vec<u8>
                 io::ErrorKind::ConnectionReset,
                 "farm connection closed during auth",
             ));
+        }
+        if limit.is_some_and(|max| carry.len().checked_add(n).is_none_or(|len| len > max)) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bounded farm authentication carry limit exceeded"));
         }
         carry.extend_from_slice(&tmp[..n]);
     }
@@ -1392,6 +1527,118 @@ pub fn do_ib_key_2fa<S: Read + Write>(
     }
 }
 
+/// Execute one mobile-push approval exchange, without a callback worker or retry.
+///
+/// Limits admit payload bytes before allocation and bound aggregate inbound wire bytes and
+/// frame count, including backup notices and heartbeats. Supply a cancellation-aware
+/// stream with short reads that expose poll timeouts; a generic stream itself cannot
+/// promise cancellation. The function consumes exactly through AUTH_FINISH, leaving
+/// coalesced post-auth frames unread. Errors and logs never echo peer contents.
+pub fn do_ib_key_push_bounded<S: Read + Write>(
+    stream: &mut S,
+    token_sub_type: &str,
+    deadline: Option<std::time::Instant>,
+    max_frame_bytes: usize,
+    max_wire_bytes: usize,
+    max_frames: usize,
+) -> io::Result<IbKeyOutcome> {
+    if max_frame_bytes == 0 || max_wire_bytes < 8 || max_frames == 0
+        || token_sub_type.len() > 64 || token_sub_type.chars().any(char::is_control)
+    {
+        return Err(ib_key_err(io::ErrorKind::InvalidInput, "invalid bounded push configuration"));
+    }
+    let check_deadline = || {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            Err(ib_key_err(io::ErrorKind::TimedOut, "mobile push approval deadline expired"))
+        } else { Ok(()) }
+    };
+    check_deadline()?;
+    let init = xyz::xyz_wrap(&xyz::xyz_build_swcr_token_init(token_sub_type));
+    stream.write_all(&init)?;
+    stream.flush()?;
+    log::info!("Controlled login: waiting for mobile push approval");
+    let mut poller = NsFramePoller::default();
+    let mut wire_bytes = 0usize;
+    let mut frames = 0usize;
+    let mut challenge = None;
+    loop {
+        check_deadline()?;
+        // The poller retains partial frames across poll timeouts. Admission uses
+        // the smaller remaining aggregate budget before reading an announced body.
+        let remaining = max_wire_bytes.saturating_sub(wire_bytes);
+        if frames == max_frames || remaining < 8 {
+            return Err(ib_key_err(io::ErrorKind::InvalidData, "bounded push exchange limit exceeded"));
+        }
+        let payload = match poller.poll_impl(stream, Some(max_frame_bytes.min(remaining - 8)), deadline) {
+            Ok(Some(payload)) => payload,
+            Ok(None) => continue,
+            Err(error) => {
+                let kind = if matches!(error.kind(), io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::ConnectionReset) {
+                    io::ErrorKind::ConnectionAborted
+                } else { error.kind() };
+                return Err(ib_key_err(kind, "bounded mobile push read failed"));
+            }
+        };
+        check_deadline()?;
+        frames += 1;
+        wire_bytes += payload.len() + 8;
+        if !ns::is_ns_text(&payload) { validate_bounded_xyz(&payload)?; }
+        let message = classify_payload(&payload).map_err(|_|
+            ib_key_err(io::ErrorKind::InvalidData, "invalid bounded mobile push message"))?;
+        match message {
+            RecvMsg::Xyz { msg_id, state: 2, fields, .. } if msg_id == xyz::XYZ_MSG_SWCR_TOKEN => {
+                challenge = Some(xyz::parse_swcr_token_challenge(&fields));
+            }
+            RecvMsg::Xyz { msg_id, state: 4, fields, .. } if msg_id == xyz::XYZ_MSG_SWCR_TOKEN => {
+                if !fields.iter().any(|field| field.eq_ignore_ascii_case("PASSED")) {
+                    return Err(ib_key_err(io::ErrorKind::PermissionDenied, "mobile push approval declined"));
+                }
+            }
+            RecvMsg::Xyz { msg_id, state: 3 | 5, fields, .. } if msg_id == xyz::XYZ_MSG_TOKEN_AUTH => {
+                if !fields.iter().any(|field| field.eq_ignore_ascii_case("PASSED"))
+                    || fields.iter().any(|field| field.eq_ignore_ascii_case("FAILED"))
+                {
+                    return Err(ib_key_err(io::ErrorKind::PermissionDenied, "mobile push approval declined"));
+                }
+                let mut soft_token_hex = String::new();
+                for field in &fields {
+                    if field.len() >= 32 && field.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        if field.len() > 2048 {
+                            return Err(ib_key_err(io::ErrorKind::InvalidData, "bounded push token limit exceeded"));
+                        }
+                        if !soft_token_hex.is_empty() {
+                            return Err(ib_key_err(io::ErrorKind::InvalidData, "ambiguous bounded push token"));
+                        }
+                        soft_token_hex = field.clone();
+                    }
+                }
+                log::info!("Controlled login: mobile push approved");
+                return match challenge {
+                    None if soft_token_hex.is_empty() => Ok(IbKeyOutcome::Skipped),
+                    value => {
+                        let value = value.unwrap_or_default();
+                        Ok(IbKeyOutcome::Approved {
+                            approval_url: value.approval_url,
+                            session_id: value.session_id,
+                            soft_token_hex,
+                        })
+                    }
+                };
+            }
+            RecvMsg::Ns { msg_type: NS_TEST_REQUEST, fields, .. } => {
+                let timestamp = fields.iter().find(|f| !f.is_empty()).map(String::as_str).unwrap_or("");
+                stream.write_all(&ns_build_heart_beat(NS_VERSION, timestamp))?;
+                stream.flush()?;
+            }
+            RecvMsg::Ns { msg_type, .. } if msg_type == NS_BACKUP_HOST => {}
+            RecvMsg::Ns { msg_type, .. } if msg_type == NS_ERROR_RESPONSE || msg_type == NS_SECURE_ERROR => {
+                return Err(ib_key_err(io::ErrorKind::PermissionDenied, "mobile push refused by server"));
+            }
+            _ => return Err(ib_key_err(io::ErrorKind::Unsupported, "unsupported bounded mobile push message")),
+        }
+    }
+}
 /// Result of soft token authentication attempt.
 pub enum SoftTokenOutcome {
     /// Token accepted.
@@ -1405,6 +1652,16 @@ pub fn do_soft_token<S: Read + Write>(
     session_token: &BigUint,
     carry: &mut Vec<u8>,
 ) -> io::Result<SoftTokenOutcome> {
+    do_soft_token_impl(stream, session_token, carry, None)
+}
+
+/// Farm token authentication with bounded frames, carry and challenge integers.
+pub fn do_soft_token_bounded<S: Read + Write>(stream: &mut S, session_token: &BigUint, carry: &mut Vec<u8>, max_frame_bytes: usize, group_max_bits: usize) -> io::Result<SoftTokenOutcome> {
+    validate_srp_limits(max_frame_bytes, group_max_bits)?;
+    do_soft_token_impl(stream, session_token, carry, Some((max_frame_bytes, group_max_bits)))
+}
+
+fn do_soft_token_impl<S: Read + Write>(stream: &mut S, session_token: &BigUint, carry: &mut Vec<u8>, limits: Option<(usize, usize)>) -> io::Result<SoftTokenOutcome> {
     use sha1::{Digest, Sha1};
 
     // State 1: Send empty init (FIX-framed for farm)
@@ -1412,8 +1669,9 @@ pub fn do_soft_token<S: Read + Write>(
     stream.write_all(&wrap_xyz_fix(&msg1))?;
 
     // State 2: Receive challenge (FIX-framed)
-    let recv2 = recv_8eq1(stream, carry)?;
+    let recv2 = recv_8eq1_with_limits(stream, carry, limits)?;
     let xyz2 = extract_xyz(&recv2);
+    if limits.is_some() { validate_bounded_xyz(xyz2)?; }
     let (_, _, state2, fields2) = xyz::xyz_parse_response(xyz2)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SOFT_TOKEN: invalid XYZ state 2"))?;
 
@@ -1435,6 +1693,8 @@ pub fn do_soft_token<S: Read + Write>(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SOFT_TOKEN: empty challenge"))?;
 
+    if let Some((_, bits)) = limits { check_srp_hex(challenge_hex, bits)?; }
+
     // SHA-1(strip_zeros(challenge_bytes) + strip_zeros(token_bytes))
     let challenge_int = BigUint::parse_bytes(challenge_hex.as_bytes(), 16)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid challenge hex"))?;
@@ -1455,8 +1715,9 @@ pub fn do_soft_token<S: Read + Write>(
     stream.write_all(&wrap_xyz_fix(&msg3))?;
 
     // State 4: Receive result (FIX-framed)
-    let recv4 = recv_8eq1(stream, carry)?;
+    let recv4 = recv_8eq1_with_limits(stream, carry, limits)?;
     let xyz4 = extract_xyz(&recv4);
+    if limits.is_some() { validate_bounded_xyz(xyz4)?; }
     let (_, _, _, fields4) = xyz::xyz_parse_response(xyz4)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SOFT_TOKEN: invalid XYZ state 4"))?;
 
@@ -1475,7 +1736,7 @@ pub fn do_soft_token<S: Read + Write>(
     } else {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("SOFT_TOKEN auth failed: {}", result),
+            if limits.is_some() { "bounded farm token authentication failed".to_string() } else { format!("SOFT_TOKEN auth failed: {}", result) },
         ))
     }
 }
@@ -1489,6 +1750,16 @@ pub fn do_srp_farm<S: Read + Write>(
     password: &str,
     carry: &mut Vec<u8>,
 ) -> io::Result<()> {
+    do_srp_farm_impl(stream, username, password, carry, None)
+}
+
+/// Farm SRP with the same input-size admission as bounded primary authentication.
+pub fn do_srp_farm_bounded<S: Read + Write>(stream: &mut S, username: &str, password: &str, carry: &mut Vec<u8>, max_frame_bytes: usize, group_max_bits: usize) -> io::Result<()> {
+    validate_srp_limits(max_frame_bytes, group_max_bits)?;
+    do_srp_farm_impl(stream, username, password, carry, Some((max_frame_bytes, group_max_bits)))
+}
+
+fn do_srp_farm_impl<S: Read + Write>(stream: &mut S, username: &str, password: &str, carry: &mut Vec<u8>, limits: Option<(usize, usize)>) -> io::Result<()> {
     let n = srp::srp_n();
     let g = BigUint::from(srp::SRP_G);
 
@@ -1497,8 +1768,9 @@ pub fn do_srp_farm<S: Read + Write>(
     stream.write_all(&wrap_xyz_fix(&msg1))?;
 
     // State 2: Receive AUTH_PARAMS (FIX-framed)
-    let recv2 = recv_8eq1(stream, carry)?;
+    let recv2 = recv_8eq1_with_limits(stream, carry, limits)?;
     let xyz2 = extract_xyz(&recv2);
+    if limits.is_some() { validate_bounded_xyz(xyz2)?; }
     let (_, _, state2, fields2) = xyz::xyz_parse_response(xyz2)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid state 2"))?;
 
@@ -1510,6 +1782,9 @@ pub fn do_srp_farm<S: Read + Write>(
     }
 
     let data_fields = extract_srp_data(&fields2, username);
+    if let Some((_, bits)) = limits {
+        for value in data_fields.iter().take(2) { check_srp_hex(value, bits)?; }
+    }
     let (n, g) = if data_fields.len() >= 2 {
         if let (Some(server_n), Some(server_g)) = (
             BigUint::parse_bytes(data_fields[0].as_bytes(), 16),
@@ -1523,6 +1798,8 @@ pub fn do_srp_farm<S: Read + Write>(
         (n, g)
     };
 
+    if let Some((_, bits)) = limits { check_srp_group(&n, &g, bits)?; }
+
     // Generate client keys with 32-byte private key
     let mut a_bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut a_bytes);
@@ -1535,8 +1812,9 @@ pub fn do_srp_farm<S: Read + Write>(
     stream.write_all(&wrap_xyz_fix(&msg3))?;
 
     // State 4: Receive salt + B (FIX-framed)
-    let recv4 = recv_8eq1(stream, carry)?;
+    let recv4 = recv_8eq1_with_limits(stream, carry, limits)?;
     let xyz4 = extract_xyz(&recv4);
+    if limits.is_some() { validate_bounded_xyz(xyz4)?; }
     let (_, _, state4, fields4) = xyz::xyz_parse_response(xyz4)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid state 4"))?;
 
@@ -1544,7 +1822,7 @@ pub fn do_srp_farm<S: Read + Write>(
         let result = fields4.get(9).map(|s| s.as_str()).unwrap_or("FAILED");
         return Err(io::Error::new(
             io::ErrorKind::Other,
-            format!("Farm SRP early error (state 7): {}", result),
+            if limits.is_some() { "bounded farm SRP rejected by server".to_string() } else { format!("Farm SRP early error (state 7): {}", result) },
         ));
     }
     if state4 != 4 {
@@ -1564,8 +1842,15 @@ pub fn do_srp_farm<S: Read + Write>(
 
     let salt_hex = &data_fields[0];
     let b_hex = &data_fields[1];
+    if let Some((_, bits)) = limits {
+        check_srp_hex(b_hex, bits)?;
+        // Salt is also parsed into a BigUint for M1; admit it before any decode/parse.
+        if salt_hex.len() > bits.div_ceil(4) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized bounded SRP salt"));
+        }
+    }
     let salt_bytes = hex::decode(salt_hex)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, if limits.is_some() { "invalid bounded SRP salt".to_string() } else { e.to_string() }))?;
     let b_pub = BigUint::parse_bytes(b_hex.as_bytes(), 16).ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid B hex")
     })?;
@@ -1586,8 +1871,9 @@ pub fn do_srp_farm<S: Read + Write>(
     stream.write_all(&wrap_xyz_fix(&msg5))?;
 
     // State 6: Receive AUTH_RESULT (FIX-framed)
-    let recv6 = recv_8eq1(stream, carry)?;
+    let recv6 = recv_8eq1_with_limits(stream, carry, limits)?;
     let xyz6 = extract_xyz(&recv6);
+    if limits.is_some() { validate_bounded_xyz(xyz6)?; }
     let (_, _, state6, fields6) = xyz::xyz_parse_response(xyz6)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Farm SRP: invalid state 6"))?;
 
@@ -1604,7 +1890,7 @@ pub fn do_srp_farm<S: Read + Write>(
     } else {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("Farm SRP FAILED (state={}): {}", state6, result),
+            if limits.is_some() { "bounded farm SRP authentication failed".to_string() } else { format!("Farm SRP FAILED (state={}): {}", state6, result) },
         ))
     }
 }
@@ -1612,6 +1898,128 @@ pub fn do_srp_farm<S: Read + Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BoundedAuthIo {
+        input: io::Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+    impl Read for BoundedAuthIo {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> { self.input.read(bytes) }
+    }
+    impl Write for BoundedAuthIo {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { self.output.extend_from_slice(bytes); Ok(bytes.len()) }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn bounded_srp_rejects_remote_group_before_public_key_write() {
+        for fields in [[("H", "f".repeat(2049)), ("I", "2".into())], [("H", "2".into()), ("I", "f".repeat(2049))]] {
+            let named: Vec<(&str, &str)> = fields.iter().map(|(key, value)| (*key, value.as_str())).collect();
+            let mut stream = BoundedAuthIo { input: io::Cursor::new(xyz::xyz_wrap(&xyz::xyz_build_srp_v20(2, &named))), output: Vec::new() };
+            let error = do_srp_bounded(&mut stream, "user", "password", 16384, 8192).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(stream.output, xyz::xyz_wrap(&xyz::xyz_build_srp_v20(1, &[])));
+        }
+    }
+
+    #[test]
+    fn bounded_srp_rejects_large_server_public_value_before_proof() {
+        let group = format!("{:x}", srp::srp_n());
+        for (salt, public) in [("01".to_string(), "f".repeat(2049)), ("f".repeat(2050), "02".to_string())] {
+            let mut input = xyz::xyz_wrap(&xyz::xyz_build_srp_v20(2, &[("H", &group), ("I", "2")]));
+            input.extend_from_slice(&xyz::xyz_wrap(&xyz::xyz_build_srp_v20(4, &[("J", &salt), ("M", &public)])));
+            let mut stream = BoundedAuthIo { input: io::Cursor::new(input), output: Vec::new() };
+            assert_eq!(do_srp_bounded(&mut stream, "user", "password", 16384, 8192).unwrap_err().kind(), io::ErrorKind::InvalidData);
+            let mut output = io::Cursor::new(stream.output);
+            let mut states = Vec::new();
+            while let Ok(RecvMsg::Xyz { state, .. }) = recv_msg(&mut output) { states.push(state); }
+            assert_eq!(states, vec![1, 3]);
+        }
+    }
+
+    #[test]
+    fn bounded_srp_accepts_native_default_group() {
+        let mut input = xyz::xyz_wrap(&xyz::xyz_build_srp_v20(2, &[]));
+        input.extend_from_slice(&xyz::xyz_wrap(&xyz::xyz_build_srp_v20(4, &[("J", "01"), ("M", "02")])));
+        input.extend_from_slice(&xyz::xyz_wrap(&xyz::xyz_build_srp_v20(6, &[("P", "PASSED")])));
+        for bounded in [false, true] {
+            let mut stream = BoundedAuthIo { input: io::Cursor::new(input.clone()), output: Vec::new() };
+            let result = if bounded { do_srp_bounded(&mut stream, "user", "password", 16384, 8192) } else { do_srp(&mut stream, "user", "password") };
+            result.unwrap();
+        }
+    }
+
+    #[test]
+    fn bounded_token_rejects_large_challenge_before_response() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let message = xyz::xyz_build_soft_token(2, &"f".repeat(2049), "", "");
+        server.write_all(&wrap_xyz_fix(&message)).unwrap();
+        let error = do_soft_token_bounded(&mut client, &BigUint::from(2u32), &mut Vec::new(), 16384, 8192).err().expect("oversized challenge must fail");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        server.set_read_timeout(Some(std::time::Duration::from_millis(100))).unwrap();
+        let expected = wrap_xyz_fix(&xyz::xyz_build_soft_token(1, "", "", ""));
+        let mut query = vec![0u8; expected.len()];
+        server.read_exact(&mut query).unwrap();
+        assert_eq!(query, expected);
+        assert!(server.read(&mut [0u8; 1]).is_err());
+    }
+
+    #[test]
+    fn bounded_token_rejects_overflowing_carry_without_reading() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let error = do_soft_token_bounded(&mut client, &BigUint::from(2u32), &mut vec![0xff; 64], 32, 8192).err().expect("oversized carry must fail");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn bounded_srp_refuses_invalid_limits_before_issuance() {
+        let mut stream = BoundedAuthIo { input: io::Cursor::new(Vec::new()), output: Vec::new() };
+        for (bytes, bits) in [(0, 8192), (1024, 8193), (1024, 1)] {
+            assert_eq!(do_srp_bounded(&mut stream, "user", "password", bytes, bits).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert!(stream.output.is_empty());
+        }
+    }
+
+    #[test]
+    fn bounded_auth_parsing_errors_are_content_free() {
+        let secret = b"private-auth-frame-value";
+        let mut stream = io::Cursor::new(xyz::xyz_wrap(secret));
+        assert!(!recv_msg_limited(&mut stream, 1024).unwrap_err().to_string().contains("private-auth"));
+        let frame = ns::ns_build(50, NS_ERROR_RESPONSE, &["private-auth-frame-value"], "");
+        let mut channel = SecureChannel::new();
+        let error = recv_auth_start_limited(&mut io::Cursor::new(frame), &mut channel, 1024).unwrap_err();
+        assert!(!error.to_string().contains("private-auth"));
+    }
+
+    #[test]
+    fn bounded_auth_start_rejects_unknown_factor_without_peer_diagnostics() {
+        let frame = ns::ns_build(50, NS_AUTH_START, &["1", "1", "private-unknown-factor", "0"], "");
+        let mut channel = SecureChannel::new();
+        let error = recv_auth_start_limited(&mut io::Cursor::new(frame), &mut channel, 1024).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!error.to_string().contains("private-unknown-factor"));
+    }
+
+    #[test]
+    fn bounded_farm_srp_rejects_remote_group_without_public_key() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let message = xyz::xyz_build_srp_v20(2, &[("H", &"f".repeat(2049)), ("I", "2")]);
+        server.write_all(&wrap_xyz_fix(&message)).unwrap();
+        let error = do_srp_farm_bounded(&mut client, "user", "password", &mut Vec::new(), 16384, 8192).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        server.set_read_timeout(Some(std::time::Duration::from_millis(100))).unwrap();
+        let mut query = vec![0u8; wrap_xyz_fix(&xyz::xyz_build_srp_v20(1, &[])).len()];
+        server.read_exact(&mut query).unwrap();
+        assert_eq!(query, wrap_xyz_fix(&xyz::xyz_build_srp_v20(1, &[])));
+        let mut extra = [0u8; 1];
+        assert!(server.read(&mut extra).is_err());
+    }
 
     // ── get_session_id ──────────────────────────────────────────────────
 
@@ -2769,3 +3177,7 @@ mod tests {
         assert_eq!(tail, b"next", "bytes after the frame stay unread");
     }
 }
+
+#[cfg(test)]
+#[path = "controlled_push_tests.rs"]
+mod controlled_push_tests;

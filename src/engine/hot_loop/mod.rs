@@ -17,6 +17,7 @@ use crate::engine::park::{ControlSender, Parker, RawHandle, Waker};
 use crate::config::chrono_free_timestamp;
 use crate::gateway::{ccp_reconnect_host, reconnect_ccp_via, CcpReconnect, ReconnectAuth};
 use crate::protocol::connection::Connection;
+use crate::lifecycle::ConnectionControl;
 use crate::protocol::fix;
 use crate::types::{ControlCommand, InstrumentId, ReqId, Price, Qty, PRICE_SCALE, QTY_SCALE};
 #[cfg(any(test, feature = "test-support"))]
@@ -63,6 +64,8 @@ pub struct HotLoop {
     control_rx: Option<Receiver<ControlCommand>>,
     /// Whether the hot loop should keep running.
     running: bool,
+    connection_control: Option<ConnectionControl>,
+    has_run: bool,
     /// Account ID for order submission.
     account_id: String,
     /// Heartbeat state.
@@ -155,6 +158,8 @@ impl HotLoop {
             hmds_conn: None,
             control_rx: None,
             running: true,
+            connection_control: None,
+            has_run: false,
             account_id: String::new(),
             hb: HeartbeatState::new(),
             cmd_buf: Vec::with_capacity(16),
@@ -189,6 +194,32 @@ impl HotLoop {
         }
     }
 
+    /// Attach caller-owned cancellation before the first run. Controlled engines
+    /// never start farm/CCP/HMDS reconnect workers; the caller owns replacement.
+    /// Existing engines with unowned reconnect workers cannot be converted.
+    pub fn set_connection_control(&mut self, control: ConnectionControl) -> io::Result<()> {
+        if self.has_run || self.pending_farm_reconnect.is_some()
+            || self.pending_ccp_reconnect.is_some() || self.pending_hmds_reconnect.is_some() || !self.pool.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                "connection control must be installed before engine/reconnect startup"));
+        }
+        control.check()?;
+        self.connection_control = Some(control);
+        self.ccp_next_attempt_at = None;
+        self.farm_next_attempt_at = None;
+        self.hmds_next_attempt_at = None;
+        Ok(())
+    }
+
+    // Out-of-band stop does not require a slot in the command channel.
+    fn stop_if_cancelled(&mut self) -> bool {
+        if self.connection_control.as_ref().is_some_and(ConnectionControl::is_cancelled) {
+            self.running = false;
+            self.shared.set_connection_lost();
+            return true;
+        }
+        false
+    }
     /// Set the control channel receiver. The caller keeps the sender. A
     /// command sent on it does not wake a waiting engine: it is read at the
     /// end of the wait (`control_channel` gives a sender that wakes).
@@ -263,7 +294,9 @@ impl HotLoop {
 
     /// Process pending control commands once. For testing.
     pub fn poll_once(&mut self) {
-        self.poll_control_commands();
+        if !self.stop_if_cancelled() {
+            self.poll_control_commands();
+        }
     }
 
     /// Whether the hot loop is still running. For testing.
@@ -1244,6 +1277,7 @@ impl HotLoop {
     pub fn run_with_panic_recovery(mut self) {
         let event_tx = self.event_tx.clone();
         let shared = self.shared.clone();
+        let controlled = self.connection_control.is_some();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.run();
         }));
@@ -1256,16 +1290,18 @@ impl HotLoop {
             log::error!("Engine hot loop panicked, emitting Disconnected: {}", msg);
             shared.set_connection_lost();
             emit(&event_tx, Event::Disconnected);
+            if controlled { self.connection_control.as_ref().unwrap().cancel(); std::panic::resume_unwind(payload); }
         }
     }
 
-    /// Run the hot loop. Blocks until Shutdown command received.
+    /// Run until Shutdown/channel closure or caller-controlled cancellation.
     pub fn run(&mut self) {
         if let Some(core) = self.core_id {
             Self::pin_to_core(core);
         }
 
         self.running = true;
+        self.has_run = true;
         // From here to the end of the loop, also by a panic, the answers
         // written by the callers wait for the commands before them (ibx#529).
         struct Running(Arc<SharedState>);
@@ -1288,6 +1324,7 @@ impl HotLoop {
         }
 
         while self.running {
+            if self.stop_if_cancelled() { break; }
             self.context.loop_iterations += 1;
 
             // 1. Read the market data farm socket (returns at once)
@@ -1299,6 +1336,7 @@ impl HotLoop {
             let _ = farm_was_ok; // reconnects are scheduled below (ibx#218)
 
             // 1b. Read the historical socket for tick-by-tick data
+            if self.stop_if_cancelled() { break; }
             self.hmds.poll(
                 &mut self.hmds_conn, &self.shared,
                 &self.event_tx, &mut self.hb,
@@ -1313,6 +1351,11 @@ impl HotLoop {
 
             // 1b'. Farms opened on demand (#445): read, then connect,
             //      heartbeat and close them by their rules.
+            if self.connection_control.is_some() && !self.pool.is_empty() {
+                log::warn!("controlled sessions do not support on-demand farm creation");
+                self.connection_control.as_ref().unwrap().cancel();
+                if self.stop_if_cancelled() { break; }
+            }
             if !self.pool.is_empty() {
                 self.poll_pool();
                 self.service_pool();
@@ -1329,6 +1372,7 @@ impl HotLoop {
 
             // 2. Drain pending orders → build → sign → send to auth
             //    Skip if CCP is disconnected — orders stay in buffer for retry after reconnect.
+            if self.stop_if_cancelled() { break; }
             order_builder::drain_and_send_orders(
                 &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
                 self.ccp.disconnected, &self.shared,
@@ -1336,17 +1380,17 @@ impl HotLoop {
 
             // 3. Read the auth socket for execution reports
             let ccp_was_ok = !self.ccp.disconnected;
+            if self.stop_if_cancelled() { break; }
             self.poll_auth();
             let _ = ccp_was_ok; // reconnects are scheduled below (ibx#218)
 
             // 4. Check control_plane_rx (SPSC) for commands
+            if self.stop_if_cancelled() { break; }
             self.poll_control_commands();
 
-            // 4b. Write what waits for a slow peer; a failed write drops
-            //     that link (ibx#254)
+            if self.stop_if_cancelled() { break; }
             self.check_writes();
-
-            // 5. Liveness of the links (ibx#419)
+            if self.stop_if_cancelled() { break; }
             self.check_heartbeats();
 
             // 5b. Poll pending reconnects and schedule the next attempts
@@ -1385,6 +1429,17 @@ impl HotLoop {
                 //    engine keeps polling its core instead.
                 self.wait_for_work();
             }
+        }
+        if let Some(control) = &self.connection_control {
+            control.cancel();
+            // run(&mut self) can return while its owner retains HotLoop. Close
+            // each transport here, not only when that owner eventually drops.
+            self.farm_conn.take();
+            self.ccp_conn.take();
+            self.hmds_conn.take();
+            self.pool = FarmPool::new(Instant::now());
+            self.shared.set_connection_lost();
+            self.shared.notify();
         }
     }
 
@@ -1553,7 +1608,13 @@ impl HotLoop {
         };
 
         self.cmd_buf.clear();
-        self.cmd_buf.extend(rx.try_iter());
+        // Controlled sessions bound queue draining even under continuous producers.
+        // Native caches are separately audited; this only bounds one drain pass.
+        if self.connection_control.is_some() {
+            self.cmd_buf.extend(rx.try_iter().take(64));
+        } else {
+            self.cmd_buf.extend(rx.try_iter());
+        }
         // Told once their answers are written (ibx#529).
         let mut taken = self.cmd_buf.len() as u64;
 
@@ -1573,6 +1634,7 @@ impl HotLoop {
             .collect();
         self.pass_active |= !cmds.is_empty();
         for cmd in cmds {
+            if self.stop_if_cancelled() { break; }
             match cmd {
                 ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, snapshot, reply_tx } => {
                     // The top of book of the contract runs on another slot
@@ -2012,6 +2074,15 @@ impl HotLoop {
                     // These variants exist for future CCP round-trip support.
                 }
                 ControlCommand::Shutdown => {
+                    if let Some(control) = &self.connection_control {
+                        // Controlled shutdown is terminal: do not issue cancels or
+                        // later commands from this batch after signalling stop.
+                        control.cancel();
+                        self.running = false;
+                        self.shared.set_connection_lost();
+                        emit(&self.event_tx, Event::Disconnected);
+                        break;
+                    }
                     // Unsubscribe all active market data before stopping
                     let instruments: Vec<InstrumentId> = self.farm.instrument_md_reqs
                         .iter().map(|(id, _)| *id).collect();
@@ -2205,6 +2276,7 @@ impl HotLoop {
 
     /// Replace the farm connection (after reconnection) and re-subscribe to all instruments.
     pub fn reconnect_farm(&mut self, mut conn: Connection) {
+        if let Some(control) = &self.connection_control { control.cancel(); self.shared.set_connection_lost(); return; }
         conn.set_queued_writes(true);
         // Entries made while the farm was down never reached it.
         self.farm.farm_lost(PRIMARY_MD, &mut self.context);
@@ -2288,6 +2360,8 @@ impl HotLoop {
 
     /// Connect, heartbeat and close the farms opened on demand (#445).
     fn service_pool(&mut self) {
+        // Controlled sessions cannot adopt/spawn detached on-demand workers.
+        if self.connection_control.is_some() { return; }
         let now = Instant::now();
         for id in self.pool.due_connects(now) {
             self.spawn_pool_connect(id, now);
@@ -2339,6 +2413,7 @@ impl HotLoop {
     /// Open a farm on demand in the background, with the session's
     /// credentials; no routing table is asked there, as in the reference.
     fn spawn_pool_connect(&mut self, id: pool::FarmId, now: Instant) {
+        if self.connection_control.is_some() { return; }
         let Some(farm) = self.pool.get(id) else { return };
         let auth = match self.reconnect_auth.clone() {
             Some(a) if !a.username.is_empty() => a,
@@ -2372,6 +2447,7 @@ impl HotLoop {
 
     /// Replace the auth connection (after reconnection) and reconcile order state.
     pub fn reconnect_ccp(&mut self, mut conn: Connection) {
+        if let Some(control) = &self.connection_control { control.cancel(); self.shared.set_connection_lost(); return; }
         conn.set_queued_writes(true);
         self.ccp.reconnect(conn, &mut self.ccp_conn, &mut self.hb, &self.account_id);
     }
@@ -2426,6 +2502,7 @@ impl HotLoop {
     /// (ibx#218). Called every loop iteration; no-op while connected or an
     /// attempt is in flight.
     fn maybe_spawn_farm_reconnect(&mut self) {
+        if self.connection_control.is_some() { return; }
         if !self.farm.disconnected || self.pending_farm_reconnect.is_some() {
             return;
         }
@@ -2452,6 +2529,7 @@ impl HotLoop {
 
     /// See `maybe_spawn_farm_reconnect`.
     fn maybe_spawn_ccp_reconnect(&mut self) {
+        if self.connection_control.is_some() { return; }
         if !self.ccp.disconnected || self.pending_ccp_reconnect.is_some() {
             return;
         }
@@ -2476,6 +2554,7 @@ impl HotLoop {
 
     /// Spawn a background thread to reconnect the farm using cached credentials.
     fn spawn_farm_reconnect(&mut self) {
+        if self.connection_control.is_some() { return; }
         if self.pending_farm_reconnect.is_some() { return; } // already in progress
         let auth = match self.reconnect_auth.clone() {
             Some(a) if !a.host.is_empty() => a,
@@ -2543,6 +2622,7 @@ impl HotLoop {
 
     /// Spawn a background thread to reconnect CCP using cached credentials.
     fn spawn_ccp_reconnect(&mut self) {
+        if self.connection_control.is_some() { return; }
         if self.pending_ccp_reconnect.is_some() { return; }
         let auth = match self.reconnect_auth.clone() {
             Some(a) if !a.host.is_empty() => a,
@@ -2619,6 +2699,7 @@ impl HotLoop {
     /// connection — covers the ibx#187 case where initial soft-token returned
     /// FAILED and the gateway dropped the socket.
     fn maybe_spawn_hmds_reconnect(&mut self) {
+        if self.connection_control.is_some() { return; }
         if self.hmds_conn.is_some() { return; }
         if self.pending_hmds_reconnect.is_some() { return; }
         let auth = match self.reconnect_auth.as_ref() {
@@ -4879,6 +4960,156 @@ mod tests {
                 assert_eq!(engine.farm.instrument_md_reqs[0].1.len(), 2);
             }
         }
+    }
+
+    fn lifecycle_control() -> ConnectionControl {
+        ConnectionControl::new(Duration::from_secs(5), std::collections::BTreeMap::from([("localhost".into(), vec![std::net::IpAddr::from([127, 0, 0, 1])])]), "offline-hardware".into()).unwrap()
+    }
+
+    #[test]
+    fn controlled_full_queue_stops_without_admitting_shutdown() {
+        let shared = Arc::new(SharedState::new());
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        for _ in 0..64 { tx.try_send(ControlCommand::Ping).unwrap(); }
+        assert!(tx.try_send(ControlCommand::Shutdown).is_err());
+        let control = lifecycle_control();
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.set_control_rx(rx);
+        engine.set_connection_control(control.clone()).unwrap();
+        control.cancel();
+        engine.run();
+        assert!(!engine.is_running());
+        assert!(shared.take_connection_lost());
+        assert_eq!(engine.context.loop_iterations, 0);
+        assert_eq!(engine.control_rx.as_ref().unwrap().len(), 64,
+            "stop must bypass the full issuance queue");
+    }
+
+    #[test]
+    fn controlled_shutdown_stops_batch_before_later_wire_commands() {
+        for controlled in [false, true] {
+            let shared = Arc::new(SharedState::new());
+            let (connection, mut peer) = crate::test_support::Peer::pair();
+            let mut engine = HotLoop::new(shared.clone(), None, None);
+            engine.ccp_conn = Some(connection);
+            let (tx, rx) = crossbeam_channel::bounded(2);
+            engine.set_control_rx(rx);
+            let control = lifecycle_control();
+            if controlled {
+                engine.set_connection_control(control.clone()).unwrap();
+            }
+            tx.try_send(ControlCommand::Shutdown).unwrap();
+            tx.try_send(ControlCommand::Ping).unwrap();
+            engine.poll_once();
+            assert!(!engine.is_running());
+            assert!(shared.take_connection_lost());
+            let messages = peer.messages();
+            if controlled {
+                assert!(control.is_cancelled(), "Shutdown must signal the scope immediately");
+                assert!(messages.is_empty(), "a command after Shutdown reached the wire");
+                assert!(engine.hb.pending_ccp_test.is_none());
+            } else {
+                // The same Ping writes a test request on the unchanged legacy path.
+                assert_eq!(messages.len(), 1);
+                assert_eq!(fix::fix_parse(&messages[0]).get(&fix::TAG_MSG_TYPE).map(String::as_str), Some(fix::MSG_TEST_REQUEST));
+            }
+            control.join_workers(Duration::from_secs(1)).unwrap();
+        }
+    }
+
+    #[test]
+    fn controlled_engine_never_schedules_or_spawns_native_reconnects() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared, None, None);
+        let mut auth = reconnect_auth_with_host("must-not-resolve.invalid");
+        auth.hmds_host = "must-not-resolve.invalid".into();
+        engine.set_reconnect_auth(auth);
+        engine.set_connection_control(lifecycle_control()).unwrap();
+        engine.farm.disconnected = true;
+        engine.ccp.disconnected = true;
+        // Exercise direct worker entry as well as scheduled paths. No hostname
+        // resolution/socket constructor can be reached in the controlled mode.
+        engine.spawn_farm_reconnect();
+        engine.spawn_ccp_reconnect();
+        engine.maybe_spawn_farm_reconnect();
+        engine.maybe_spawn_ccp_reconnect();
+        engine.maybe_spawn_hmds_reconnect();
+        assert!(engine.pending_farm_reconnect.is_none());
+        assert!(engine.pending_ccp_reconnect.is_none());
+        assert!(engine.pending_hmds_reconnect.is_none());
+        assert_eq!((engine.farm_reconnect_attempt, engine.ccp_reconnect_attempt,
+            engine.hmds_reconnect_attempt), (0, 0, 0));
+        assert!(engine.farm_next_attempt_at.is_none());
+        assert!(engine.ccp_next_attempt_at.is_none());
+        assert!(engine.hmds_next_attempt_at.is_none());
+    }
+
+    #[test]
+    fn controlled_mode_cannot_adopt_an_unowned_reconnect_worker() {
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        let (_tx, rx) = crossbeam_channel::bounded(1);
+        engine.pending_ccp_reconnect = Some(rx);
+        assert_eq!(engine.set_connection_control(lifecycle_control()).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput);
+    }
+    #[test]
+    fn controlled_install_rejects_existing_on_demand_pool() {
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        engine.pool.ensure("fixture", "must-not-resolve.invalid", FarmKind::MarketData, Instant::now());
+        assert_eq!(engine.set_connection_control(lifecycle_control()).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    fn controlled_tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        (socket, peer)
+    }
+    #[test]
+    fn controlled_on_demand_pool_never_spawns_and_is_disposed_on_stop() {
+        let control = lifecycle_control();
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.set_connection_control(control.clone()).unwrap();
+        engine.set_reconnect_auth(reconnect_auth_with_host("must-not-resolve.invalid"));
+        let id = engine.pool.ensure("fixture", "must-not-resolve.invalid", FarmKind::MarketData, Instant::now());
+        let (socket, mut peer) = controlled_tcp_pair();
+        engine.pool.get_mut(id).unwrap().conn = Some(Connection::new_raw(socket).unwrap());
+        engine.spawn_pool_connect(id, Instant::now());
+        engine.service_pool();
+        // Reject this newly introduced resource path and release its actual
+        // transport before the HotLoop owner is dropped.
+        engine.run();
+        assert!(control.is_cancelled());
+        assert!(shared.take_connection_lost());
+        assert!(engine.pool.is_empty());
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        assert_eq!(std::io::Read::read(&mut peer, &mut [0]).unwrap(), 0);
+        control.join_workers(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn controlled_run_releases_all_loopback_transports_before_owner_drop() {
+        let control = lifecycle_control();
+        let mut engine = HotLoop::new(Arc::new(SharedState::new()), None, None);
+        engine.set_connection_control(control.clone()).unwrap();
+        let (farm, mut farm_peer) = controlled_tcp_pair();
+        let (ccp, mut ccp_peer) = controlled_tcp_pair();
+        let (hmds, mut hmds_peer) = controlled_tcp_pair();
+        engine.farm_conn = Some(Connection::new_raw(farm).unwrap());
+        engine.ccp_conn = Some(Connection::new_raw(ccp).unwrap());
+        engine.hmds_conn = Some(Connection::new_raw(hmds).unwrap());
+        control.cancel();
+        engine.run();
+        assert!(engine.farm_conn.is_none() && engine.ccp_conn.is_none() && engine.hmds_conn.is_none());
+        // The HotLoop owner remains alive here: EOF proves run() released each
+        // actual transport rather than deferring socket disposal to owner Drop.
+        for peer in [&mut farm_peer, &mut ccp_peer, &mut hmds_peer] {
+            peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            let mut byte = [0];
+            assert_eq!(std::io::Read::read(peer, &mut byte).unwrap(), 0);
+        }
+        control.join_workers(Duration::from_secs(1)).unwrap();
     }
 }
 

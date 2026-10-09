@@ -37,6 +37,16 @@ pub fn fixcomp_build(inner_msg: &[u8]) -> Vec<u8> {
 /// or if the zlib payload fails to inflate. Hot-loop callers should `log::warn!`
 /// and skip the frame rather than propagate.
 pub fn fixcomp_decompress(data: &[u8]) -> io::Result<Vec<Vec<u8>>> {
+    fixcomp_decompress_impl(data, None)
+}
+
+/// Inflate at most the specified number of bytes, with content-free diagnostics.
+/// Oversized output fails rather than returning a truncated successful response.
+pub fn fixcomp_decompress_limited(data: &[u8], max_output_bytes: usize) -> io::Result<Vec<Vec<u8>>> {
+    fixcomp_decompress_impl(data, Some(max_output_bytes))
+}
+
+fn fixcomp_decompress_impl(data: &[u8], limit: Option<usize>) -> io::Result<Vec<Vec<u8>>> {
     let raw = if let Some(idx95) = find_tag(data, b"\x0195=").map(|p| p + 1) {
         let soh = data[idx95..]
             .iter()
@@ -75,6 +85,20 @@ pub fn fixcomp_decompress(data: &[u8]) -> io::Result<Vec<Vec<u8>>> {
 
     let mut decoder = ZlibDecoder::new(raw);
     let mut decompressed = Vec::new();
+    if let Some(max_bytes) = limit {
+        let mut chunk = [0u8; 8192];
+        loop {
+            // Read one byte beyond remaining capacity to distinguish exact fit from overflow.
+            let remaining = max_bytes.saturating_sub(decompressed.len());
+            let wanted = chunk.len().min(remaining.saturating_add(1));
+            let read = decoder.read(&mut chunk[..wanted])
+                .map_err(|_| parse_err("fixcomp: invalid bounded compressed payload"))?;
+            if read == 0 { break; }
+            if read > remaining { return Err(parse_err("fixcomp: inflated byte limit exceeded")); }
+            decompressed.extend_from_slice(&chunk[..read]);
+        }
+        return split_messages_impl(&decompressed, true);
+    }
     if let Err(e) = decoder.read_to_end(&mut decompressed) {
         // ibx#182 root-cause tee: on inflate failure, dump the raw zlib
         // payload + the full enclosing frame as hex so we can tell
@@ -102,8 +126,7 @@ pub fn fixcomp_length(data: &[u8]) -> Option<usize> {
     let tag9 = find_tag(&data[soh1..], b"9=").map(|p| soh1 + p)?;
     let soh2 = data[tag9..].iter().position(|&b| b == SOH).map(|p| tag9 + p)?;
     let body_len: usize = std::str::from_utf8(&data[tag9 + 2..soh2]).ok()?.parse().ok()?;
-    // A length past the address space never completes (ibx#488).
-    let total = (soh2 + 1).checked_add(body_len)?;
+    let total = soh2.checked_add(1)?.checked_add(body_len)?;
     if data.len() < total {
         None
     } else {
@@ -117,6 +140,16 @@ fn find_tag(data: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Split decompressed content into individual messages.
 fn split_messages(buf: &[u8]) -> Vec<Vec<u8>> {
+    split_messages_impl(buf, false).unwrap_or_default()
+}
+
+fn split_messages_impl(buf: &[u8], strict: bool) -> io::Result<Vec<Vec<u8>>> {
+    macro_rules! incomplete {
+        () => {{
+            if strict { return Err(parse_err("fixcomp: malformed inflated message")); }
+            break;
+        }};
+    }
     let mut messages = Vec::new();
     let mut pos = 0;
 
@@ -127,7 +160,7 @@ fn split_messages(buf: &[u8]) -> Vec<Vec<u8>> {
         let o_start = find_tag(remaining, b"8=O\x01");
 
         match (fix_start, o_start) {
-            (None, None) => break,
+            (None, None) => incomplete!(),
             (fix_s, o_s) => {
                 // Pick whichever comes first
                 let o_first = match (o_s, fix_s) {
@@ -136,29 +169,32 @@ fn split_messages(buf: &[u8]) -> Vec<Vec<u8>> {
                     _ => false,
                 };
 
+                if strict && (if o_first { o_s.unwrap() } else { fix_s.unwrap() }) != 0 {
+                    return Err(parse_err("fixcomp: unexpected bytes before inflated message"));
+                }
                 if o_first {
                     let o = o_s.unwrap();
                     let chunk = &remaining[o..];
                     // 8=O protocol: length-delimited via tag 9
                     let tag9 = match find_tag(&chunk[4..], b"9=") {
                         Some(p) => 4 + p,
-                        None => break,
+                        None => incomplete!(),
                     };
                     let soh9 = match chunk[tag9..].iter().position(|&b| b == SOH) {
                         Some(p) => tag9 + p,
-                        None => break,
+                        None => incomplete!(),
                     };
                     let body_len: usize = match std::str::from_utf8(&chunk[tag9 + 2..soh9]) {
                         Ok(s) => match s.parse() {
                             Ok(n) => n,
-                            Err(_) => break,
+                            Err(_) => incomplete!(),
                         },
-                        Err(_) => break,
+                        Err(_) => incomplete!(),
                     };
-                    let total = match (soh9 + 1).checked_add(body_len) {
-                        Some(t) if t <= chunk.len() => t,
-                        _ => break,
-                    };
+                    let Some(total) = (soh9 + 1).checked_add(body_len) else { incomplete!(); };
+                    if total > chunk.len() {
+                        incomplete!();
+                    }
                     messages.push(chunk[..total].to_vec());
                     pos += o + total;
                 } else {
@@ -180,26 +216,22 @@ fn split_messages(buf: &[u8]) -> Vec<Vec<u8>> {
                                     .map(|p| rt + 4 + p)
                                 {
                                     Some(p) => p,
-                                    None => break,
+                                    None => incomplete!(),
                                 };
                                 let rdl: usize =
                                     match std::str::from_utf8(&chunk[rt + 4..after95]) {
                                         Ok(s) => match s.parse() {
                                             Ok(n) => n,
-                                            Err(_) => break,
+                                            Err(_) => incomplete!(),
                                         },
-                                        Err(_) => break,
+                                        Err(_) => incomplete!(),
                                     };
                                 let tag96 = match find_tag(&chunk[after95..], b"96=") {
                                     Some(p) => after95 + p,
-                                    None => break,
+                                    None => incomplete!(),
                                 };
-                                // A block past the end leaves no
-                                // message (ibx#488: the scan went past it).
-                                scan = match (tag96 + 3).checked_add(rdl) {
-                                    Some(s) if s <= chunk.len() => s,
-                                    _ => break,
-                                };
+                                let Some(next) = (tag96 + 3).checked_add(rdl).filter(|n| *n <= chunk.len()) else { incomplete!(); };
+                                scan = next;
                                 continue;
                             }
                         }
@@ -209,11 +241,11 @@ fn split_messages(buf: &[u8]) -> Vec<Vec<u8>> {
 
                     let ck = match cksum {
                         Some(c) => c,
-                        None => break,
+                        None => incomplete!(),
                     };
                     let end = match chunk[ck + 4..].iter().position(|&b| b == SOH) {
                         Some(p) => ck + 4 + p,
-                        None => break,
+                        None => incomplete!(),
                     };
                     messages.push(chunk[..end + 1].to_vec());
                     pos += f + end + 1;
@@ -222,13 +254,53 @@ fn split_messages(buf: &[u8]) -> Vec<Vec<u8>> {
         }
     }
 
-    messages
+    Ok(messages)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::fix::{fix_build, fix_parse};
+
+    #[test]
+    fn bounded_inflate_accepts_exact_limit_and_rejects_bomb() {
+        let text = "x".repeat(100_000);
+        let inner = fix_build(&[(35, "U"), (58, &text)], 1);
+        let compressed = fixcomp_build(&inner);
+        assert_eq!(fixcomp_decompress_limited(&compressed, inner.len()).unwrap(), fixcomp_decompress(&compressed).unwrap());
+        assert!(fixcomp_decompress_limited(&compressed, inner.len() - 1).is_err());
+        let error = fixcomp_decompress_limited(&compressed, 128).unwrap_err();
+        assert!(error.to_string().contains("limit"));
+    }
+
+    #[test]
+    fn bounded_inflate_errors_do_not_echo_peer_content() {
+        let frame = b"8=FIXCOMP\x019=99\x0195=24\x0196=private-auth-frame-value\x01";
+        let error = fixcomp_decompress_limited(frame, 128).unwrap_err();
+        assert!(!error.to_string().contains("private-auth"));
+    }
+
+    #[test]
+    fn bounded_split_rejects_overflowing_raw_length() {
+        let inner = format!("8=FIX.4.1\x019=20\x0135=U\x0195={}\x0196=x\x0110=000\x01", usize::MAX);
+        assert!(fixcomp_decompress_limited(&fixcomp_build(inner.as_bytes()), 1024).is_err());
+    }
+
+    #[test]
+    fn bounded_length_rejects_overflowing_announced_body() {
+        let frame = format!("8=FIXCOMP\x019={}\x01", usize::MAX);
+        assert_eq!(fixcomp_length(frame.as_bytes()), None);
+    }
+
+    #[test]
+    fn bounded_split_rejects_lost_prefix_and_tail() {
+        let message = fix_build(&[(35, "0")], 1);
+        let mut prefixed = b"private-lost-input".to_vec();
+        prefixed.extend_from_slice(&message);
+        assert!(fixcomp_decompress_limited(&fixcomp_build(&prefixed), 1024).is_err());
+        let mut tailed = message; tailed.extend_from_slice(b"private-lost-input");
+        assert!(fixcomp_decompress_limited(&fixcomp_build(&tailed), 1024).is_err());
+    }
 
     #[test]
     fn build_structure() {

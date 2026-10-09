@@ -86,12 +86,22 @@ const NS_READ_CHUNK: usize = 64 * 1024;
 
 /// Receive one `#%#%` framed message. Returns (payload_bytes, total_len).
 pub fn ns_recv<R: Read>(reader: &mut R) -> io::Result<(Vec<u8>, usize)> {
+    ns_recv_impl(reader, i32::MAX as usize, true)
+}
+
+/// Receive one NS frame, refusing its announced payload size before allocation.
+/// The caller separately owns socket cancellation/deadline enforcement.
+pub fn ns_recv_limited<R: Read>(reader: &mut R, max_payload_bytes: usize) -> io::Result<(Vec<u8>, usize)> {
+    ns_recv_impl(reader, max_payload_bytes, false)
+}
+
+fn ns_recv_impl<R: Read>(reader: &mut R, max_payload_bytes: usize, peer_diagnostics: bool) -> io::Result<(Vec<u8>, usize)> {
     let mut header = [0u8; 8];
     reader.read_exact(&mut header)?;
     if &header[..4] != NS_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Expected #%#% magic, got {:?}", &header[..4]),
+            if peer_diagnostics { format!("Expected #%#% magic, got {:?}", &header[..4]) } else { "invalid bounded NS frame magic".to_string() },
         ));
     }
     let raw_len = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
@@ -101,13 +111,16 @@ pub fn ns_recv<R: Read>(reader: &mut R) -> io::Result<(Vec<u8>, usize)> {
     if raw_len & 0x8000_0000 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("NS frame length {:#010x} is negative", raw_len),
+            if peer_diagnostics { format!("NS frame length {:#010x} is negative", raw_len) } else { "invalid bounded NS frame length".to_string() },
         ));
     }
     // The payload grows as its bytes come: a length the peer does not send
     // costs nothing. A buffer of the stated length was allocated at once,
     // up to 2 GB from one 8-byte header (ibx#488).
     let payload_len = raw_len as usize;
+    if payload_len > max_payload_bytes {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "NS frame exceeds payload byte limit"));
+    }
     let mut payload = Vec::with_capacity(payload_len.min(NS_READ_CHUNK));
     reader.by_ref().take(raw_len as u64).read_to_end(&mut payload)?;
     if payload.len() < payload_len {
@@ -132,6 +145,35 @@ pub fn is_ns_text(payload: &[u8]) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn bounded_receive_rejects_header_before_body_read() {
+        let mut header = NS_MAGIC.to_vec();
+        header.extend_from_slice(&0x7fff_ffff_u32.to_be_bytes());
+        let mut input = std::io::Cursor::new(header);
+        let error = ns_recv_limited(&mut input, 1024).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(input.position(), 8);
+    }
+
+    #[test]
+    fn bounded_receive_diagnostics_do_not_echo_header_bytes() {
+        let frame = b"pass\x00\x00\x00\x00";
+        let error = ns_recv_limited(&mut std::io::Cursor::new(frame), 1024).unwrap_err();
+        assert_eq!(error.to_string(), "invalid bounded NS frame magic");
+        assert!(ns_recv(&mut std::io::Cursor::new(frame)).unwrap_err().to_string().contains("[112, 97, 115, 115]"));
+    }
+
+    #[test]
+    fn bounded_receive_accepts_exact_limit_and_empty_payload() {
+        let frame = ns_build(50, 520, &["x"], "");
+        let limit = frame.len() - 8;
+        assert_eq!(ns_recv_limited(&mut std::io::Cursor::new(&frame), limit).unwrap(), ns_recv(&mut std::io::Cursor::new(&frame)).unwrap());
+        assert!(ns_recv_limited(&mut std::io::Cursor::new(&frame), limit - 1).is_err());
+        let mut empty = NS_MAGIC.to_vec();
+        empty.extend_from_slice(&0u32.to_be_bytes());
+        assert!(ns_recv_limited(&mut std::io::Cursor::new(empty), 0).unwrap().0.is_empty());
+    }
 
     // ── Existing tests ──────────────────────────────────────────────
 

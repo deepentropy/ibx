@@ -44,6 +44,9 @@ mod tests;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::io;
+use std::time::{Duration, Instant};
+use crate::lifecycle::ConnectionControl;
 
 use crate::engine::park::ControlSender;
 use crossbeam_channel::{Receiver, Sender};
@@ -121,8 +124,13 @@ fn cache_reconnect_credentials(hot_loop: &mut crate::engine::hot_loop::HotLoop, 
 /// # Thread lifecycle
 ///
 /// `connect()` spawns a single `ib-engine-hotloop` background thread.
-/// The thread is **joined** on [`disconnect()`] and on [`Drop`].
-/// Dropping an `EClient` without calling `disconnect()` first is safe:
+/// The thread is **joined** on [`disconnect()`](EClient::disconnect) and on [`Drop`].
+/// The additive `connect_once()` path instead uses caller-owned out-of-band stop.
+/// Call `disconnect_checked()` on an owned worker for confirmation. Its Drop signals stop and
+/// transfers any unfinished engine handle to the supplied ConnectionControl;
+/// it never blocks on command admission or join and is not cleanup confirmation.
+///
+/// Dropping a legacy `EClient` without calling `disconnect()` first is safe:
 /// the `Drop` impl sends `Shutdown` and joins the thread.
 ///
 /// # Losing the connection
@@ -146,6 +154,8 @@ pub struct EClient {
     pub(crate) shared: Arc<SharedState>,
     pub(crate) control_tx: ControlSender,
     pub(crate) thread: Mutex<Option<thread::JoinHandle<()>>>,
+    connection_control: Option<ConnectionControl>,
+    shutdown_failure: Mutex<Option<String>>,
     pub account_id: String,
     pub(crate) connected: AtomicBool,
     /// True once `connection_closed` has been delivered, so it fires at most
@@ -160,7 +170,16 @@ pub struct EClient {
 
 impl Drop for EClient {
     fn drop(&mut self) {
-        // Ensure the hot-loop thread is stopped and joined.
+        if let Some(control) = &self.connection_control {
+            control.cancel();
+            if let Some(handle) = self.thread.get_mut().unwrap().take() {
+                // Ownership moves to the cancellation scope, never a detached task.
+                // Drop is best effort; explicit checked shutdown is the proof.
+                control.retain_worker(handle);
+            }
+            return;
+        }
+        // Ensure the legacy hot-loop thread is stopped and joined.
         let _ = self.control_tx.send(ControlCommand::Shutdown);
         if let Some(h) = self.thread.lock().unwrap().take() {
             let _ = h.join();
@@ -171,7 +190,7 @@ impl Drop for EClient {
 impl EClient {
     /// Connect to IB and start the engine.
     pub fn connect(config: &EClientConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::connect_inner(config, None)
+        Self::connect_inner(config, None, None)
     }
 
     /// Connect to IB and start the engine with an [`Event`] channel attached.
@@ -195,14 +214,42 @@ impl EClient {
         capacity: usize,
     ) -> Result<(Self, Receiver<Event>), Box<dyn std::error::Error>> {
         let (event_tx, event_rx) = crossbeam_channel::bounded(capacity.max(1));
-        let client = Self::connect_inner(config, Some(event_tx))?;
+        let client = Self::connect_inner(config, Some(event_tx), None)?;
         Ok((client, event_rx))
+    }
+
+    /// Perform one caller-controlled login attempt without autonomous recovery.
+    /// Live accounts use broker-selected mobile push approval; no code callback worker is spawned.
+    /// `control` must include all allowed pre-resolved login/farm hosts. This
+    /// blocking method belongs on an owned worker, not a Tokio executor thread.
+    /// On error, cancel and join the scope before starting any replacement.
+    pub fn connect_once(
+        config: &EClientConfig,
+        control: &ConnectionControl,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::connect_inner(config, None, Some(control))
     }
 
     fn connect_inner(
         config: &EClientConfig,
         event_tx: Option<Sender<Event>>,
+        connection_control: Option<&ConnectionControl>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Validate before duplicating controlled plaintext/configuration storage.
+        if let Some(control) = connection_control {
+            control.check()?;
+            if config.username.trim().is_empty() || config.username.len() > 256 || config.password.is_empty() || config.password.len() > 4096 || config.host.trim().is_empty() || config.host.len() > 253 {
+                control.cancel();
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "controlled login configuration exceeds supported bounds").into());
+            }
+        }
+        // Covers post-Gateway initialization, control installation and spawning,
+        // including unwinding before a client can own the engine handle.
+        struct Setup<'a> { control: Option<&'a ConnectionControl>, succeeded: bool }
+        impl Drop for Setup<'_> {
+            fn drop(&mut self) { if !self.succeeded { if let Some(control) = self.control { control.cancel(); } } }
+        }
+        let mut setup = Setup { control: connection_control, succeeded: false };
         let gw_config = GatewayConfig {
             username: config.username.clone(),
             password: zeroize::Zeroizing::new(config.password.clone()),
@@ -214,7 +261,11 @@ impl EClient {
             code_provider: None,
         };
 
-        let (gw, farm_conn, ccp_conn, hmds_conn) = Gateway::connect(&gw_config)?;
+        let (gw, farm_conn, ccp_conn, hmds_conn) = if let Some(control) = connection_control {
+            Gateway::connect_once(&gw_config, control)?
+        } else {
+            Gateway::connect(&gw_config)?
+        };
         let account_id = gw.account_id.clone();
         let session_token_bytes = crate::auth::crypto::strip_leading_zeros(
             &gw.session_token.to_bytes_be(),
@@ -226,7 +277,12 @@ impl EClient {
         let (mut hot_loop, control_tx) = gw.into_hot_loop_with_farms(
             shared.clone(), event_tx, farm_conn, ccp_conn, hmds_conn, config.core_id,
         );
-        cache_reconnect_credentials(&mut hot_loop, config);
+        if let Some(control) = connection_control {
+            // Install before run: no native reconnect worker can start.
+            hot_loop.set_connection_control(control.clone())?;
+        } else {
+            cache_reconnect_credentials(&mut hot_loop, config);
+        }
 
         let handle = thread::Builder::new()
             .name("ib-engine-hotloop".into())
@@ -236,10 +292,12 @@ impl EClient {
         let core = ClientCore::new();
         core.keep_order_ids(&account_id);
 
-        Ok(Self {
+        let client = Self {
             shared,
             control_tx,
             thread: Mutex::new(Some(handle)),
+            connection_control: connection_control.cloned(),
+            shutdown_failure: Mutex::new(None),
             account_id,
             connected: AtomicBool::new(true),
             close_notified: AtomicBool::new(false),
@@ -247,7 +305,12 @@ impl EClient {
             session_token_bytes,
             token_type,
             connection_time: crate::client_core::connection_time_now(),
-        })
+        };
+        if let Some(control) = connection_control {
+            control.finish_login()?;
+        }
+        setup.succeeded = true;
+        Ok(client)
     }
 
     /// Construct from pre-built components (for testing or custom setups).
@@ -262,6 +325,8 @@ impl EClient {
             shared,
             control_tx: control_tx.into(),
             thread: Mutex::new(Some(handle)),
+            connection_control: None,
+            shutdown_failure: Mutex::new(None),
             account_id,
             connected: AtomicBool::new(true),
             close_notified: AtomicBool::new(false),
@@ -270,6 +335,22 @@ impl EClient {
             token_type: String::new(),
             connection_time: crate::client_core::connection_time_now(),
         }
+    }
+
+    /// Construct an externally controlled engine for offline fixtures/custom setups.
+    /// The supplied worker must already use this same control; this constructor
+    /// cannot make an unrelated blocking worker interruptible.
+    #[doc(hidden)]
+    pub fn from_parts_controlled(
+        shared: Arc<SharedState>,
+        control_tx: Sender<ControlCommand>,
+        handle: thread::JoinHandle<()>,
+        account_id: String,
+        control: ConnectionControl,
+    ) -> Self {
+        let mut client = Self::from_parts(shared, control_tx, handle, account_id);
+        client.connection_control = Some(control);
+        client
     }
 
     /// Map a reqId to an InstrumentId (for testing without a live engine).
@@ -303,7 +384,58 @@ impl EClient {
 
     /// Send a control command to the engine. Returns `Err` if the engine has shut down.
     pub(crate) fn send(&self, cmd: ControlCommand) -> Result<(), String> {
-        self.control_tx.send(cmd).map_err(|e| format!("Engine stopped: {e}"))
+        if self.connection_control.is_some() {
+            self.try_send_control(cmd).map_err(|error| format!("Engine admission: {error}"))
+        } else {
+            self.control_tx.send(cmd).map_err(|e| format!("Engine stopped: {e}"))
+        }
+    }
+
+    /// Nonblocking control admission. Queue acceptance is not wire transmission.
+    /// Controlled cancellation rejects new commands; the engine also checks the
+    /// out-of-band stop before dispatching queued work.
+    pub fn try_send_control(
+        &self,
+        cmd: ControlCommand,
+    ) -> Result<(), crossbeam_channel::TrySendError<ControlCommand>> {
+        if self.connection_control.as_ref().is_some_and(ConnectionControl::is_cancelled) {
+            return Err(crossbeam_channel::TrySendError::Disconnected(cmd));
+        }
+        self.control_tx.try_send(cmd)
+    }
+
+    /// Cancel a controlled session and confirm its engine and retained workers
+    /// finished within `timeout`. Timeout retains the unfinished engine handle
+    /// for a later join; panic remains a reported cleanup failure on later calls.
+    /// Legacy sessions are rejected because they have no out-of-band stop.
+    pub fn disconnect_checked(&self, timeout: Duration) -> io::Result<()> {
+        let control = self.connection_control.as_ref().ok_or_else(||
+            io::Error::new(io::ErrorKind::Unsupported, "legacy session has no checked stop"))?;
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(||
+            io::Error::new(io::ErrorKind::InvalidInput, "shutdown deadline overflow"))?;
+        control.cancel();
+        self.connected.store(false, Ordering::Release);
+        let mut handle = self.thread.try_lock().map_err(|_|
+            io::Error::new(io::ErrorKind::WouldBlock, "another shutdown owns the engine handle"))?;
+        while handle.as_ref().is_some_and(|worker| !worker.is_finished()) {
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "engine join unconfirmed"));
+            }
+            thread::sleep(Duration::from_millis(1).min(deadline.saturating_duration_since(Instant::now())));
+        }
+        if let Some(worker) = handle.take() {
+            if worker.join().is_err() {
+                control.record_cleanup_failure(io::ErrorKind::Other);
+                *self.shutdown_failure.lock().unwrap() = Some("controlled engine panicked".into());
+            }
+        }
+        drop(handle);
+        control.join_workers(deadline.saturating_duration_since(Instant::now()))?;
+        if let Some(failure) = self.shutdown_failure.lock().unwrap().as_ref() {
+            return Err(io::Error::other(failure.clone()));
+        }
+        self.core.reset();
+        Ok(())
     }
 
     // ── Connection ──
@@ -328,9 +460,16 @@ impl EClient {
         self.connected.load(Ordering::Relaxed)
     }
 
-    /// Disconnect from IB.  Sends `Shutdown` to the hot loop, waits for the
-    /// background thread to exit, and marks the client as disconnected.
+    /// Disconnect a legacy session by sending `Shutdown` and joining its engine.
+    /// Controlled sessions signal stop promptly and retain unfinished handles;
+    /// use `disconnect_checked` to confirm their actual engine/worker disposal.
     pub fn disconnect(&self) {
+        if self.connection_control.is_some() {
+            // Signal promptly, retaining unfinished handles. Controlled callers
+            // must use disconnect_checked to establish physical-close proof.
+            let _ = self.disconnect_checked(Duration::ZERO);
+            return;
+        }
         let _ = self.control_tx.send(ControlCommand::Shutdown);
         if let Some(h) = self.thread.lock().unwrap().take() {
             let _ = h.join();
@@ -364,5 +503,110 @@ impl EClient {
     /// or empty for the SRP-only path). Sent verbatim in SSO authenticator bodies.
     pub fn token_type(&self) -> &str {
         &self.token_type
+    }
+}
+
+#[cfg(test)]
+mod controlled_lifecycle_tests {
+    use super::*;
+    use crate::engine::hot_loop::HotLoop;
+    use std::collections::BTreeMap;
+
+    fn control() -> ConnectionControl {
+        ConnectionControl::new(Duration::from_secs(5), BTreeMap::from([("localhost".into(), vec![std::net::IpAddr::from([127, 0, 0, 1])])]), "offline-hardware".into()).unwrap()
+    }
+
+    #[test]
+    fn controlled_checked_close_bypasses_full_queue_and_joins_actual_hotloop() {
+        let shared = Arc::new(SharedState::new());
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        for _ in 0..64 { tx.try_send(ControlCommand::Ping).unwrap(); }
+        let control = control();
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.set_control_rx(rx);
+        engine.set_connection_control(control.clone()).unwrap();
+        let (start_tx, start_rx) = crossbeam_channel::bounded(1);
+        let handle = thread::spawn(move || {
+            start_rx.recv().unwrap();
+            engine.run_with_panic_recovery();
+        });
+        let client = EClient::from_parts_controlled(shared.clone(), tx, handle, "DU-fixture".into(), control.clone());
+        assert!(matches!(client.try_send_control(ControlCommand::Ping), Err(crossbeam_channel::TrySendError::Full(_))));
+        control.cancel();
+        assert!(matches!(client.try_send_control(ControlCommand::Ping), Err(crossbeam_channel::TrySendError::Disconnected(_))));
+        start_tx.send(()).unwrap();
+        client.disconnect_checked(Duration::from_secs(1)).unwrap();
+        assert!(client.thread.lock().unwrap().is_none());
+        assert!(!client.is_connected());
+        assert!(shared.take_connection_lost());
+        client.disconnect_checked(Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn controlled_timeout_retains_handle_and_panic_stays_visible() {
+        let control = control();
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let handle = thread::spawn(move || { release_rx.recv_timeout(Duration::from_secs(2)).unwrap(); });
+        let (tx, _rx) = crossbeam_channel::bounded(1);
+        let client = EClient::from_parts_controlled(Arc::new(SharedState::new()), tx, handle, "DU-fixture".into(), control);
+        assert_eq!(client.disconnect_checked(Duration::ZERO).unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(client.thread.lock().unwrap().is_some());
+        release_tx.send(()).unwrap();
+        client.disconnect_checked(Duration::from_secs(1)).unwrap();
+
+        let (tx, _rx) = crossbeam_channel::bounded(1);
+        let handle = thread::spawn(|| { panic!("offline engine panic"); });
+        let panicked_control = self::control();
+        let client = EClient::from_parts_controlled(Arc::new(SharedState::new()), tx, handle, "DU-fixture".into(), panicked_control.clone());
+        for _ in 0..2 {
+            assert!(client.disconnect_checked(Duration::from_secs(1)).unwrap_err().to_string().contains("panicked"));
+        }
+        drop(client);
+        assert!(panicked_control.join_workers(Duration::from_secs(1)).unwrap_err().to_string().contains("panicked"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn controlled_drop_does_not_join_stalled_worker_on_executor() {
+        let control = control();
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let handle = thread::spawn(move || { release_rx.recv_timeout(Duration::from_secs(2)).unwrap(); });
+        let (tx, _rx) = crossbeam_channel::bounded(1);
+        tx.try_send(ControlCommand::Ping).unwrap();
+        let client = EClient::from_parts_controlled(Arc::new(SharedState::new()), tx, handle, "DU-fixture".into(), control.clone());
+        drop(client);
+        // If Drop blocked on full Shutdown admission or the worker join, this
+        // task could never execute the release; Tokio runs on this same thread.
+        tokio::task::yield_now().await;
+        assert!(control.is_cancelled());
+        assert_eq!(control.join_workers(Duration::ZERO).unwrap_err().kind(), io::ErrorKind::TimedOut);
+        release_tx.send(()).unwrap();
+        control.join_workers(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn actual_controlled_hotloop_panic_is_not_swallowed_by_legacy_recovery() {
+        let shared = Arc::new(SharedState::new());
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let control = control();
+        let mut engine = HotLoop::new(shared.clone(), None, None);
+        engine.set_control_rx(rx);
+        engine.set_connection_control(control.clone()).unwrap();
+        // Exhaust the real debug counter so the panic occurs inside run(), then
+        // crosses run_with_panic_recovery and the checked worker-join boundary.
+        engine.context_mut().loop_iterations = u64::MAX;
+        let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+        let handle = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            engine.run_with_panic_recovery();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !handle.is_finished() && Instant::now() < deadline { thread::yield_now(); }
+        if !handle.is_finished() { control.cancel(); }
+        assert!(handle.is_finished(), "actual engine panic must terminate its worker");
+        let client = EClient::from_parts_controlled(shared.clone(), tx, handle, "DU-fixture".into(), control);
+        assert!(client.disconnect_checked(Duration::from_secs(1)).unwrap_err().to_string().contains("panicked"));
+        assert!(shared.take_connection_lost());
     }
 }

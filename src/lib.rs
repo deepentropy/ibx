@@ -33,3 +33,6 @@ mod robustness;
 
 // Re-exports for convenience.
 pub use api::{EClient, EClientConfig, Wrapper};
+
+/// Controlled paper-login and explicit physical cleanup.
+pub mod lifecycle;

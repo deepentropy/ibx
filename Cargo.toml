@@ -55,6 +55,9 @@ rand = "0.9"
 
 # TLS
 native-tls = "0.2"
+# Controlled login avoids platform certificate-chain URL retrieval.
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "=1.0.9"
 
 # Secure-memory wrappers (zeroize plaintext credentials on drop)
 zeroize = "1"

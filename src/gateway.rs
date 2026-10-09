@@ -1,5 +1,8 @@
 //! Gateway: orchestrates auth + data connections into a running HotLoop.
 
+#[path = "protocol/login_frames.rs"]
+mod login_frames;
+
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -24,6 +27,7 @@ use crate::engine::hot_loop::HotLoop;
 use crate::protocol::connection::Connection;
 use crate::protocol::fix::{self, fix_build, fix_parse, fix_read_deadline, SOH};
 use crate::protocol::fixcomp;
+use crate::lifecycle::{ConnectionControl, ControlledIo, LOGIN_BYTES, LOGIN_FRAME_BYTES};
 use crate::protocol::ns;
 
 /// Parse the `PRIV_LAB_MISC_URLS` blob (FIX tag 6321) into a `{key: value}` map.
@@ -85,7 +89,7 @@ fn has_complete_response_frame(buf: &[u8]) -> bool {
                 let soh_pos = tag9_pos + soh_off;
                 if let Ok(s) = std::str::from_utf8(&buf[tag9_pos + 2..soh_pos]) {
                     if let Ok(body_len) = s.parse::<usize>() {
-                        return soh_pos + 1 + body_len <= buf.len();
+                        return soh_pos.checked_add(1).and_then(|n| n.checked_add(body_len)).is_some_and(|n| n <= buf.len());
                     }
                 }
             }
@@ -96,7 +100,7 @@ fn has_complete_response_frame(buf: &[u8]) -> bool {
     while cursor + 12 <= buf.len() {
         if buf[cursor..].starts_with(b"8=FIXCOMP\x01") {
             if let Some(total_len) = fixcomp::fixcomp_length(&buf[cursor..]) {
-                return cursor + total_len <= buf.len();
+                return cursor.checked_add(total_len).is_some_and(|n| n <= buf.len());
             }
             return false;
         }
@@ -469,7 +473,11 @@ pub fn build_farm_encrypted_logon(
     slot: u32,
 ) -> Vec<u8> {
     let inner = build_farm_logon(username, paper, farm_name, session_id, session_token, hw_info, encoded, slot);
-    let encrypted_raw = channel.encrypt(&inner);
+    encrypt_farm_logon(channel, &inner)
+}
+
+fn encrypt_farm_logon(channel: &mut SecureChannel, inner: &[u8]) -> Vec<u8> {
+    let encrypted_raw = channel.encrypt(inner);
     let b64_str = B64.encode(&encrypted_raw);
 
     // Outer wrapper: 8=FIX.4.1|9=<bodylen>|90=<b64_len>|91=<b64>|10=<cksum>
@@ -487,6 +495,14 @@ pub fn build_farm_encrypted_logon(
 /// logon, and what is sent as it is when the farm session runs in clear
 /// (ibx#423).
 pub fn build_farm_logon(
+    username: &str, paper: bool, farm_name: &str, session_id: &str,
+    session_token: &BigUint, hw_info: &str, encoded: &str, slot: u32,
+) -> Vec<u8> {
+    build_farm_logon_with_lan(username, paper, farm_name, session_id, session_token,
+        hw_info, encoded, slot, &session::get_lan_ip())
+}
+
+fn build_farm_logon_with_lan(
     username: &str,
     _paper: bool,
     farm_name: &str,
@@ -495,6 +511,7 @@ pub fn build_farm_logon(
     hw_info: &str,
     encoded: &str,
     slot: u32,
+    lan_ip: &str,
 ) -> Vec<u8> {
     let display_name = format!("S{}", username);
     let farm_id = format!("{}/{}/{}", display_name, slot, farm_name);
@@ -503,7 +520,7 @@ pub fn build_farm_logon(
     let ns_range = format!("{}..{}", NS_VERSION_MIN, NS_VERSION);
     let now = chrono_free_timestamp();
     let hb_str = FARM_HEARTBEAT.to_string();
-    let hw_field = format!("<{}|{}>", hw_info, session::get_lan_ip());
+    let hw_field = format!("<{}|{}>", hw_info, lan_ip);
 
     let inner = fix_build(
         &[
@@ -525,12 +542,7 @@ pub fn build_farm_logon(
         0,
     );
 
-    log::info!(
-        "{} FIX 35=A pre-encrypt ({} bytes): {}",
-        farm_name,
-        inner.len(),
-        String::from_utf8_lossy(&inner).replace('\x01', "|"),
-    );
+    log::info!("{} FIX 35=A prepared ({} bytes)", farm_name, inner.len());
     inner
 }
 
@@ -540,6 +552,8 @@ pub fn build_farm_logon(
 pub enum LinkStream {
     Tls(Box<native_tls::TlsStream<TcpStream>>),
     Plain(TcpStream),
+    /// Locally verified TLS owned by a caller-controlled login scope.
+    ControlledTls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
 
 impl LinkStream {
@@ -568,11 +582,12 @@ impl LinkStream {
         match self {
             Self::Tls(s) => s.get_ref(),
             Self::Plain(s) => s,
+            Self::ControlledTls(s) => &s.sock,
         }
     }
 
     pub fn is_tls(&self) -> bool {
-        matches!(self, Self::Tls(_))
+        matches!(self, Self::Tls(_) | Self::ControlledTls(_))
     }
 
     /// The connection of the engine on this socket.
@@ -580,6 +595,7 @@ impl LinkStream {
         match self {
             Self::Tls(s) => Connection::new(*s),
             Self::Plain(s) => Connection::new_raw(s),
+            Self::ControlledTls(s) => Connection::new_controlled_tls(s),
         }
     }
 }
@@ -589,6 +605,7 @@ impl Read for LinkStream {
         match self {
             Self::Tls(s) => s.read(buf),
             Self::Plain(s) => s.read(buf),
+            Self::ControlledTls(s) => s.read(buf),
         }
     }
 }
@@ -598,6 +615,7 @@ impl Write for LinkStream {
         match self {
             Self::Tls(s) => s.write(buf),
             Self::Plain(s) => s.write(buf),
+            Self::ControlledTls(s) => crate::protocol::connection::write_controlled_tls(s, buf),
         }
     }
 
@@ -605,6 +623,7 @@ impl Write for LinkStream {
         match self {
             Self::Tls(s) => s.flush(),
             Self::Plain(s) => s.flush(),
+            Self::ControlledTls(s) => s.flush(),
         }
     }
 }
@@ -702,17 +721,24 @@ pub fn farm_logon_exchange(
     read_mac_key: &[u8],
     initial_read_iv: &[u8],
 ) -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    farm_logon_exchange_inner(stream, channel, session_token, username, password, read_mac_key, initial_read_iv, None)
+}
+fn farm_logon_exchange_inner(
+    stream: &mut LinkStream, channel: &mut SecureChannel, session_token: &BigUint,
+    username: &str, password: &str, read_mac_key: &[u8], initial_read_iv: &[u8],
+    control: Option<&ConnectionControl>,
+) -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     // Poll on a short read timeout and tolerate transient WouldBlock/TimedOut
     // returns until an overall deadline. A single slow response segment from a
     // high-latency regional gateway must not tear down the connection (ibx#237).
-    stream.tcp().set_read_timeout(Some(Duration::from_millis(FARM_LOGON_POLL_MS)))?;
+    set_login_read_timeout(stream.tcp(), Some(Duration::from_millis(FARM_LOGON_POLL_MS)), control)?;
     let deadline = std::time::Instant::now() + Duration::from_secs_f64(TIMEOUT_FARM_LOGON);
     let mut buf = Vec::new();
     let mut read_iv = initial_read_iv.to_vec();
 
     for _msg_num in 0..20 {
         // Read until we have a complete frame
-        let msg = loop {
+        let msg = loop { check_control(control)?;
             if let Some((msg, consumed)) = try_frame_farm_msg(&buf) {
                 buf.drain(..consumed);
                 break msg;
@@ -739,7 +765,7 @@ pub fn farm_logon_exchange(
                     "farm connection closed during logon",
                 ));
             }
-            buf.extend_from_slice(&tmp[..n]);
+            if control.is_some() && buf.len().saturating_add(n) > LOGIN_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidData, "farm login byte bound exceeded")); } buf.extend_from_slice(&tmp[..n]);
         };
 
         // FIX.4.1 message
@@ -799,12 +825,13 @@ pub fn farm_logon_exchange(
                     // ACK. Threading `buf` through keeps those trailing ACK bytes
                     // so the loop below re-frames them instead of stalling on a
                     // read for bytes already consumed (ibx#237).
-                    match do_soft_token(stream, session_token, &mut buf)? {
+                    let token_result = if control.is_some() { session::do_soft_token_bounded(&mut ControlledIo::new(&mut *stream, control), session_token, &mut buf, LOGIN_FRAME_BYTES, 8192) } else { do_soft_token(stream, session_token, &mut buf) };
+                    match token_result? {
                         session::SoftTokenOutcome::Passed => {}
                         session::SoftTokenOutcome::Unknown => {
                             log::warn!("Soft token rejected — falling back to SRP farm auth");
-                            stream.tcp().set_read_timeout(Some(Duration::from_millis(FARM_LOGON_POLL_MS)))?;
-                            session::do_srp_farm(stream, username, password, &mut buf)?;
+                            set_login_read_timeout(stream.tcp(), Some(Duration::from_millis(FARM_LOGON_POLL_MS)), control)?;
+                            if control.is_some() { session::do_srp_farm_bounded(&mut ControlledIo::new(&mut *stream, control), username, password, &mut buf, LOGIN_FRAME_BYTES, 8192)?; } else { session::do_srp_farm(stream, username, password, &mut buf)?; }
                         }
                     }
                 }
@@ -823,7 +850,7 @@ pub fn farm_logon_exchange(
                 let text = fields.get(&58).map(|s| s.as_str()).unwrap_or("unknown");
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    format!("Farm logon rejected: {}", text),
+                    if control.is_some() { "controlled farm logon rejected".into() } else { format!("Farm logon rejected: {}", text) },
                 ));
             }
         } else if msg.starts_with(b"8=1\x01") {
@@ -857,7 +884,7 @@ fn try_frame_farm_msg(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
     let val_start = tag9_pos + 3;
     let soh_pos = buf[val_start..].iter().position(|&b| b == SOH)? + val_start;
     let body_len: usize = std::str::from_utf8(&buf[val_start..soh_pos]).ok()?.parse().ok()?;
-    let total = soh_pos + 1 + body_len + 7; // +7 for "10=XXX\x01"
+    let total = soh_pos.checked_add(1)?.checked_add(body_len)?.checked_add(7)?; // +7 for "10=XXX\x01"
     if buf.len() < total {
         return None;
     }
@@ -1090,6 +1117,15 @@ pub fn connect_farm_ex(
 /// inside TLS, as the reference's farm on an SSL socket
 /// (`jmdclient.bo.a(int, Object)@458-472`).
 pub fn connect_farm_opts(
+    host: &str, farm_id: &str, username: &str, password: &str, paper: bool,
+    server_session_id: &str, session_key: &BigUint, hw_info: &str, encoded: &str,
+    slot: u32, routing: bool, link: FarmLink,
+) -> io::Result<(Connection, Option<String>)> {
+    connect_farm_opts_inner(host, farm_id, username, password, paper, server_session_id,
+        session_key, hw_info, encoded, slot, routing, link, None)
+}
+
+fn connect_farm_opts_inner(
     host: &str,
     farm_id: &str,
     username: &str,
@@ -1102,22 +1138,38 @@ pub fn connect_farm_opts(
     slot: u32,
     routing: bool,
     link: FarmLink,
+    control: Option<&ConnectionControl>,
 ) -> io::Result<(Connection, Option<String>)> {
     let port = if link.ssl { ssl_port(misc_port()) } else { misc_port() };
-    let farm_host = farm_host_override().unwrap_or_else(|| host.to_string());
+    let farm_host = if control.is_some() { host.to_owned() } else { farm_host_override().unwrap_or_else(|| host.to_string()) };
     log::info!("Connecting to {} {}:{} (ssl={})", farm_id, farm_host, port, link.ssl);
-    let stream = LinkStream::connect(&farm_host, port, link.ssl, Duration::from_secs(TIMEOUT_FARM_CONNECT), false)
-        .map_err(|e| io::Error::new(e.kind(), format!("{} connect: {}", farm_id, e)))?;
+    let stream = if let Some(control) = control {
+        let tcp = control.connect_tcp(&farm_host, port)?;
+        if link.ssl { LinkStream::ControlledTls(control.connect_tls(&farm_host, tcp)?) } else { LinkStream::Plain(tcp) }
+    } else {
+        LinkStream::connect(&farm_host, port, link.ssl, Duration::from_secs(TIMEOUT_FARM_CONNECT), false)
+            .map_err(|e| io::Error::new(e.kind(), format!("{} connect: {}", farm_id, e)))?
+    };
     stream.tcp().set_nodelay(true)?;
-    stream.tcp().set_read_timeout(Some(Duration::from_secs(TIMEOUT_FARM_CONNECT)))?;
-    farm_session(stream, farm_id, username, password, paper, server_session_id, session_key,
-        hw_info, encoded, slot, routing, link.ns_secure && !link.ssl)
+    set_login_read_timeout(stream.tcp(), Some(Duration::from_secs(TIMEOUT_FARM_CONNECT)), control)?;
+    farm_session_inner(stream, farm_id, username, password, paper, server_session_id, session_key,
+        hw_info, encoded, slot, routing, link.ns_secure && !link.ssl, control)
 }
 
 /// The farm session on a connected socket: key exchange when `ns_secure`,
 /// logon, token auth, routing table.
+#[cfg(test)]
 fn farm_session(
-    mut stream: LinkStream,
+    stream: LinkStream, farm_id: &str, username: &str, password: &str, paper: bool,
+    server_session_id: &str, session_key: &BigUint, hw_info: &str, encoded: &str,
+    slot: u32, routing: bool, ns_secure: bool,
+) -> io::Result<(Connection, Option<String>)> {
+    farm_session_inner(stream, farm_id, username, password, paper, server_session_id,
+        session_key, hw_info, encoded, slot, routing, ns_secure, None)
+}
+
+fn farm_session_inner(
+    stream: LinkStream,
     farm_id: &str,
     username: &str,
     password: &str,
@@ -1129,20 +1181,22 @@ fn farm_session(
     slot: u32,
     routing: bool,
     ns_secure: bool,
+    control: Option<&ConnectionControl>,
 ) -> io::Result<(Connection, Option<String>)> {
+    let mut stream = ControlledIo::new(stream, control);
     // Key exchange (plain socket). Any failure, an error answer included,
     // drops the socket and the farm is tried again, as in the reference.
     let mut channel = SecureChannel::new();
     let secure = if ns_secure {
         let dh_msg = channel.build_secure_connect(NS_VERSION, NS_VERSION);
         stream.write_all(&dh_msg)?;
-        let secure = session::read_key_exchange_answer(&mut stream, &mut channel)
+        let secure = read_login_key_exchange_answer(&mut stream, &mut channel, control)
             .map_err(|e| io::Error::new(e.kind(), format!("{} key exchange: {}", farm_id, e)))?;
         if secure {
             log::info!("{} key exchange complete", farm_id);
         }
         secure
-    } else if stream.is_tls() {
+    } else if stream.stream.is_tls() {
         log::info!("{}: on TLS, no key exchange", farm_id);
         false
     } else {
@@ -1156,27 +1210,21 @@ fn farm_session(
     } else {
         server_session_id.to_string()
     };
-    if secure {
-        let logon_bytes = build_farm_encrypted_logon(
-            &mut channel, username, paper, farm_id,
-            &farm_session_id, session_key, hw_info, encoded, slot,
-        );
-        stream.write_all(&logon_bytes)?;
-        log::info!("{} encrypted logon sent", farm_id);
-    } else {
-        let logon_bytes = build_farm_logon(
-            username, paper, farm_id, &farm_session_id, session_key, hw_info, encoded, slot,
-        );
-        stream.write_all(&logon_bytes)?;
-        log::info!("{} logon sent in clear", farm_id);
-    }
+    let lan_ip = if control.is_some() {
+        stream.stream.tcp().local_addr()?.ip().to_string()
+    } else { session::get_lan_ip() };
+    let inner = build_farm_logon_with_lan(username, paper, farm_id, &farm_session_id,
+        session_key, hw_info, encoded, slot, &lan_ip);
+    let logon_bytes = if secure { encrypt_farm_logon(&mut channel, &inner) } else { inner };
+    stream.write_all(&logon_bytes)?;
+    log::info!("{} logon sent (secure={})", farm_id, secure);
 
     // Logon exchange: challenge → token auth → logon ACK
     let read_mac_key = channel.key_block().map(|kb| kb[84..104].to_vec()).unwrap_or_default();
     let initial_read_iv = channel.key_block().map(|kb| kb[48..64].to_vec()).unwrap_or_default();
-    let (read_iv, sign_iv, logon_remaining) = farm_logon_exchange(
-        &mut stream, &mut channel, session_key, username, password,
-        &read_mac_key, &initial_read_iv,
+    let (read_iv, sign_iv, logon_remaining) = farm_logon_exchange_inner(
+        &mut stream.stream, &mut channel, session_key, username, password,
+        &read_mac_key, &initial_read_iv, control,
     )?;
     log::info!("{} logon exchange complete, {} bytes remaining", farm_id, logon_remaining.len());
 
@@ -1206,14 +1254,14 @@ fn farm_session(
         // Read routing response. Frame-based termination: poll with a short
         // timeout, break as soon as we have at least one complete FIXCOMP frame
         // buffered. The 5-s read timeout remains as the worst-case fallback.
-        stream.tcp().set_read_timeout(Some(Duration::from_millis(100)))?;
+        set_login_read_timeout(stream.stream.tcp(), Some(Duration::from_millis(100)), control)?;
         let routing_deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let mut tmp = [0u8; 8192];
-            match stream.read(&mut tmp) {
+            match stream.read_poll(&mut tmp) {
                 Ok(0) => break,
                 Ok(n) => {
-                    resp_buf.extend_from_slice(&tmp[..n]);
+                    if control.is_some() && resp_buf.len().saturating_add(n) > LOGIN_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidData, "routing byte bound exceeded")); } resp_buf.extend_from_slice(&tmp[..n]);
                     if has_complete_response_frame(&resp_buf) { break; }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock
@@ -1229,7 +1277,7 @@ fn farm_session(
     }
 
     // Create Connection (switches to non-blocking), inject routing bytes
-    let mut conn = stream.into_connection()?;
+    let mut conn = stream.stream.into_connection()?;
     conn.set_keys(sign_mac_key, final_sign_iv, read_mac_key, read_iv);
     // The routing request was seq=1; the next send_fix is seq=2.
     conn.seq = if routing { 1 } else { 0 };
@@ -1252,10 +1300,10 @@ fn farm_session(
                 if !valid {
                     return Err(signature_mismatch(farm_id));
                 }
-                let inner = fixcomp::fixcomp_decompress(&unsigned).unwrap_or_else(|e| {
+                let inner = if control.is_some() { fixcomp::fixcomp_decompress_limited(&unsigned, LOGIN_BYTES)? } else { fixcomp::fixcomp_decompress(&unsigned).unwrap_or_else(|e| {
                     log::warn!("{}: dropping malformed FIXCOMP frame: {}", farm_id, e);
                     Vec::new()
-                });
+                }) };
                 for m in &inner {
                     let parsed = fix_parse(m);
                     let mt = parsed.get(&35).map(|s| s.as_str()).unwrap_or("");
@@ -1543,6 +1591,24 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
 }
 
 
+/// The push gate owns partial-frame progress and must see each poll timeout.
+struct LoginPollIo<'a, S>(&'a mut ControlledIo<S>);
+impl<S: Read> Read for LoginPollIo<'_, S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { self.0.read_poll(buf) }
+}
+impl<S: Write> Write for LoginPollIo<'_, S> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.0.write(buf) }
+    fn flush(&mut self) -> io::Result<()> { self.0.flush() }
+}
+/// Start the upstream TLS login protocol through the bounded transport. A
+/// refusal is terminal; controlled login never resends or downgrades encryption.
+fn controlled_ccp_login_start<S: Read + Write>(
+    stream: &mut ControlledIo<S>, channel: &mut SecureChannel, request: &[u8],
+) -> io::Result<session::AuthStart> {
+    session::send_plain(stream, request)?;
+    session::recv_auth_start_limited(stream, channel, LOGIN_FRAME_BYTES)
+}
+
 /// Start of a login on the auth connection, then the auth start is read
 /// (ibx#423). In the reference's SSL mode (jts.ini `[Logon] UseSSL=true`,
 /// the setting of the captured gateway, `ssl`) the connect request
@@ -1675,7 +1741,7 @@ impl Gateway {
     /// (ibx#423).
     pub fn connect(config: &GatewayConfig) -> io::Result<(Self, Connection, Connection, Option<Connection>)> {
         loop {
-            match Self::connect_to_host(config, &config.host, 0) {
+            match Self::connect_to_host(config, &config.host, 0, None) {
                 Err(e) if session::login_error(&e).is_some_and(|l| l.kind.is_retryable()) => {
                     let delay = crate::engine::hot_loop::reconnect_backoff();
                     log::warn!("{}; login retried in {:?}", e, delay);
@@ -1686,11 +1752,43 @@ impl Gateway {
         }
     }
 
+    /// One caller-controlled login with no internal retry or DNS/hardware work.
+    /// Returns only after scoped farm workers have completed; failed attempts abort
+    /// every registered socket. Account/route evidence is required, not guessed.
+    pub fn connect_once(config: &GatewayConfig, control: &ConnectionControl) -> io::Result<(Self, Connection, Connection, Option<Connection>)> {
+        // Reject callback workers and certificate bypass before beginning a scope,
+        // registering sockets, or sending credentials. Controlled live login supports
+        // only broker-selected mobile push; it never invokes the detached code worker.
+        if config.accept_invalid_certs || config.code_provider.is_some() {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "controlled login requires verified TLS and mobile push approval"));
+        }
+        if config.ib_key_token_sub_type.len() > 64 || config.ib_key_token_sub_type.chars().any(char::is_control) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid controlled mobile push configuration"));
+        }
+        control.check()?;
+        control.begin_login()?;
+        if config.username.trim().is_empty() || config.username.len() > 256 || config.host.trim().is_empty() || config.host.len() > 253 || config.password.is_empty() || config.password.len() > 4096 {
+            control.cancel();
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "controlled login credentials exceed supported bounds"));
+        }
+        // Abort sockets on error or unwinding, but preserve the original error.
+        struct Attempt<'a> { control: &'a ConnectionControl, succeeded: bool }
+        impl Drop for Attempt<'_> {
+            fn drop(&mut self) { if !self.succeeded { self.control.cancel(); } }
+        }
+        let mut attempt = Attempt { control, succeeded: false };
+        let result = Self::connect_to_host(config, &config.host, 0, Some(control))?;
+        control.check()?;
+        attempt.succeeded = true;
+        Ok(result)
+    }
+
     /// Internal: connect to a specific host, with redirect depth tracking.
     fn connect_to_host(
         config: &GatewayConfig,
         host: &str,
         redirect_depth: u32,
+        control: Option<&ConnectionControl>,
     ) -> io::Result<(Self, Connection, Connection, Option<Connection>)> {
         if redirect_depth > 3 {
             return Err(io::Error::new(
@@ -1699,30 +1797,31 @@ impl Gateway {
             ));
         }
 
-        let hw_info = session::get_hw_info();
+        check_control(control)?; let hw_info = match control { Some(control) => control.hardware_info().to_string(), None => session::get_hw_info() };
         // Tag 6266 carries `{jdkVer}/{platform}/{locale}/{dist}`. The locale
         // segment must be a canonical Java `Locale.toString()` value (e.g.
         // `en_US`, `fr`, `ja_JP`); bare `en` is rejected as `invalid twsInfo`.
         // `IBX_LOCALE` overrides just the locale; `IBX_ENCODED` overrides
         // the whole string for full control.
-        let encoded = std::env::var("IBX_ENCODED").unwrap_or_else(|_| {
+        let encoded = if control.is_some() { IB_ENCODED.to_string() } else { std::env::var("IBX_ENCODED").unwrap_or_else(|_| {
             match std::env::var("IBX_LOCALE") {
                 Ok(loc) if !loc.is_empty() => format!("17.0.10.0.101/W/{}/G", loc),
                 _ => IB_ENCODED.to_string(),
             }
-        });
+        }) };
 
-        // The misc URLs, on their own connection (ibx#423).
-        misc_urls_before_login(host, redirect_depth > 0);
-
-        // --- Phase 1: auth connection + auth ---
-        // TLS on the auth port, or the reference's mode without TLS: a
-        // plain socket on the port before it (ibx#423).
-        let use_ssl = crate::config::use_ssl();
+        // The legacy misc-URL worker is detached; controlled login skips it.
+        if control.is_none() { misc_urls_before_login(host, redirect_depth > 0); }
+        let use_ssl = control.is_some() || crate::config::use_ssl();
         let auth_port = if use_ssl { AUTH_PORT } else { plain_port(AUTH_PORT) };
         log::info!("Connecting to auth server {}:{} (ssl={})", host, auth_port, use_ssl);
-        let mut tls = LinkStream::connect(host, auth_port, use_ssl, Duration::from_secs(TIMEOUT_SSL_AUTH),
-            config.accept_invalid_certs)?;
+        let stream = if let Some(control) = control {
+            let tcp = control.connect_tcp(host, auth_port)?;
+            LinkStream::ControlledTls(control.connect_tls(host, tcp)?)
+        } else {
+            LinkStream::connect(host, auth_port, use_ssl, Duration::from_secs(TIMEOUT_SSL_AUTH), config.accept_invalid_certs)?
+        };
+        let mut tls = ControlledIo::new(stream, control);
         let mut channel = SecureChannel::new();
 
         // CONNECT_REQUEST: in clear inside TLS, or after the key exchange
@@ -1753,19 +1852,22 @@ impl Gateway {
             encoded
         );
 
-        // Receive AUTH_START (may get a redirect instead for paper accounts).
-        // When the server refuses the encryption with the permission to go
-        // on, the farms of the session log on in clear, as the reference
-        // does (ibx#423).
-        let (auth_start, refused) = match ccp_login_start(&mut tls, &mut channel, connect_req.as_bytes(), use_ssl) {
+        // Controlled login uses the upstream TLS protocol without a redundant
+        // DH exchange or plaintext/downgrade retries outside our scope.
+        let start = if control.is_some() {
+            controlled_ccp_login_start(&mut tls, &mut channel, connect_req.as_bytes()).map(|start| (start, false))
+        } else {
+            ccp_login_start(&mut tls, &mut channel, connect_req.as_bytes(), use_ssl)
+        };
+        let (auth_start, refused) = match start {
             Ok(start) => start,
             Err(e) if e.to_string().starts_with("REDIRECT:") => {
                 let target = e.to_string().strip_prefix("REDIRECT:").unwrap().to_string();
                 // Extract host (strip port if present — auth always uses AUTH_PORT)
-                let redirect_host = target.split(':').next().unwrap_or(&target);
+                let redirect_host = if control.is_some() { controlled_redirect_host(&target)? } else { target.split(':').next().unwrap_or(&target) };
                 log::info!("Redirected to {}, reconnecting...", redirect_host);
                 drop(tls);
-                return Self::connect_to_host(config, redirect_host, redirect_depth + 1);
+                return Self::connect_to_host(config, redirect_host, redirect_depth + 1, control);
             }
             Err(e) => return Err(e),
         };
@@ -1775,8 +1877,8 @@ impl Gateway {
         let secure = !use_ssl && !refused;
 
         // Authentication
-        log::info!("Starting auth for {}", config.username);
-        let session_key = do_srp(&mut tls, &config.username, &config.password)?;
+        log::info!("Starting authentication");
+        let session_key = if control.is_some() { session::do_srp_bounded(&mut tls, &config.username, &config.password, LOGIN_FRAME_BYTES, 8192)? } else { do_srp(&mut tls, &config.username, &config.password)? };
         log::info!("Auth complete");
 
         // Per-session second-factor approval gate (IBKey / seamless push).
@@ -1792,66 +1894,84 @@ impl Gateway {
         let second_factor = if config.paper {
             None
         } else {
-            let token = auth_start.mobile_key_token(&config.ib_key_token_sub_type)?;
+            let token = auth_start.mobile_key_token(&config.ib_key_token_sub_type)
+                .map_err(|error| if control.is_some() {
+                    io::Error::new(error.kind(), "unsupported controlled second factor")
+                } else { error })?;
             if token.is_none() {
                 log::info!("Auth start lists no second factor: none required");
             }
             token
         };
         if let Some(token_sub_type) = second_factor {
-            // No client deadline unless one is set, as in the reference: the
-            // wait ends with the server's answer or its close of the socket
-            // (ibx#208).
-            let deadline = session::ib_key_deadline(config.ib_key_timeout_secs);
-            let bound = if deadline.is_some() {
-                format!("up to {}s", config.ib_key_timeout_secs)
-            } else {
-                "until the server answers or closes (about 18 min)".to_string()
-            };
-            // Live logins enter a human-approval window here: connect() blocks
-            // until the second factor is approved (mobile push) or the wait
-            // ends. Announce it up front so a stalled connect() reads as
-            // "waiting for approval" rather than a hang (ibx#203 / ibx#207).
-            // Accounts with no second factor fall straight through (Skipped).
-            if config.code_provider.is_none() {
-                log::info!(
-                    "Live login for {}: waiting for second-factor approval (mobile push);                      connect() blocks {}. Use paper=true, an ib_key_timeout_secs,                      or a code_provider to avoid this.",
-                    config.username, bound,
-                );
-            } else {
-                log::info!(
-                    "Live login for {}: second-factor via code_provider (Challenge/Response);                      connect() blocks {} awaiting the challenge.",
-                    config.username, bound,
-                );
-            }
-            // Short read timeout: the wait checks the code provider and the
-            // deadline between reads (ibx#244).
-            tls.tcp().set_read_timeout(Some(Duration::from_millis(FARM_LOGON_POLL_MS)))?;
-            match session::do_ib_key_2fa(
-                &mut tls,
-                &token_sub_type,
-                deadline,
-                config.code_provider.as_ref(),
-            )? {
-                session::IbKeyOutcome::Skipped => {
-                    log::info!("2FA gate: skipped (no second factor)");
-                }
-                session::IbKeyOutcome::Approved { approval_url, session_id, soft_token_hex } => {
-                    log::info!(
-                        "2FA gate: approved (session_id={}, approval_url={}, token_hex_len={})",
-                        if session_id.is_empty() { "<none>" } else { &session_id },
-                        if approval_url.is_empty() { "<none>" } else { &approval_url },
-                        soft_token_hex.len(),
-                    );
+            if control.is_some() {
+                set_login_read_timeout(tls.stream.tcp(), Some(crate::lifecycle::CONTROLLED_IO_POLL), control)?;
+                let outcome = session::do_ib_key_push_bounded(
+                    &mut LoginPollIo(&mut tls), &token_sub_type,
+                    session::ib_key_deadline(config.ib_key_timeout_secs),
+                    LOGIN_FRAME_BYTES, LOGIN_BYTES, 128,
+                )?;
+                if let session::IbKeyOutcome::Approved { soft_token_hex, .. } = outcome {
                     if !soft_token_hex.is_empty() {
-                        if let Some(tok) = BigUint::parse_bytes(soft_token_hex.as_bytes(), 16) {
-                            soft_token = Some(tok);
-                        } else {
-                            log::warn!("2FA gate: SOFT token hex did not parse — falling back to session_key");
+                        soft_token = Some(BigUint::parse_bytes(soft_token_hex.as_bytes(), 16)
+                            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid controlled push token"))?);
+                    }
+                }
+            } else {
+                // No client deadline unless one is set, as in the reference: the
+                // wait ends with the server's answer or its close of the socket
+                // (ibx#208).
+                let deadline = session::ib_key_deadline(config.ib_key_timeout_secs);
+                let bound = if deadline.is_some() {
+                    format!("up to {}s", config.ib_key_timeout_secs)
+                } else {
+                    "until the server answers or closes (about 18 min)".to_string()
+                };
+                // Live logins enter a human-approval window here: connect() blocks
+                // until the second factor is approved (mobile push) or the wait
+                // ends. Announce it up front so a stalled connect() reads as
+                // "waiting for approval" rather than a hang (ibx#203 / ibx#207).
+                // Accounts with no second factor fall straight through (Skipped).
+                if config.code_provider.is_none() {
+                    log::info!(
+                        "Live login for {}: waiting for second-factor approval (mobile push);                      connect() blocks {}. Use paper=true, an ib_key_timeout_secs,                      or a code_provider to avoid this.",
+                        config.username, bound,
+                    );
+                } else {
+                    log::info!(
+                        "Live login for {}: second-factor via code_provider (Challenge/Response);                      connect() blocks {} awaiting the challenge.",
+                        config.username, bound,
+                    );
+                }
+                // Short read timeout: the wait checks the code provider and the
+                // deadline between reads (ibx#244).
+                set_login_read_timeout(tls.stream.tcp(), Some(Duration::from_millis(FARM_LOGON_POLL_MS)), control)?;
+                match session::do_ib_key_2fa(
+                    &mut tls,
+                    &token_sub_type,
+                    deadline,
+                    config.code_provider.as_ref(),
+                )? {
+                    session::IbKeyOutcome::Skipped => {
+                        log::info!("2FA gate: skipped (no second factor)");
+                    }
+                    session::IbKeyOutcome::Approved { approval_url, session_id, soft_token_hex } => {
+                        log::info!(
+                            "2FA gate: approved (session_id={}, approval_url={}, token_hex_len={})",
+                            if session_id.is_empty() { "<none>" } else { &session_id },
+                            if approval_url.is_empty() { "<none>" } else { &approval_url },
+                            soft_token_hex.len(),
+                        );
+                        if !soft_token_hex.is_empty() {
+                            if let Some(tok) = BigUint::parse_bytes(soft_token_hex.as_bytes(), 16) {
+                                soft_token = Some(tok);
+                            } else {
+                                log::warn!("2FA gate: SOFT token hex did not parse — falling back to session_key");
+                            }
                         }
                     }
                 }
-            }
+                }
         }
 
         // Receive post-auth messages (encrypted via 534) and wait for the
@@ -1861,12 +1981,12 @@ impl Gateway {
         // could exhaust a fixed iteration budget before it arrived (ibx#196).
         // Retry within an overall deadline and ignore intervening messages,
         // mirroring the CCP-reconnect path.
-        tls.tcp().set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FIX_LOGON)))?;
+        set_login_read_timeout(tls.stream.tcp(), Some(Duration::from_secs_f64(TIMEOUT_FIX_LOGON)), control)?;
         let fix_deadline = std::time::Instant::now()
             + std::time::Duration::from_secs_f64(TIMEOUT_FIX_LOGON * 2.0);
         let mut fix_ready = false;
         while std::time::Instant::now() < fix_deadline {
-            let (payload, _) = match ns::ns_recv(&mut tls) {
+            let (payload, _) = match recv_ns(&mut tls, control) {
                 Ok(r) => r,
                 Err(e)
                     if e.kind() == io::ErrorKind::WouldBlock
@@ -1891,13 +2011,13 @@ impl Gateway {
                 channel.decrypt(&ct)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
             } else if raw_type == ns::NS_SECURE_ERROR || raw_type == ns::NS_ERROR_RESPONSE {
-                return Err(session::ns_error(raw_type, &parts[2..]));
+                return Err(controlled_ns_error(raw_type, &parts[2..], control));
             } else if raw_type == ns::NS_REDIRECT {
                 let target = parts.get(2).unwrap_or(&"");
-                let redirect_host = target.split(':').next().unwrap_or(target);
+                let redirect_host = if control.is_some() { controlled_redirect_host(target)? } else { target.split(':').next().unwrap_or(target) };
                 log::info!("Post-auth redirect to {}, reconnecting...", redirect_host);
                 drop(tls);
-                return Self::connect_to_host(config, redirect_host, redirect_depth + 1);
+                return Self::connect_to_host(config, redirect_host, redirect_depth + 1, control);
             } else {
                 payload
             };
@@ -1916,11 +2036,11 @@ impl Gateway {
                 session::send_ns(&mut tls, &mut channel, secure, newcomm.as_bytes())?;
                 log::info!("Port type change sent");
             } else if msg_type == ns::NS_FIX_START {
-                log::info!("Data start: {}", inner_text);
+                log::info!("Data start received");
                 fix_ready = true;
                 break;
             } else if msg_type == ns::NS_ERROR_RESPONSE || msg_type == ns::NS_SECURE_ERROR {
-                return Err(session::ns_error(msg_type, &inner_parts[2..]));
+                return Err(controlled_ns_error(msg_type, &inner_parts[2..], control));
             } else if msg_type == ns::NS_BACKUP_HOST {
                 log::info!("Backup host notice received (ignored)");
             } else {
@@ -1946,7 +2066,7 @@ impl Gateway {
         // Read FIX messages until we get the logon ACK (35=A) with session info.
         // Short poll timeout + overall deadline so a slow ACK segment from a
         // high-latency gateway is retried, not fatal (ibx#237).
-        tls.tcp().set_read_timeout(Some(Duration::from_millis(FARM_LOGON_POLL_MS)))?;
+        set_login_read_timeout(tls.stream.tcp(), Some(Duration::from_millis(FARM_LOGON_POLL_MS)), control)?;
         let ack_deadline = std::time::Instant::now() + Duration::from_secs_f64(TIMEOUT_FARM_LOGON);
         let mut account_id = String::new();
         let mut managed_accounts: Vec<String> = Vec::new();
@@ -1992,8 +2112,11 @@ impl Gateway {
         let mut version_cutoff_date = None;
         let mut max_backfill_years = 1;
 
+        let mut auth_carry = Vec::new();
         for _ in 0..5 {
-            let raw_response = fix_read_deadline(&mut tls, ack_deadline)?;
+            let raw_response = if control.is_some() {
+                login_frames::read_frame(&mut tls, &mut auth_carry, LOGIN_BYTES)?
+            } else { fix_read_deadline(&mut tls, ack_deadline)? };
             let received_ms = crate::control::logon::local_now_ms();
             // The auth-logon ACK arrives as `8=FIXCOMP` with a DEFLATE-
             // compressed inner body containing the per-account routing tags
@@ -2001,7 +2124,7 @@ impl Gateway {
             // (See ib-agent#128 + #129.)
             let mut response = raw_response.clone();
             if raw_response.starts_with(b"8=FIXCOMP\x01") {
-                let inflated_msgs = fixcomp::fixcomp_decompress(&raw_response)?;
+                let inflated_msgs = if control.is_some() { fixcomp::fixcomp_decompress_limited(&raw_response, LOGIN_BYTES)? } else { fixcomp::fixcomp_decompress(&raw_response)? };
                 let total: usize = inflated_msgs.iter().map(|m| m.len()).sum();
                 log::info!("Auth FIXCOMP envelope: {} bytes compressed → {} inner messages, ~{} inflated bytes",
                     raw_response.len(), inflated_msgs.len(), total);
@@ -2018,7 +2141,7 @@ impl Gateway {
             log::info!("Auth msg type={} ({} bytes raw / {} bytes parsed)",
                 msg_type, raw_response.len(), response.len());
             for tag in [6144u32, 6145, 6146, 6147, 6171, 6172, 8008, 8009, 6160, 6161] {
-                if let Some(v) = fields.get(&tag) {
+                if let Some(v) = fields.get(&tag).filter(|_| control.is_none()) {
                     log::info!("Auth msg type={} tag={}: {:?}", msg_type, tag, v);
                 }
             }
@@ -2028,7 +2151,7 @@ impl Gateway {
                     let reason = fields.get(&58).map(|s| s.as_str()).unwrap_or("unknown");
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
-                        format!("FIX Logon rejected: {}", reason),
+                        if control.is_some() { "controlled FIX logon rejected".into() } else { format!("FIX Logon rejected: {}", reason) },
                     ));
                 }
                 _ => {}
@@ -2062,7 +2185,7 @@ impl Gateway {
                 && session_epoch.is_empty()
             {
                 session_epoch = v.clone();
-                log::info!("Auth: session epoch {}", session_epoch);
+                if control.is_none() { log::info!("Auth: session epoch {}", session_epoch); }
             }
             // Tag 8035: try parsed fields first, then raw byte search
             if server_session_id.is_empty() {
@@ -2182,7 +2305,7 @@ impl Gateway {
                 break;
             }
         }
-        tls.tcp().set_read_timeout(None)?;
+        set_login_read_timeout(tls.stream.tcp(), None, control)?;
 
         // DENYAPI in the feature list: the reference closes every API
         // connection with no message (ibx#421).
@@ -2197,10 +2320,12 @@ impl Gateway {
         }
 
         let max_real_time_requests = max_real_time_requests(&ticker_limit_tags);
-        log::info!(
-            "Auth logon: account={} session_id={} hb={}s scale_us_lots={} max_real_time_requests={}",
-            account_id, server_session_id, heartbeat_interval, scale_us_lots, max_real_time_requests
-        );
+        if control.is_none() {
+            log::info!(
+                "Auth logon: account={} session_id={} hb={}s scale_us_lots={} max_real_time_requests={}",
+                account_id, server_session_id, heartbeat_interval, scale_us_lots, max_real_time_requests
+            );
+        } else { log::info!("Controlled auth logon received"); }
 
         // --- Post-logon init sequence ---
         let account = if account_id.is_empty() { config.username.clone() } else { account_id.clone() };
@@ -2240,17 +2365,20 @@ impl Gateway {
         // until it FINs the socket at ~140 s. A 300 ms idle-gap is past any
         // intra-burst jitter (the burst is continuous) and well short of the
         // 10 s keep-alive trickle interval, so we exit promptly after burst-end.
-        tls.tcp().set_read_timeout(Some(Duration::from_millis(300)))?;
-        let mut init_data: Vec<u8> = Vec::with_capacity(65536);
+        set_login_read_timeout(tls.stream.tcp(), Some(Duration::from_millis(300)), control)?;
+        // Preserve every byte read beyond the logon ACK for init processing.
+        let mut init_data = auth_carry;
         let mut tmp_buf = vec![0u8; 65536];
         let read_start = std::time::Instant::now();
+        let mut last_init_read = read_start;
         loop {
-            match tls.read(&mut tmp_buf) {
+            match tls.read_poll(&mut tmp_buf) {
                 Ok(0) => break,
-                Ok(n) => init_data.extend_from_slice(&tmp_buf[..n]),
+                Ok(n) => { last_init_read = std::time::Instant::now(); if control.is_some() && init_data.len().saturating_add(n) > LOGIN_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidData, "initialization byte bound exceeded")); } init_data.extend_from_slice(&tmp_buf[..n]); },
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock
                     || e.kind() == io::ErrorKind::TimedOut =>
                 {
+                    if control.is_some() && last_init_read.elapsed() < Duration::from_millis(300) { continue; }
                     // First 1-s idle gap = burst is done. Anything past
                     // this is the server's 10-s keep-alive trickle, which
                     // we don't want to drain (would push grace-window
@@ -2270,7 +2398,7 @@ impl Gateway {
         // in the inflated content. The scan reads a copy with that content
         // appended; `init_data` itself seeds the connection buffer below
         // unchanged (ibx#317).
-        let scan_data = init_scan_buffer(&init_data);
+        let scan_data = if control.is_some() { init_scan_buffer_limited(&init_data, LOGIN_BYTES)? } else { init_scan_buffer(&init_data) };
 
         // Scan init response for account ID and gateway-local init tags
         let init_str = String::from_utf8_lossy(&scan_data);
@@ -2278,14 +2406,15 @@ impl Gateway {
         let algo_definitions = parse_algo_definitions(&init_str);
         log::info!("Algo definitions in the login burst: {}", algo_definitions.len());
         match &account_config {
-            Some((features, mifid)) => log::info!("Account config: features {:?}, MiFID config {:?}", features, mifid),
+            Some((features, mifid)) if control.is_none() => log::info!("Account config: features {:?}, MiFID config {:?}", features, mifid),
+            Some(_) => log::info!("Account configuration received"),
             None => log::warn!("No account config answer in the login burst"),
         }
         // TEMP diagnostic (ib-agent#128 follow-up): log every part containing
         // "farm" or "hmds" so we can locate the routing tags.
         for part in init_str.split('\x01') {
-            if part.contains("farm") || part.contains("hmds") || part.contains("secdef") {
-                log::info!("Init scan: routing-shaped part = {:?}", part);
+            if control.is_none() && (part.contains("farm") || part.contains("hmds") || part.contains("secdef")) {
+                if control.is_none() { log::info!("Init scan: routing-shaped part = {:?}", part); }
             }
         }
         for part in init_str.split('\x01') {
@@ -2294,7 +2423,7 @@ impl Gateway {
                 if val.starts_with("DU") || val.starts_with("DF") || val.starts_with("U") {
                     if account_id.is_empty() || account_id == config.username {
                         account_id = val.to_string();
-                        log::info!("Found account ID from init response: {}", account_id);
+                        if control.is_none() { log::info!("Found account ID from init response: {}", account_id); }
                     }
                 }
             } else if part.starts_with("6522=") && raw_soft_dollar_tiers.is_empty() {
@@ -2338,6 +2467,7 @@ impl Gateway {
             }
         }
 
+        if control.is_some() && account_id.is_empty() { return Err(io::Error::new(io::ErrorKind::InvalidData, "controlled login lacks broker account identity")); }
         // Per ib-agent#134: CCP server FINs the connection ~12s after the
         // init-burst response if no application-level traffic arrives in the
         // grace window — heartbeats alone do not satisfy "client alive".
@@ -2425,11 +2555,8 @@ impl Gateway {
             ccp_seq
         );
 
-        tls.tcp().set_read_timeout(None)?;
-
-        // Auth connection for the hot loop: TLS, or the plain socket of the
-        // mode without TLS (ibx#423).
-        let mut ccp_conn = tls.into_connection()?;
+        set_login_read_timeout(tls.stream.tcp(), None, control)?;
+        let mut ccp_conn = tls.stream.into_connection()?;
         ccp_conn.seq = ccp_seq;
         // On TLS there is no key exchange, so no signing key: its messages
         // go unsigned, as the reference's (ibx#423). Without TLS the keys
@@ -2465,6 +2592,7 @@ impl Gateway {
         //   trading (6145):  "<host>/<farm>"            (port from tag 6146, default 4000)
         //   mktdata (6171):  "<host>/<farm>/<port>"
         //   secdef  (8008):  "<host>/<farm>/<port>"
+        if control.is_some() { validate_route(&trading_route)?; validate_route(&mktdata_route)?; }
         let (trading_host, trading_farm) = parse_farm_route(&trading_route)
             .unwrap_or_else(|| (host.to_string(), "usfarm".to_string()));
         let (mktdata_host, mktdata_farm) = parse_farm_route(&mktdata_route)
@@ -2497,17 +2625,18 @@ impl Gateway {
             let trading_link = FarmLink::of(&ssl_farms, use_ssl, &trading_farm, FarmService::MarketData, refused);
             let mktdata_link = FarmLink::of(&ssl_farms, use_ssl, &mktdata_farm, FarmService::Historical, refused);
             let trading_handle = scope.spawn(move || {
-                connect_farm_opts(&trading_host, &trading_farm, username, password,
-                    paper, ssid, token, hw, enc, 18, true, trading_link)
+                connect_farm_opts_inner(&trading_host, &trading_farm, username, password,
+                    paper, ssid, token, hw, enc, 18, true, trading_link, control)
             });
             let mktdata_handle = scope.spawn(move || {
-                connect_farm_opts(&mktdata_host, &mktdata_farm, username, password,
-                    paper, ssid, token, hw, enc, 17, true, mktdata_link)
+                connect_farm_opts_inner(&mktdata_host, &mktdata_farm, username, password,
+                    paper, ssid, token, hw, enc, 17, true, mktdata_link, control)
             });
             let trading = trading_handle.join().expect("trading farm thread panicked");
             let mktdata = mktdata_handle.join().expect("mktdata farm thread panicked");
             (trading, mktdata)
         });
+        check_control(control)?;
         let (farm_conn, md_routing) = farm_conn?;
         let (hmds_conn, hmds_routing) = match hmds_conn {
             Ok((c, table)) => { log::info!("Historical data farm connected"); (Some(c), table) }
@@ -3034,6 +3163,47 @@ mod tests {
         assert!(!refused);
     }
 
+    #[test]
+    fn controlled_tls_auth_start_uses_captured_protocol_without_dh() {
+        let control = ConnectionControl::new(Duration::from_secs(1),
+            std::collections::BTreeMap::from([("offline.invalid".into(), vec!["127.0.0.1".parse().unwrap()])]), "offline-hardware".into()).unwrap();
+        let mut wire = ControlledIo::new(AuthWire::new(&[CAPTURED_AUTH_START]), Some(&control));
+        let start = controlled_ccp_login_start(&mut wire, &mut SecureChannel::new(), CAPTURED_CONNECT.as_bytes()).unwrap();
+        assert!(start.password_required);
+        assert_eq!(wire.stream.sent(), vec![CAPTURED_CONNECT.to_string()]);
+        control.cancel();
+        control.join_workers(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn controlled_tls_auth_start_refuses_retry_or_plaintext_downgrade() {
+        let control = ConnectionControl::new(Duration::from_secs(1),
+            std::collections::BTreeMap::from([("offline.invalid".into(), vec!["127.0.0.1".parse().unwrap()])]), "offline-hardware".into()).unwrap();
+        let mut wire = ControlledIo::new(AuthWire::new(&["50;535;private-refusal;1;", CAPTURED_AUTH_START]), Some(&control));
+        let err = controlled_ccp_login_start(&mut wire, &mut SecureChannel::new(), CAPTURED_CONNECT.as_bytes()).unwrap_err();
+        assert!(!err.to_string().contains("private-refusal"));
+        assert_eq!(wire.stream.sent(), vec![CAPTURED_CONNECT.to_string()]);
+        assert!(wire.stream.input.position() < wire.stream.input.get_ref().len() as u64,
+            "a permitted legacy downgrade must leave the later auth start unread");
+        control.cancel();
+        control.join_workers(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn bounded_tls_auth_start_rejects_announced_frame_without_body_read() {
+        let control = ConnectionControl::new(Duration::from_secs(1),
+            std::collections::BTreeMap::from([("offline.invalid".into(), vec!["127.0.0.1".parse().unwrap()])]), "offline-hardware".into()).unwrap();
+        let mut header = ns::NS_MAGIC.to_vec();
+        header.extend_from_slice(&((LOGIN_FRAME_BYTES + 1) as u32).to_be_bytes());
+        let auth = AuthWire { input: io::Cursor::new(header), output: Vec::new() };
+        let mut wire = ControlledIo::new(auth, Some(&control));
+        let err = controlled_ccp_login_start(&mut wire, &mut SecureChannel::new(), CAPTURED_CONNECT.as_bytes()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(wire.stream.input.position(), 8);
+        assert_eq!(wire.stream.sent(), vec![CAPTURED_CONNECT.to_string()]);
+        control.cancel();
+        control.join_workers(Duration::from_secs(1)).unwrap();
+    }
     // ibx#423: a refusal of the encryption with the permission to go on
     // sends the connect request again in clear; the farms of the session
     // then skip their key exchange.
@@ -4103,3 +4273,143 @@ mod account_config_tests {
         assert!(parse_account_config("8=FIX.4.1\x0135=U\x016040=75\x01").is_none());
     }
 }
+
+fn check_control(control: Option<&ConnectionControl>) -> io::Result<()> {
+    match control { Some(control) => control.check(), None => Ok(()) }
+}
+fn recv_ns<S: Read>(stream: &mut S, control: Option<&ConnectionControl>) -> io::Result<(Vec<u8>,usize)> {
+    check_control(control)?;
+    match control { Some(_) => ns::ns_recv_limited(stream, LOGIN_FRAME_BYTES), None => ns::ns_recv(stream) }
+}
+fn validate_route(route: &str) -> io::Result<()> {
+    if parse_farm_route(route).is_none() { return Err(io::Error::new(io::ErrorKind::InvalidData, "controlled login requires genuine farm routes")); }
+    if route.split('/').nth(2).is_some_and(|port| port.parse::<u16>().ok() != Some(misc_port())) {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "controlled login cannot ignore a nondefault farm route port"));
+    }
+    Ok(())
+}
+
+
+
+
+/// Reject unsupported redirected ports instead of silently connecting elsewhere.
+fn controlled_redirect_host(target: &str) -> io::Result<&str> {
+    let mut parts = target.split(':');
+    let host = parts.next().unwrap_or("");
+    if host.is_empty() || parts.next().is_some_and(|port| port.parse::<u16>().ok() != Some(AUTH_PORT)) || parts.next().is_some() {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "controlled redirect requires a host and the authentication port"));
+    }
+    Ok(host)
+}
+
+/// Bounded scan copy; malformed/truncated compressed frames never disappear.
+fn init_scan_buffer_limited(init_data: &[u8], max_bytes: usize) -> io::Result<Vec<u8>> {
+    if init_data.len() > max_bytes { return Err(io::Error::new(io::ErrorKind::InvalidData, "initialization scan byte bound exceeded")); }
+    let mut scan = init_data.to_vec();
+    let mut cursor = 0;
+    while cursor < init_data.len() {
+        if init_data[cursor..].starts_with(b"8=FIXCOMP\x01") {
+            let total = fixcomp::fixcomp_length(&init_data[cursor..]).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "incomplete initialization compressed frame"))?;
+            if total > init_data.len() - cursor { return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated initialization compressed frame")); }
+            let remaining = max_bytes - scan.len();
+            for inner in fixcomp::fixcomp_decompress_limited(&init_data[cursor..cursor + total], remaining)? {
+                if inner.len().saturating_add(1) > max_bytes - scan.len() { return Err(io::Error::new(io::ErrorKind::InvalidData, "inflated initialization byte bound exceeded")); }
+                scan.extend_from_slice(&inner);
+                scan.push(b'\x01');
+            }
+            cursor += total;
+        } else { cursor += 1; }
+    }
+    Ok(scan)
+}
+
+#[cfg(test)]
+mod controlled_gateway_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    fn control() -> ConnectionControl {
+        ConnectionControl::new(Duration::from_secs(1), BTreeMap::from([("offline.invalid".into(), vec!["127.0.0.1".parse().unwrap()])]), "offline-hardware".into()).unwrap()
+    }
+    fn config() -> GatewayConfig {
+        GatewayConfig { username: "offline".into(), password: Zeroizing::new("offline-password".into()), host: "unresolved.invalid".into(), paper: true, accept_invalid_certs: false, ib_key_timeout_secs: 1, ib_key_token_sub_type: String::new(), code_provider: None }
+    }
+    #[test]
+    fn controlled_login_preserves_original_failure_and_prevents_scope_reuse() {
+        let control = control();
+        assert_eq!(Gateway::connect_once(&config(), &control).err().unwrap().kind(), io::ErrorKind::Unsupported);
+        assert!(control.is_cancelled());
+        assert!(Gateway::connect_once(&config(), &control).is_err());
+        control.join_workers(Duration::from_secs(1)).unwrap();
+    }
+    #[test]
+    fn controlled_code_callback_and_credentials_reject_before_tcp() {
+        let control = control();
+        let mut config = config(); config.paper = false;
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_called = called.clone();
+        config.code_provider = Some(Arc::new(move |_| {
+            callback_called.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok("never-called".into())
+        }));
+        assert_eq!(Gateway::connect_once(&config, &control).err().unwrap().kind(), io::ErrorKind::Unsupported);
+        assert!(!control.is_cancelled(), "callback is rejected before beginning login");
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        config.code_provider = None; config.accept_invalid_certs = true;
+        assert_eq!(Gateway::connect_once(&config, &control).err().unwrap().kind(), io::ErrorKind::Unsupported);
+        assert!(!control.is_cancelled());
+        config.accept_invalid_certs = false; config.password.clear();
+        assert_eq!(Gateway::connect_once(&config, &control).err().unwrap().kind(), io::ErrorKind::InvalidInput);
+        control.join_workers(Duration::from_secs(1)).unwrap();
+    }
+    #[test]
+    fn controlled_redirect_and_initial_scan_fail_closed() {
+        assert_eq!(controlled_redirect_host("offline:4000").unwrap_err().kind(), io::ErrorKind::Unsupported);
+        assert_eq!(controlled_redirect_host("offline:4001:1").unwrap_err().kind(), io::ErrorKind::Unsupported);
+        assert_eq!(controlled_redirect_host("offline:4001").is_ok(), AUTH_PORT == 4001);
+        assert_eq!(controlled_redirect_host("offline").unwrap(), "offline");
+        assert_eq!(init_scan_buffer_limited(b"plain", 5).unwrap(), b"plain");
+        assert!(init_scan_buffer_limited(b"plain", 4).is_err());
+        assert!(init_scan_buffer_limited(b"8=FIXCOMP\x019=99999\x01", 64).is_err());
+    }
+}
+fn controlled_ns_error(msg_type: u32, fields: &[&str], control: Option<&ConnectionControl>) -> io::Error {
+    if control.is_some() { io::Error::new(io::ErrorKind::PermissionDenied, "controlled authentication refused by server") }
+    else { session::ns_error(msg_type, fields) }
+}
+/// Bound peer big integers and random input before the native DH decoder/math.
+/// The native DH group is fixed; these conservative limits admit its 128-byte
+/// public values while refusing frame-sized arbitrary operands.
+fn process_controlled_hello(channel: &mut SecureChannel, fields: &[&str], control: Option<&ConnectionControl>) -> io::Result<()> {
+    check_control(control)?;
+    if control.is_some() && (fields.first().is_none_or(|v| v.len() > 88) || fields.get(1).is_none_or(|v| v.len() > 1368)) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "controlled key exchange operand bound exceeded"));
+    }
+    channel.process_server_hello(fields)?;
+    check_control(control)
+}
+fn set_login_read_timeout(stream: &TcpStream, timeout: Option<Duration>, control: Option<&ConnectionControl>) -> io::Result<()> {
+    check_control(control)?;
+    let timeout = if control.is_some() { Some(timeout.unwrap_or(crate::lifecycle::CONTROLLED_IO_POLL).min(crate::lifecycle::CONTROLLED_IO_POLL)) } else { timeout };
+    stream.set_read_timeout(timeout)
+}
+/// Preserve legacy plaintext-refusal behavior only on the legacy path. A
+/// controlled encrypted farm fails closed rather than downgrading its exchange.
+fn read_login_key_exchange_answer<S: Read>(
+    stream: &mut S, channel: &mut SecureChannel, control: Option<&ConnectionControl>,
+) -> io::Result<bool> {
+    if control.is_none() { return session::read_key_exchange_answer(stream, channel); }
+    let (payload, _) = recv_ns(stream, control)?;
+    let text = String::from_utf8_lossy(&payload);
+    let parts: Vec<&str> = text.split(';').collect();
+    let kind = parts.get(1).and_then(|s| s.parse::<u32>().ok());
+    if kind != Some(ns::NS_SECURE_CONNECTION_START) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "controlled farm key exchange rejected"));
+    }
+    process_controlled_hello(channel, &parts[2..], control)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+#[path = "controlled_login_tests.rs"]
+mod controlled_login_tests;

@@ -4,6 +4,12 @@
 
 use crate::protocol::fix;
 
+#[path = "strict_history.rs"]
+mod strict_history;
+pub use strict_history::{
+    StrictHistoricalBar, StrictHistoricalResponse, StrictHistoryError, parse_bar_response_strict,
+};
+
 // Tags for historical data
 pub const TAG_HISTORICAL_XML: u32 = 6118;
 
