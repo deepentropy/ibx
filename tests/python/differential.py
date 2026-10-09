@@ -90,8 +90,18 @@ def _connection_notice(r):
         or (r["field"] == "errorString" and " farm " in r["reference"] and " farm " in r["ibx"]))
 
 
+def _company_known(r):
+    # The reference keeps the company data of an underlying for the whole
+    # life of its process: only the first derivative row of that life lacks
+    # its industry. An ibx run logs in again for every scenario, so the first
+    # row of each scenario lacks it (ibx#526, not a defect).
+    return (r["callback"] == "contractDetails" and r["kind"] == "field" and not r["ibx"]
+            and r["field"] in ("contractDetails.industry", "contractDetails.category", "contractDetails.subcategory"))
+
+
 # What explains a row: (an open issue or a reason, test of the row).
 KNOWN = [
+    ("session: company data the reference kept from an earlier request", _company_known),
     ("session: state of the data connections", _connection_notice),
     ("recording older than notice 2172", lambda r: r["callback"] == "error" and r["kind"] == "extra_in_ibx"
      and r["key"] == "-1|2172"),

@@ -121,6 +121,17 @@ def test_connection_notices_after_the_connect_are_explained_by_the_session():
     assert [(r["kind"], r["key"], r["known"]) for r in rows] == [("missing_in_ibx", "-1|2104", "")]
 
 
+def test_an_industry_the_reference_kept_from_an_earlier_request_is_explained():
+    theirs = [["contractDetails", 1, {"longName": "APPLE INC", "industry": "Technology", "category": "Computers"}]]
+    ours = [["contractDetails", 1, {"longName": "APPLE INC"}]]
+    rows = d.compare(theirs, ours)
+    assert [r["field"] for r in rows] == ["contractDetails.category", "contractDetails.industry"]
+    assert all(r["known"].startswith("session: company data") for r in rows)
+    # Another value, or a missing one on the reference's side, is not explained.
+    ours[0][2]["industry"] = "Energy"
+    assert [r["known"] for r in d.compare(theirs, ours) if r["field"].endswith("industry")] == [""]
+
+
 def test_sets_enum_internals_and_request_windows():
     theirs = [["securityDefinitionOptionParameter", 1, "SMART", 265598, "AAPL", "100", "{'b', 'a'}", "{2.0, 1.0}"],
               ["historicalDataEnd", 2, "20260926 15:46:37 US/Eastern", "20260926 16:16:37 US/Eastern"],
