@@ -1698,7 +1698,8 @@ fn cancel_fields(context: &mut Context, account_id: &str, order_id: crate::types
 ///   an OCA group, and not a child whose parent goes in this cancel
 ///   (`trader.order.ay.c(List, bs, bE)@96-183`);
 /// - an order with a cancel or a replace pending is not sent: 161 to its
-///   client (`ay.a(pe, bs, bE, boolean)@176`); a finished one is left.
+///   client (`ay.a(pe, bs, bE, boolean)@176`); so is an ended order the
+///   book still holds ([`crate::engine::context::EndedOrder`], ibx#545).
 ///
 /// Captured 01/10/2026 (17:11:41, paper): 8 orders of earlier sessions,
 /// known from the logon replay, cancelled in one write, in the book's
@@ -1714,7 +1715,7 @@ fn global_cancel(
     // end as their own cancel ends them (paper 09/10/2026).
     let mut unsent: Vec<OrderId> = context.unsent.keys().copied().collect();
     unsent.sort_unstable();
-    for id in unsent {
+    for &id in &unsent {
         end_unsent(context, shared, id);
     }
     // The orders that wait (a what-if is not an order: it keeps waiting),
@@ -1735,22 +1736,37 @@ fn global_cancel(
         api_cancelled(context, shared, &req);
     }
 
-    // The book, in its order.
+    // The book, in its order: the working orders, and the ended ones the
+    // reference still holds (ibx#545), but for those this cancel ended.
+    let kept = context.ended_orders(Instant::now());
     let table = book_table_size(context.book_peak);
-    let mut book: Vec<(OrderId, OrderId, crate::engine::context::BookEntry)> = context.book.iter()
+    let mut book: Vec<(OrderId, OrderId, crate::engine::context::BookEntry, bool)> = context.book.iter()
         .filter(|(id, _)| context.order(**id).is_some())
-        .map(|(&id, e)| (id, context.server_id(id), e.clone()))
+        .map(|(&id, e)| (id, context.server_id(id), e.clone(), false))
+        .chain(kept.into_iter().filter(|e| !unsent.contains(&e.order_id)).map(|e| (e.order_id, e.server_id, e.entry, true)))
         .collect();
-    book.sort_by_key(|(_, server, e)| (book_bucket(*server, table), e.seq));
-    book.sort_by_key(|(_, _, e)| e.parent != 0);
+    book.sort_by_key(|(_, server, e, _)| (book_bucket(*server, table), e.seq));
+    book.sort_by_key(|(_, _, e, _)| e.parent != 0);
 
     let mut groups: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut taken: std::collections::HashSet<OrderId> = std::collections::HashSet::new();
-    for (id, server, entry) in book {
+    for (id, server, entry, ended) in book {
         if !entry.oca_group.is_empty() && !groups.insert(entry.oca_group.clone()) {
             continue;
         }
         if entry.parent != 0 && taken.contains(&entry.parent) {
+            continue;
+        }
+        // An ended order cannot be cancelled: 161 to its client, after
+        // the callbacks of the orders this cancel ended. It does not
+        // stand for its children (`ay.c@141`, `pe.i4()`): paper
+        // 09/10/2026, a bracket cancelled 5 s before gave 161 for its
+        // parent and for the first of its two children.
+        if ended {
+            if entry.owner.is_none_or(|owner| owner == context.api_client_id) {
+                shared.orders.push_order_notice(id, 161, format!(
+                    "Cancel attempted when order is not in a cancellable state.  Order permId ={}", server));
+            }
             continue;
         }
         let Some(status) = context.order(id).map(|o| o.status) else { continue };
@@ -2884,7 +2900,11 @@ pub(crate) fn sweep_rth_lookups(context: &mut Context) {
 /// discarded", then 161. False when `order_id` is not such an order.
 fn end_unsent(context: &mut Context, shared: &Arc<SharedState>, order_id: OrderId) -> bool {
     let Some((instrument, qty, parent_id)) = context.unsent.remove(&order_id) else { return false };
-    let perm_id = context.new_server_id();
+    // The id it was given when it was placed, as the reference's permId.
+    let perm_id = match context.server_id(order_id) {
+        id if id != order_id => id,
+        _ => context.new_server_id(),
+    };
     shared.orders.push_order_update(OrderUpdate {
         order_id,
         instrument,
@@ -2900,6 +2920,10 @@ fn end_unsent(context: &mut Context, shared: &Arc<SharedState>, order_id: OrderI
     shared.orders.push_order_notice(order_id, 161,
         format!("Cancel attempted when order is not in a cancellable state.  Order permId ={}", perm_id));
     context.finish_unsent(order_id, OrderStatus::Cancelled);
+    // The reference keeps it in its book for the session: a later global
+    // cancel answers 161 for it each time (ibx#545).
+    let entry = crate::engine::context::BookEntry { parent: parent_id, ..Default::default() };
+    context.keep_ended(order_id, perm_id, entry, None);
     true
 }
 
@@ -2954,6 +2978,10 @@ pub(crate) fn hold_order(
     // which its lookup may have moved to another slot since.
     let instrument = context.unsent.get(&order_id).map_or(instrument, |h| h.0);
     context.unsent.insert(order_id, (instrument, qty, parent_id));
+    // Its permId is the next id when it is placed, not when it is sent
+    // (paper 09/10/2026: the held orders 37333 and 37334 took the two ids
+    // before the next order placed).
+    context.assign_server_id(order_id);
     if context.market.con_id(instrument) == Some(0) && let Some(conn) = conn.as_mut() {
         look_up_order_contract(context, conn, hb, instrument);
     }
@@ -4977,6 +5005,106 @@ mod tests {
         let u = &updates[0];
         assert_eq!((u.order_id, u.status, u.filled_qty_fixed, u.remaining_qty_fixed, u.perm_id),
             (9, OrderStatus::ApiCancelled, 0, 3 * crate::types::QTY_SCALE, 0));
+    }
+
+    /// The 161 notices of one global cancel after `setup`, and the
+    /// context after it.
+    fn global_cancel_notices(setup: impl FnOnce(&mut Context)) -> (Vec<(i64, i64)>, Context) {
+        let mut context = Context::new();
+        context.order_ids.start_at(FIRST as i32);
+        context.market.register(265598);
+        context.api_client_id = 7;
+        setup(&mut context);
+        context.pending_orders.push(OrderRequest::GlobalCancel);
+        let shared = Arc::new(SharedState::new());
+        let (conn, mut peer) = crate::test_support::Peer::pair();
+        let mut conn = Some(conn);
+        drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+        assert!(peer.messages().is_empty(), "nothing is sent for an ended order");
+        assert!(shared.orders.drain_order_errors().is_empty());
+        (shared.orders.drain_order_notices().into_iter().map(|n| (n.0, n.1)).collect(), context)
+    }
+
+    fn ended(parent: OrderId, oca_group: &str) -> crate::engine::context::BookEntry {
+        crate::engine::context::BookEntry { parent, oca_group: oca_group.to_string(), ..Default::default() }
+    }
+
+    // ibx#545, paper 09/10/2026: a global cancel answers 161 for a
+    // cancelled order the reference's book still holds (seen 6 and 7 s
+    // after the cancel, not 17 s after), with the order's permId.
+    #[test]
+    fn global_cancel_answers_161_for_an_order_cancelled_just_before() {
+        let (notices, mut context) = global_cancel_notices(|ctx| {
+            ctx.insert_order(Order::new(61, 0, Side::Buy, 1, 100, b'2', b'0', 0));
+            ctx.bind_server_id(61, 7061);
+            ctx.finish_order(61, OrderStatus::Cancelled);
+            // A filled order is not kept by this rule.
+            ctx.insert_order(Order::new(62, 0, Side::Buy, 1, 100, b'2', b'0', 0));
+            ctx.finish_order(62, OrderStatus::Filled);
+        });
+        assert_eq!(notices, [(61, 161)]);
+        let kept = context.ended_orders(Instant::now());
+        assert_eq!(kept.iter().map(|e| (e.order_id, e.server_id)).collect::<Vec<_>>(), [(61, 7061)]);
+        let until = kept[0].until.unwrap();
+        assert!(until <= Instant::now() + crate::engine::context::CANCELLED_ORDER_KEPT);
+        // Its time over, it is out of the book: nothing.
+        assert!(context.ended_orders(until).is_empty());
+        let (notices, _) = global_cancel_notices(|ctx| {
+            ctx.keep_ended(61, 7061, ended(0, ""), Some(Instant::now()));
+        });
+        assert!(notices.is_empty());
+    }
+
+    // ibx#545, the reference's run of 09/10/2026 (cases of ibx#509): a
+    // held order ended by the global cancel, then 161 for the ended
+    // orders of the book in the book's order, a child last. 37347 had
+    // been cancelled 7 s before; the three others were never sent and
+    // got 161 again at the next global cancel.
+    #[test]
+    fn global_cancel_answers_161_in_the_books_order() {
+        let setup = |ctx: &mut Context| {
+            ctx.keep_ended(37333, 1219931939, ended(0, ""), None);
+            ctx.keep_ended(37334, 1219931940, ended(37333, ""), None);
+            ctx.keep_ended(37342, 1219931948, ended(0, ""), None);
+            ctx.keep_ended(37347, 1219931953, ended(0, ""), Some(Instant::now() + std::time::Duration::from_secs(3)));
+        };
+        let (notices, mut context) = global_cancel_notices(|ctx| {
+            setup(ctx);
+            ctx.unsent.insert(37348, (0, crate::types::QTY_SCALE, 0));
+            ctx.bind_server_id(37348, 1219931954);
+        });
+        assert_eq!(notices, [(37348, 202), (37348, 161), (37333, 161), (37347, 161), (37342, 161), (37334, 161)]);
+        // The next one: the order that was never sent is still there.
+        context.ended.retain(|e| e.order_id != 37347);
+        let kept = context.ended.clone();
+        let (notices, _) = global_cancel_notices(|ctx| ctx.ended = kept);
+        assert_eq!(notices, [(37348, 161), (37333, 161), (37342, 161), (37334, 161)]);
+    }
+
+    // ibx#545, the reference's run of 09/10/2026 (cases of ibx#547): a
+    // bracket cancelled through its parent 5 s before. 161 for the parent
+    // and for the first child of the book; the other child is of the same
+    // OCA group. An ended parent does not stand for its children.
+    #[test]
+    fn global_cancel_answers_161_for_one_child_of_an_ended_bracket() {
+        let (notices, _) = global_cancel_notices(|ctx| {
+            let soon = Some(Instant::now() + std::time::Duration::from_secs(5));
+            ctx.keep_ended(39086, 771315648, ended(0, ""), None);
+            ctx.keep_ended(39092, 771315653, ended(0, ""), soon);
+            ctx.keep_ended(39093, 771315654, ended(39092, "771315653"), soon);
+            ctx.keep_ended(39094, 771315655, ended(39092, "771315653"), soon);
+        });
+        assert_eq!(notices, [(39086, 161), (39092, 161), (39094, 161)]);
+    }
+
+    // An ended order of another client gives nothing to this one.
+    #[test]
+    fn global_cancel_gives_no_161_for_an_ended_order_of_another_client() {
+        let (notices, _) = global_cancel_notices(|ctx| {
+            let entry = crate::engine::context::BookEntry { owner: Some(3), ..Default::default() };
+            ctx.keep_ended(71, 7071, entry, None);
+        });
+        assert!(notices.is_empty());
     }
 
     // An order of another session kept under its API order id: its

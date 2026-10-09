@@ -636,6 +636,55 @@ fn bracket_with_transmit_off(paper: &mut Paper, id: i64) {
     paper.check(ended, "bracket with transmit off: the parent's cancel ends the three");
 }
 
+/// ibx#545 (the reference on paper, 09/10/2026): a global cancel answers
+/// 161 for an order cancelled a few seconds before, and for an order that
+/// was never sent each time; once its time in the reference's book is
+/// over, the cancelled order gets none.
+fn global_cancel_after_ended_orders(paper: &mut Paper, id: i64) {
+    println!("  global cancel after ended orders (orders {}, {})", id, id + 1);
+    // An order id below the highest one used is refused: the held order first.
+    let (held, sent) = (id, id + 1);
+    let order = |transmit: bool| Order {
+        action: "BUY".into(), order_type: "LMT".into(), total_quantity: 1.0, lmt_price: 100.0,
+        tif: "DAY".into(), transmit, ..Default::default()
+    };
+    let refusals = |s: &State, from: usize| -> Vec<i64> {
+        // The orders of this step only: the global cancel also ends the
+        // orders the steps before left working.
+        s.errors[from..].iter().filter(|(i, c, _)| *c == 161 && (id..id + 2).contains(i)).map(|(i, ..)| *i).collect()
+    };
+    // Held, then cancelled: an order that was never sent.
+    paper.place(held, &order(false));
+    paper.pump(2, |_| false);
+    let _ = paper.client.cancel_order(held, "");
+    paper.pump(10, |s| refusals(s, 0).contains(&held));
+    // Sent, working, cancelled.
+    paper.place(sent, &order(true));
+    let is_working = paper.wait_working(&[sent]);
+    paper.check(is_working, "global cancel after ended orders: the order is working");
+    let _ = paper.client.cancel_order(sent, "");
+    let cancelled = paper.pump(15, |s| last_status(s, sent).as_deref() == Some("Cancelled"));
+    let at = Instant::now();
+    paper.check(cancelled, "global cancel after ended orders: the order is cancelled");
+
+    paper.pump(3, |_| false);
+    let from = paper.state.lock().unwrap().errors.len();
+    let _ = paper.client.req_global_cancel();
+    paper.pump(3, |_| false);
+    let mut got = refusals(&paper.state.lock().unwrap(), from);
+    got.sort_unstable();
+    paper.check(got == [held, sent], &format!("global cancel 3 s after: 161 for both ended orders ({:?})", got));
+
+    while at.elapsed() < Duration::from_secs(12) {
+        paper.pump(1, |_| false);
+    }
+    let from = paper.state.lock().unwrap().errors.len();
+    let _ = paper.client.req_global_cancel();
+    paper.pump(3, |_| false);
+    let got = refusals(&paper.state.lock().unwrap(), from);
+    paper.check(got == [held], &format!("global cancel 12 s after: 161 for the order that was never sent only ({:?})", got));
+}
+
 /// ibx#328: every new order carries the contract id after the secondary
 /// routing field, as the reference does (ib-agent#192 B4).
 fn contract_id_on_new_orders(paper: &mut Paper) {
@@ -680,6 +729,7 @@ fn order_paths_paper() {
     contract_id_on_new_orders(&mut paper);
     order_by_symbol(&mut paper, base + 600);
     bracket_with_transmit_off(&mut paper, base + 700);
+    global_cancel_after_ended_orders(&mut paper, base + 800);
 
     println!("  cleanup: cancelling every order still working");
     // A modified order is placed twice under one id: cancel it once.
