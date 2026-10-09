@@ -1486,7 +1486,9 @@ pub const TAG_MATCH_ALT_SECURITY_TYPE: u32 = 310;
 /// A single matching symbol result (ibx#439).
 #[derive(Debug, Clone)]
 pub struct SymbolMatch {
-    /// -1 when the row has no conId, as the reference.
+    /// 0 when the row has no conId: the reference leaves the id out of its
+    /// answer for such a row, and the official client library then shows 0
+    /// (ibx#527; -1 is the value of the older text form of the answer).
     pub con_id: i64,
     pub symbol: String,
     /// The API text ("STK", "BOND", ...); a type the engine does not know
@@ -1559,7 +1561,7 @@ pub fn parse_matching_symbols_response(data: &[u8]) -> Option<Vec<SymbolMatch>> 
     if sub_protocol != "186" { return None; }
 
     // Each row starts at its symbol, as the reference: rows without a
-    // conId are kept with -1, the security type is the first type field
+    // conId are kept with 0 (ibx#527), the security type is the first type field
     // else the alternative one (ibx#439). A row whose conId is not a number
     // is skipped, as the reference skips a row it cannot convert.
     struct Row<'a> {
@@ -1572,7 +1574,7 @@ pub fn parse_matching_symbols_response(data: &[u8]) -> Option<Vec<SymbolMatch>> 
         let mut m = row.m;
         m.sec_type = api_sec_type(row.sec_type.or(row.alt_sec_type).unwrap_or(""));
         m.con_id = match row.con_id {
-            None => -1,
+            None => 0,
             Some(v) => match v.parse() {
                 Ok(id) => id,
                 Err(_) => {
@@ -1593,7 +1595,7 @@ pub fn parse_matching_symbols_response(data: &[u8]) -> Option<Vec<SymbolMatch>> 
             }
             current = Some(Row {
                 m: SymbolMatch {
-                    con_id: -1,
+                    con_id: 0,
                     symbol: val.clone(),
                     sec_type: String::new(),
                     currency: String::new(),
@@ -2201,8 +2203,9 @@ pub(crate) mod tests {
         assert_eq!(m[0].issuer_id, "");
         // A bond row: empty symbol, type from the alternative field, issuer id.
         assert_eq!((m[1].symbol.as_str(), m[1].sec_type.as_str(), m[1].issuer_id.as_str()), ("", "BOND", "e1393444"));
-        // No conId: kept with -1.
-        assert_eq!((m[2].con_id, m[2].sec_type.as_str()), (-1, "CASH"));
+        // No conId: 0, as a client of the reference reads it (ibx#527: the
+        // nine bond issuer rows of "IBM", recorded 02/10/2026, have no id).
+        assert_eq!((m[2].con_id, m[2].sec_type.as_str()), (0, "CASH"));
         // A type the engine does not know is kept as received.
         assert_eq!(m[3].sec_type, "FUND");
         // The wire stock code is given in its API form.
