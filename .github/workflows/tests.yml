@@ -62,6 +62,9 @@ jobs:
           python -m venv .venv
           . .venv/bin/activate
           pip install --quiet maturin pytest
+          # The official client library: the comparison report takes its
+          # argument names and unset values. Same release as the recordings.
+          pip install --quiet "ibapi @ git+https://github.com/deepentropy/ibapi.git@v10.47.01"
           maturin develop --locked
 
       - name: Run the Python tests (live tests skipped)
