@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crossbeam_channel::{SendError, Sender, TrySendError};
 
+use crate::bridge::CommandClock;
 use crate::types::ControlCommand;
 
 /// The socket of a connection, as the system's wait call takes it.
@@ -102,18 +103,20 @@ impl Waker {
 pub struct ControlSender {
     tx: Sender<ControlCommand>,
     waker: Option<Arc<Waker>>,
+    /// Counts the commands sent, for the order of the answers (ibx#529).
+    clock: Option<Arc<CommandClock>>,
 }
 
 impl ControlSender {
-    pub(crate) fn new(tx: Sender<ControlCommand>, waker: Option<Arc<Waker>>) -> Self {
-        Self { tx, waker }
+    pub(crate) fn new(tx: Sender<ControlCommand>, waker: Option<Arc<Waker>>, clock: Option<Arc<CommandClock>>) -> Self {
+        Self { tx, waker, clock }
     }
 
     /// As `Sender::send`.
     #[inline]
     pub fn send(&self, cmd: ControlCommand) -> Result<(), SendError<ControlCommand>> {
         let sent = self.tx.send(cmd);
-        self.wake();
+        self.sent(sent.is_ok());
         sent
     }
 
@@ -121,8 +124,17 @@ impl ControlSender {
     #[inline]
     pub fn try_send(&self, cmd: ControlCommand) -> Result<(), TrySendError<ControlCommand>> {
         let sent = self.tx.try_send(cmd);
-        self.wake();
+        self.sent(sent.is_ok());
         sent
+    }
+
+    /// Count the command and end the engine's wait.
+    #[inline]
+    fn sent(&self, ok: bool) {
+        if let (true, Some(clock)) = (ok, &self.clock) {
+            clock.note_sent();
+        }
+        self.wake();
     }
 
     /// As `Sender::send_timeout`.
@@ -130,7 +142,7 @@ impl ControlSender {
         &self, cmd: ControlCommand, timeout: std::time::Duration,
     ) -> Result<(), crossbeam_channel::SendTimeoutError<ControlCommand>> {
         let sent = self.tx.send_timeout(cmd, timeout);
-        self.wake();
+        self.sent(sent.is_ok());
         sent
     }
 
@@ -146,7 +158,7 @@ impl ControlSender {
 /// loop on a thread (tests), or a channel read by something else.
 impl From<Sender<ControlCommand>> for ControlSender {
     fn from(tx: Sender<ControlCommand>) -> Self {
-        Self { tx, waker: None }
+        Self { tx, waker: None, clock: None }
     }
 }
 
@@ -195,7 +207,7 @@ mod tests {
     fn parker() -> (Parker, ControlSender, crossbeam_channel::Receiver<ControlCommand>) {
         let waker = Arc::new(Waker::new().unwrap());
         let (tx, rx) = crossbeam_channel::bounded(8);
-        (Parker::new(Some(waker.clone())), ControlSender::new(tx, Some(waker)), rx)
+        (Parker::new(Some(waker.clone())), ControlSender::new(tx, Some(waker), None), rx)
     }
 
     #[test]

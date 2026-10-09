@@ -12,6 +12,7 @@
 
 use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
 use std::collections::HashMap;
 use crate::control::historical::{HistoricalBar, HistoricalResponse, HeadTimestampResponse};
@@ -105,12 +106,21 @@ struct ErrorTap {
     /// engine or by the thread of the caller (a request refused locally),
     /// and the second has no pass of the engine behind it (ibx#530).
     notifier: std::sync::OnceLock<Arc<Notifier>>,
+    /// Keeps an error written by the thread of the caller behind the
+    /// answers to the requests made before it (ibx#529).
+    clock: std::sync::OnceLock<Arc<CommandClock>>,
 }
 
 impl ErrorTap {
-    /// The event of an error, built only when a channel is attached.
+    /// The event of an error, built only when a channel is attached. Called
+    /// before the error goes to its queue: an error written by the thread
+    /// of the caller first lets the engine answer the requests sent before
+    /// it, so the answers come in the order of the requests (ibx#529).
     #[inline]
     fn event(&self, req_id: i64, code: i64, message: &str) -> Option<Event> {
+        if let Some(clock) = self.clock.get() {
+            clock.wait_for_earlier_commands();
+        }
         self.events.get().map(|_| Event::Error { req_id, code, message: message.to_string() })
     }
 
@@ -133,6 +143,87 @@ impl ErrorTap {
 
     fn wakes(&self, notifier: &Arc<Notifier>) {
         let _ = self.notifier.set(notifier.clone());
+    }
+
+    fn follows(&self, clock: &Arc<CommandClock>) {
+        let _ = self.clock.set(clock.clone());
+    }
+}
+
+thread_local! {
+    /// This thread runs the loop of an engine.
+    static ON_ENGINE_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The commands sent to the engine and those it has handled, counted
+/// (ibx#529). The reference answers the requests of a client in the order
+/// they were made. Here a request refused locally is answered by the thread
+/// of the caller and the others by the engine: the first waits until the
+/// engine has handled every command sent before it.
+#[derive(Default)]
+pub struct CommandClock {
+    sent: AtomicU64,
+    handled: AtomicU64,
+    /// The loop of the engine runs on its thread.
+    running: AtomicBool,
+}
+
+impl CommandClock {
+    /// Longest wait for the engine. Past it the error is written anyway: an
+    /// answer late is better than a caller held.
+    const LIMIT: std::time::Duration = std::time::Duration::from_millis(20);
+
+    /// A command went to the engine.
+    #[inline]
+    pub(crate) fn note_sent(&self) {
+        self.sent.fetch_add(1, Ordering::Release);
+    }
+
+    /// The engine handled `count` commands, their answers written.
+    #[inline]
+    pub(crate) fn note_handled(&self, count: u64) {
+        if count > 0 {
+            self.handled.fetch_add(count, Ordering::Release);
+        }
+    }
+
+    /// The calling thread starts (`true`) or ends (`false`) the loop of the
+    /// engine.
+    pub(crate) fn set_running(&self, on: bool) {
+        ON_ENGINE_THREAD.with(|flag| flag.set(on));
+        self.running.store(on, Ordering::Release);
+    }
+
+    /// Wait until the engine has handled the commands sent so far. At once
+    /// on the thread of the engine, with no engine running, and with
+    /// nothing waiting, which is the usual case.
+    #[inline]
+    fn wait_for_earlier_commands(&self) {
+        let target = self.sent.load(Ordering::Acquire);
+        if self.handled.load(Ordering::Acquire) >= target || !self.running.load(Ordering::Acquire) {
+            return;
+        }
+        self.wait_until_handled(target);
+    }
+
+    #[cold]
+    fn wait_until_handled(&self, target: u64) {
+        if ON_ENGINE_THREAD.with(|flag| flag.get()) {
+            return;
+        }
+        let deadline = Instant::now() + Self::LIMIT;
+        loop {
+            for _ in 0..64 {
+                if self.handled.load(Ordering::Acquire) >= target || !self.running.load(Ordering::Acquire) {
+                    return;
+                }
+                std::hint::spin_loop();
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
+            std::thread::yield_now();
+        }
     }
 }
 
@@ -2086,6 +2177,8 @@ pub struct SharedState {
     error_tap: ErrorTap,
     /// Notifier for waking consumers (e.g. Python event loop) when data arrives.
     notifier: Arc<Notifier>,
+    /// Commands sent to the engine and handled by it (ibx#529).
+    clock: Arc<CommandClock>,
 }
 
 impl SharedState {
@@ -2100,11 +2193,19 @@ impl SharedState {
             connection_notices: Mutex::new(Vec::new()),
             error_tap: ErrorTap::default(),
             notifier: Arc::new(Notifier::default()),
+            clock: Arc::new(CommandClock::default()),
         };
         for tap in [&shared.market.error_tap, &shared.orders.error_tap, &shared.reference.error_tap, &shared.error_tap] {
             tap.wakes(&shared.notifier);
+            tap.follows(&shared.clock);
         }
         shared
+    }
+
+    /// The count of the commands sent to the engine and handled by it.
+    #[doc(hidden)]
+    pub fn command_clock(&self) -> &Arc<CommandClock> {
+        &self.clock
     }
 
     /// Signal that the session is over. Hot-loop side (ibx#242).
@@ -2178,6 +2279,76 @@ impl SharedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An error written by the thread of a caller waits for the engine to
+    /// handle the commands sent before it, so the answers come in the
+    /// order of the requests (ibx#529).
+    #[test]
+    fn a_local_error_waits_for_the_commands_sent_before_it() {
+        let shared = Arc::new(SharedState::new());
+        let clock = shared.command_clock().clone();
+        clock.note_sent();
+        // The engine: it answers the command a little later.
+        let engine = {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                shared.command_clock().set_running(true);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                shared.reference.push_historical_error(1, 162, "cancelled".into());
+                shared.command_clock().note_handled(1);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                shared.command_clock().set_running(false);
+            })
+        };
+        while !clock.running.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        // The caller: refused locally, right after the command.
+        shared.reference.push_historical_error(2, 321, "refused".into());
+        let ids: Vec<i64> = shared.reference.drain_historical_errors().iter().map(|e| e.0).collect();
+        assert_eq!(ids, [1, 2], "the answer of the engine first");
+        engine.join().unwrap();
+    }
+
+    #[test]
+    fn a_local_error_does_not_wait_without_a_running_engine_or_with_nothing_sent() {
+        let shared = SharedState::new();
+        let clock = shared.command_clock();
+        let start = Instant::now();
+        // A command sent, no engine running (a client built by hand).
+        clock.note_sent();
+        shared.reference.push_historical_error(1, 321, "refused".into());
+        // An engine running, every command handled.
+        clock.note_handled(1);
+        clock.running.store(true, Ordering::Release);
+        shared.reference.push_historical_error(2, 321, "refused".into());
+        assert!(start.elapsed() < CommandClock::LIMIT / 2);
+        assert_eq!(shared.reference.drain_historical_errors().len(), 2);
+    }
+
+    #[test]
+    fn the_engine_does_not_wait_for_itself_and_a_caller_not_past_the_limit() {
+        let shared = SharedState::new();
+        let clock = shared.command_clock();
+        clock.note_sent();
+        // On the thread of the engine: at once, with a command unhandled.
+        clock.set_running(true);
+        let start = Instant::now();
+        shared.orders.push_order_error(1, 201, "rejected".into());
+        assert!(start.elapsed() < CommandClock::LIMIT / 2);
+        // On another thread, with an engine that never handles it: the
+        // error is written once the limit has passed.
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let start = Instant::now();
+                shared.orders.push_order_error(2, 110, "price".into());
+                assert!(start.elapsed() >= CommandClock::LIMIT);
+                assert!(start.elapsed() < CommandClock::LIMIT * 20);
+            });
+        });
+        clock.set_running(false);
+        assert_eq!(shared.orders.drain_order_errors().len(), 2);
+    }
 
     /// Every error queue gives its entries to an attached event channel,
     /// with the id and the code the queue holds, and nothing before a

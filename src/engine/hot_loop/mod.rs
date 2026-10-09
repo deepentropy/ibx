@@ -209,7 +209,7 @@ impl HotLoop {
         };
         self.parker = Parker::new(waker.clone());
         self.set_control_rx(rx);
-        ControlSender::new(tx, waker)
+        ControlSender::new(tx, waker, Some(self.shared.command_clock().clone()))
     }
 
     /// Set the account ID for order submission.
@@ -1248,6 +1248,16 @@ impl HotLoop {
         }
 
         self.running = true;
+        // From here to the end of the loop, also by a panic, the answers
+        // written by the callers wait for the commands before them (ibx#529).
+        struct Running(Arc<SharedState>);
+        impl Drop for Running {
+            fn drop(&mut self) {
+                self.0.command_clock().set_running(false);
+            }
+        }
+        self.shared.command_clock().set_running(true);
+        let _running = Running(self.shared.clone());
         for conn in [&mut self.farm_conn, &mut self.ccp_conn, &mut self.hmds_conn].into_iter().flatten() {
             conn.set_queued_writes(true);
         }
@@ -1526,12 +1536,14 @@ impl HotLoop {
 
         self.cmd_buf.clear();
         self.cmd_buf.extend(rx.try_iter());
+        // Told once their answers are written (ibx#529).
+        let mut taken = self.cmd_buf.len() as u64;
 
         // try_iter() stops on both Empty and Disconnected — do one extra
         // try_recv() to distinguish.  If a straggler command arrived between
         // try_iter() finishing and this call, push it into the batch.
         let sender_dropped = match rx.try_recv() {
-            Ok(cmd)  => { self.cmd_buf.push(cmd); false }
+            Ok(cmd)  => { self.cmd_buf.push(cmd); taken += 1; false }
             Err(crossbeam_channel::TryRecvError::Empty)        => false,
             Err(crossbeam_channel::TryRecvError::Disconnected) => true,
         };
@@ -1983,6 +1995,7 @@ impl HotLoop {
                 }
             }
         }
+        self.shared.command_clock().note_handled(taken);
 
         // All senders dropped — treat as implicit shutdown.
         if sender_dropped && self.running {
