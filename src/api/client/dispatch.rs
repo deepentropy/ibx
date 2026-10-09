@@ -106,6 +106,8 @@ impl EClient {
             // The order id the reference shows for the order.
             let shown = self.shared.orders.api_order_id(fill.order_id);
             exec.order_id = shown;
+            // The contract in full, on the exchange of the execution (ibx#543).
+            let c = self.core.execution_contract(&self.shared, fill.order_id, c, &exec.exchange);
             // A combo's report shows the combo or the leg (ibx#470).
             let mut c = c;
             ClientCore::apply_combo_exec(&fill_exec, &mut c, &mut exec);
@@ -124,6 +126,7 @@ impl EClient {
             // (ibx#473).
             let mut view = self.core.order_view(fill.order_id, &self.shared, status);
             ClientCore::report_client(&mut view, &fill_exec);
+            ClientCore::report_filled(&mut view, filled_f);
             let client_id = match &view {
                 Some(view) => {
                     wrapper.open_order(shown, &view.contract, &view.order, &view.state);

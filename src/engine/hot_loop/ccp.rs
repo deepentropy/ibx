@@ -833,13 +833,15 @@ impl CcpState {
             log::debug!("Commission report for {} skipped: already reported", exec_id);
             return;
         }
-        let unset_when_zero = |v: Option<f64>| v.filter(|x| *x != 0.0).unwrap_or(f64::MAX);
+        // No realized P&L and no yield are 0, as the reference gives them
+        // (ibx#543: 14 and 24 reports of the order scenarios of 09/10/2026).
+        let unset_when_zero = |v: Option<f64>| v.unwrap_or(0.0);
         let report = api::CommissionAndFeesReport {
             exec_id: exec_id.clone(),
             commission_and_fees: commission.unwrap_or(0.0),
             currency: parsed.get(&6381).cloned().unwrap_or_default(),
             realized_pnl: unset_when_zero(parsed.get(&6099).and_then(|s| s.parse().ok())),
-            yield_amount: parsed.get(&236).and_then(|s| s.parse().ok()).unwrap_or(f64::MAX),
+            yield_amount: parsed.get(&236).and_then(|s| s.parse().ok()).unwrap_or(0.0),
             yield_redemption_date: parsed.get(&696).filter(|s| s.len() == 8).cloned().unwrap_or_default(),
         };
         log::info!("Commission report: exec={} commission={} {}", report.exec_id, report.commission_and_fees, report.currency);
@@ -4101,8 +4103,9 @@ mod tests {
         assert_eq!(r.exec_id, "0000e0d5.6ab5f36f.01.01");
         assert_eq!(r.commission_and_fees, 1.0003);
         assert_eq!(r.currency, "USD");
-        assert_eq!(r.realized_pnl, f64::MAX, "a realized P&L of 0 is sent as unset");
-        assert_eq!(r.yield_amount, f64::MAX);
+        // 0 when the report has none, as the reference gives them (ibx#543).
+        assert_eq!(r.realized_pnl, 0.0);
+        assert_eq!(r.yield_amount, 0.0);
         assert_eq!(r.yield_redemption_date, "");
     }
 

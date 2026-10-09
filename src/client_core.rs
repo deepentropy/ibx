@@ -1596,6 +1596,8 @@ pub fn reported_unset_values(order: &mut ApiOrder) {
     if order.reference_price_type == i32::MAX { order.reference_price_type = 0; }
     order.dont_use_auto_price_for_hedge = true;
     order.filled_quantity = aux_or_zero(order.filled_quantity);
+    // No cash quantity is unset, never 0 (ibx#543).
+    if order.cash_qty == 0.0 { order.cash_qty = f64::MAX; }
 }
 
 /// The shareholder text of every order the reference shows.
@@ -2703,6 +2705,31 @@ impl ClientCore {
     }
 
     /// Look up a contract: merge local cache with shared reference for richest data.
+    /// The contract execDetails shows for an execution of `order_id`
+    /// (ibx#543, the order scenarios of 09/10/2026 on both sides): the
+    /// contract of the order with its conId, local symbol and trading
+    /// class, also for an order placed by symbol, on the exchange of the
+    /// execution (`venue`), not the exchange the order was routed through.
+    /// A combo is shown by its own rule (`apply_combo_exec`).
+    pub fn execution_contract(&self, shared: &SharedState, order_id: OrderId, mut contract: ApiContract, venue: &str) -> ApiContract {
+        if contract.sec_type.eq_ignore_ascii_case("BAG") {
+            return contract;
+        }
+        let reported = shared.orders.get_order_info(order_id).map(|i| i.contract);
+        if contract.con_id == 0 {
+            contract.con_id = reported.as_ref().map_or(0, |r| r.con_id);
+        }
+        let known = (contract.con_id != 0).then(|| self.get_contract(contract.con_id, shared)).flatten();
+        for full in [known, reported].into_iter().flatten().filter(|f| f.con_id == contract.con_id) {
+            if contract.local_symbol.is_empty() { contract.local_symbol = full.local_symbol; }
+            if contract.trading_class.is_empty() { contract.trading_class = full.trading_class; }
+        }
+        if !venue.is_empty() {
+            contract.exchange = venue.to_string();
+        }
+        contract
+    }
+
     pub fn get_contract(&self, con_id: i64, shared: &SharedState) -> Option<ApiContract> {
         let local = self.contract_cache.lock().unwrap().get(&con_id).cloned();
         let shared_ref = shared.reference.get_contract(con_id);
@@ -3587,9 +3614,21 @@ impl ClientCore {
         }
     }
 
+    /// The view of an order at one of its fills shows the quantity filled
+    /// with that fill (ibx#543).
+    pub fn report_filled(view: &mut Option<OrderView>, filled: f64) {
+        if let Some(v) = view.as_mut() {
+            v.order.filled_quantity = filled;
+        }
+    }
+
     pub fn order_view(&self, order_id: OrderId, shared: &SharedState, status: &str) -> Option<OrderView> {
         let tracked = self.open_orders.lock().unwrap().get(&order_id).cloned();
         let info = shared.orders.get_order_info(order_id);
+        // The quantity filled so far, from the fills this client saw or
+        // from the server's report.
+        let tracked_fill = [tracked.as_ref().map(|t| t.filled), info.as_ref().map(|i| i.order.filled_quantity)]
+            .into_iter().flatten().filter(|q| *q != f64::MAX && *q > 0.0).reduce(f64::max);
         // The conId of the report, for an order placed without one: the
         // reference shows the contract it looked up (ibx#486).
         let reported_con_id = info.as_ref().map_or(0, |i| i.contract.con_id);
@@ -3657,6 +3696,26 @@ impl ClientCore {
         placed_contract(&mut contract, &placed_exchange);
         let mut order = order;
         reported_unset_values(&mut order);
+        // What the reference's openOrder shows, read on both sides in the
+        // order scenarios of 09/10/2026 (ibx#543):
+        // - the quantity filled so far, on a working and on a filled order;
+        // - no completed status or time: those belong to completedOrder;
+        // - no commission while none is known (unset, not 0);
+        // - no auxPrice for an order that trails by a percentage.
+        if let Some(t) = &tracked_fill {
+            order.filled_quantity = order.filled_quantity.max(*t);
+        }
+        state.completed_status.clear();
+        state.completed_time.clear();
+        if state.commission_and_fees == 0.0 {
+            state.commission_and_fees = f64::MAX;
+        }
+        if order.order_type.to_ascii_uppercase().starts_with("TRAIL")
+            && order.trailing_percent != f64::MAX && order.trailing_percent != 0.0
+            && order.aux_price == 0.0
+        {
+            order.aux_price = f64::MAX;
+        }
         Self::apply_combo_view(order_id, &mut contract, &mut order, shared);
         // The API order id the reference shows (0 for an order of another
         // session whose report gave none).
@@ -7135,6 +7194,28 @@ mod tests {
 #[cfg(test)]
 mod session_tests {
     use super::*;
+
+    // ibx#543, the order scenarios of 09/10/2026 on both sides: execDetails
+    // shows the contract in full, also for an order placed by symbol, on
+    // the exchange of the execution.
+    #[test]
+    fn the_contract_of_an_execution_is_complete_and_on_the_exchange_of_the_fill() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        core.cache_contract(265598, ApiContract {
+            con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+            currency: "USD".into(), local_symbol: "AAPL".into(), trading_class: "NMS".into(), ..Default::default()
+        });
+        let placed = ApiContract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+        let shown = core.execution_contract(&shared, 7, placed.clone(), "IBKRATS");
+        assert_eq!((shown.con_id, shown.local_symbol.as_str(), shown.trading_class.as_str(), shown.exchange.as_str()),
+            (265598, "AAPL", "NMS", "IBKRATS"));
+        // No exchange on the execution: the contract keeps its own.
+        assert_eq!(core.execution_contract(&shared, 7, placed, "").exchange, "SMART");
+        // A combo is shown by its own rule.
+        let bag = ApiContract { sec_type: "BAG".into(), exchange: "SMART".into(), ..Default::default() };
+        assert_eq!(core.execution_contract(&shared, 7, bag, "ARCA").exchange, "SMART");
+    }
+
 
     // ibx#426: the level the reference answers a current client.
     #[test]

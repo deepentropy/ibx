@@ -122,6 +122,8 @@ class RecordingWrapper(EWrapper):
             "maint_margin_after": s.maint_margin_after,
             "equity_with_loan_after": s.equity_with_loan_after,
             "commission_and_fees": s.commission_and_fees,
+            "completed_status": s.completed_status,
+            "completed_time": s.completed_time,
             # ibapi-iso extension fields
             "margin_currency": s.margin_currency,
             "init_margin_after_outside_rth": s.init_margin_after_outside_rth,
@@ -613,6 +615,62 @@ class TestReqOpenOrdersOrderState:
         assert state["init_margin_after"] == ""
         # Unset, as the reference's openOrder and the official API's default.
         assert state["commission_and_fees"] == sys.float_info.max
+
+
+class TestOpenOrderValues:
+    """ibx#543: values of the order callbacks read on the reference and on ibx in the order scenarios of
+    09/10/2026."""
+
+    def _placed(self, conditions=None, order_type="LMT", **more):
+        from ibx import Contract, Order
+        w, c = make_test_client()
+        c._test_seed_instrument(756733, 0)
+        contract = Contract()
+        contract.con_id, contract.symbol, contract.sec_type, contract.exchange, contract.currency = 756733, "SPY", "STK", "SMART", "USD"
+        order = Order()
+        order.action, order.total_quantity, order.order_type, order.lmt_price, order.tif = "BUY", 100, order_type, 10.0, "GTC"
+        for k, v in more.items():
+            setattr(order, k, v)
+        if conditions is not None:
+            order.conditions = conditions
+        c.place_order(42, contract, order)
+        return w, c
+
+    def _last_open_order(self, w):
+        return [e for e in w.events if e[0] == "open_order"][-1]
+
+    def test_a_filled_order_shows_what_was_filled_and_no_completed_fields(self):
+        w, c = self._placed()
+        c._test_set_instrument_count(1)
+        c._test_push_fill(0, order_id=42, side="BUY", price=10.0, qty=40, remaining=60)
+        c._test_dispatch_once()
+        _, _, _, order, state = self._last_open_order(w)
+        assert float(order.filled_quantity) == 40.0
+        # The whole order in one fill (the helper gives each fill as the order's total so far).
+        w, c = self._placed()
+        c._test_set_instrument_count(1)
+        c._test_push_fill(0, order_id=42, side="BUY", price=10.0, qty=100, remaining=0)
+        c._test_dispatch_once()
+        _, _, contract, order, state = self._last_open_order(w)
+        assert state["status"] == "Filled" and float(order.filled_quantity) == 100.0
+        assert (state["completed_status"], state["completed_time"]) == ("", ""), "those are for completedOrder"
+        assert order.cash_qty == sys.float_info.max
+
+    def test_no_commission_is_unset_in_open_order(self):
+        w, c = self._placed()
+        c._test_push_order_update(42, 0, "Submitted", 0, 100)
+        c._test_dispatch_once()
+        state = self._last_open_order(w)[4]
+        assert state["commission_and_fees"] == sys.float_info.max
+
+    def test_open_order_shows_the_conditions_of_the_order(self):
+        w, c = self._placed(conditions=[TimeCondition(True, "20991231-23:59:59"), PriceCondition()])
+        c.req_open_orders()
+        order = self._last_open_order(w)[3]
+        first, second = order.conditions
+        assert (type(first).__name__, first.isMore, first.time, first.condType) == ("TimeCondition", True, "20991231-23:59:59", 3)
+        assert first.isConjunctionConnection is True
+        assert type(second).__name__ == "PriceCondition"
 
 
 class TestReqCompletedOrdersOrderState:

@@ -259,6 +259,8 @@ impl EClient {
             // The order id the reference shows for the order.
             let shown = shared.orders.api_order_id(fill.order_id);
             api_exec.order_id = shown;
+            // The contract in full, on the exchange of the execution (ibx#543).
+            let api_contract = self.core.execution_contract(shared, fill.order_id, api_contract, &api_exec.exchange);
             // A combo's report shows the combo or the leg (ibx#470).
             let mut api_contract = api_contract;
             crate::client_core::ClientCore::apply_combo_exec(&fill_exec, &mut api_contract, &mut api_exec);
@@ -305,6 +307,7 @@ impl EClient {
             // 30/09/2026 on a stock and a combo fill).
             let mut view = self.core.order_view(fill.order_id, shared, status);
             crate::client_core::ClientCore::report_client(&mut view, &fill_exec);
+            crate::client_core::ClientCore::report_filled(&mut view, cum_qty);
             let client_id = match &view {
                 Some(view) => {
                     self.send_open_order(py, shown, view)?;
