@@ -1524,6 +1524,20 @@ pub fn build_matching_symbols_request(pattern: &str, req_id: &str, seq: u32) -> 
 /// Parse a matching symbols response.
 ///
 /// Uses sequential tag parsing since matches are a repeating group.
+/// The derivative types of a matching symbol in the reference's order. The
+/// server lists them by name (BAG, CFD, IOPT, OPT, WAR); the reference
+/// keeps them in a set and gives them in that set's order, which is the same
+/// on every answer recorded (ibx#524, 140 answers with types of 02/10/2026
+/// and 08/10/2026, no pair seen in both orders): CFD, OPT, IOPT, WAR, FUT,
+/// BAG, and FOP before FUT. FOP was only seen with FUT and BAG: its place
+/// against the first four is not known. A type not in this list keeps the
+/// server's order, after the others.
+pub fn derivative_types_as_reference(mut types: Vec<String>) -> Vec<String> {
+    const ORDER: [&str; 7] = ["CFD", "OPT", "IOPT", "WAR", "FOP", "FUT", "BAG"];
+    types.sort_by_key(|t| ORDER.iter().position(|o| o == t).unwrap_or(ORDER.len()));
+    types
+}
+
 pub fn parse_matching_symbols_response(data: &[u8]) -> Option<Vec<SymbolMatch>> {
     use crate::protocol::fix::SOH;
 
@@ -1604,7 +1618,9 @@ pub fn parse_matching_symbols_response(data: &[u8]) -> Option<Vec<SymbolMatch>> 
             TAG_MATCH_DESCRIPTION => row.m.description = val.clone(),
             TAG_MATCH_ISSUER_ID => row.m.issuer_id = val.clone(),
             TAG_MATCH_DERIVATIVE_TYPES => {
-                row.m.derivative_types = val.split(',').map(|s| s.to_string()).collect();
+                // An empty value is no type, not one empty type.
+                row.m.derivative_types = derivative_types_as_reference(
+                    val.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect());
             }
             _ => {}
         }
@@ -2175,7 +2191,13 @@ pub(crate) mod tests {
         assert_eq!((m[0].con_id, m[0].symbol.as_str(), m[0].sec_type.as_str()), (272093, "MSFT", "STK"));
         assert_eq!((m[0].primary_exchange.as_str(), m[0].currency.as_str()), ("NASDAQ", "USD"));
         assert_eq!(m[0].description, "MICROSOFT CORP");
-        assert_eq!(m[0].derivative_types, ["BAG", "CFD", "IOPT", "OPT", "WAR"]);
+        // The server's BAG,CFD,IOPT,OPT,WAR in the reference's order (ibx#524).
+        assert_eq!(m[0].derivative_types, ["CFD", "OPT", "IOPT", "WAR", "BAG"]);
+        let order = |t: &[&str]| derivative_types_as_reference(t.iter().map(|s| s.to_string()).collect());
+        assert_eq!(order(&["BAG", "FOP", "FUT"]), ["FOP", "FUT", "BAG"]);
+        assert_eq!(order(&["BAG", "CFD", "FUT", "IOPT"]), ["CFD", "IOPT", "FUT", "BAG"]);
+        assert_eq!(order(&["BAG", "XYZ", "ABC", "OPT"]), ["OPT", "BAG", "XYZ", "ABC"]);
+        assert!(order(&[]).is_empty());
         assert_eq!(m[0].issuer_id, "");
         // A bond row: empty symbol, type from the alternative field, issuer id.
         assert_eq!((m[1].symbol.as_str(), m[1].sec_type.as_str(), m[1].issuer_id.as_str()), ("", "BOND", "e1393444"));

@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 
 use super::EClient;
-use super::super::contract::{Contract, NewsProviderPy, SmartComponentPy, SoftDollarTierPy, WshEventDataPy};
+use super::super::contract::{Contract, NewsProviderPy, SoftDollarTierPy, WshEventDataPy};
 
 impl EClient {
     /// The smart_components callback, or the error of the request.
@@ -20,14 +20,11 @@ impl EClient {
                 return Ok(());
             }
         };
+        // The map of the official client library: bit number to the pair
+        // (exchange, exchange letter) (ibx#524).
         let map = pyo3::types::PyDict::new(py);
         for c in sc.iter() {
-            let obj = SmartComponentPy {
-                bit_number: c.bit_number,
-                exchange: c.exchange.clone(),
-                exchange_letter: c.exchange_letter.clone(),
-            };
-            map.set_item(c.bit_number, Py::new(py, obj)?)?;
+            map.set_item(c.bit_number, (c.exchange.as_str(), c.exchange_letter.as_str()))?;
         }
         self.wrapper.call_method1(py, "smart_components", (req_id, map.as_any()))?;
         Ok(())
