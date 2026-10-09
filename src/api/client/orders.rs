@@ -19,7 +19,52 @@ impl EClient {
         // Validate order params and contract before registering instrument (fail fast).
         ClientCore::validate_order(order)?;
         ClientCore::validate_order_contract(&contract.sec_type)?;
+        // Transmit off: the order is held (ibx#509). A what-if with
+        // transmit off is refused with 321 below.
+        if !order.transmit && !order.what_if {
+            return self.hold_order(order_id, contract, order);
+        }
+        if order.what_if {
+            return self.send_order(order_id, contract, order);
+        }
+        // Transmit on: the order goes out with the held orders of its tree.
+        for (id, contract, order) in self.core.orders_to_transmit(order_id, contract, order) {
+            self.send_order(id, &contract, &order)?;
+        }
+        Ok(())
+    }
 
+    /// An order placed with transmit off (ibx#509): nothing is sent but the
+    /// lookup of a contract given without a conId, and nothing is answered.
+    /// A working order placed again with transmit off stays as it is
+    /// (paper 09/10/2026).
+    fn hold_order(&self, oid: i64, contract: &Contract, order: &Order) -> Result<(), String> {
+        if self.core.working_order(&self.shared, oid).is_some() {
+            return Ok(());
+        }
+        let refusal = ClientCore::order_id_refusal(oid)
+            .or_else(|| self.core.refusal_for_order_id(oid, order, &self.shared));
+        if let Some((code, message)) = refusal {
+            self.shared.orders.push_order_error(oid, code, message);
+            return Ok(());
+        }
+        let instrument = if contract.sec_type.eq_ignore_ascii_case("BAG") { 0 } else {
+            self.core.order_instrument(
+                &self.control_tx, oid, false,
+                contract.con_id, &contract.symbol, &contract.exchange, &contract.sec_type, &contract.currency,
+            )?
+        };
+        self.send(ControlCommand::HoldOrder {
+            order_id: oid, instrument,
+            qty: (order.total_quantity * crate::types::QTY_SCALE as f64).round() as crate::types::Qty,
+            parent_id: order.parent_id,
+        })?;
+        self.core.hold_order(oid, contract.clone(), order.clone(), instrument);
+        Ok(())
+    }
+
+    /// Send one order: a new order, or the change of a working one.
+    fn send_order(&self, order_id: i64, contract: &Contract, order: &Order) -> Result<(), String> {
         // The id as given: the reference refuses 0 with 10149 below.
         let oid = order_id;
 
@@ -109,6 +154,7 @@ impl EClient {
     /// Cancel an order. Matches `cancelOrder` in C++.
     pub fn cancel_order(&self, order_id: i64, _manual_order_cancel_time: &str) -> Result<(), String> {
         if !ClientCore::ids_fit("cancel_order", &[order_id]) { return Ok(()); }
+        self.core.drop_held_order(order_id);
         self.send(ControlCommand::Order(OrderRequest::Cancel {
             order_id,
         }))
@@ -140,6 +186,7 @@ impl EClient {
     /// the account the session knows, those of other clients and of
     /// earlier sessions too, as the reference cancels them.
     pub fn req_global_cancel(&self) -> Result<(), String> {
+        self.core.drop_held_orders();
         self.send(ControlCommand::Order(OrderRequest::GlobalCancel))
     }
 

@@ -617,6 +617,48 @@ class TestReqOpenOrdersOrderState:
         assert state["commission_and_fees"] == sys.float_info.max
 
 
+class TestTransmitOff:
+    """ibx#509: an order placed with transmit off is held, with no answer, and goes out with its tree (the
+    bracket recordings of 26/09/2026 and the paper run of the reference of 09/10/2026)."""
+
+    def _order(self, action, price, transmit, parent_id=0):
+        from ibx import Order
+        order = Order()
+        order.action, order.total_quantity, order.order_type, order.lmt_price, order.tif = action, 1, "LMT", price, "DAY"
+        order.transmit, order.parent_id = transmit, parent_id
+        return order
+
+    def _client(self):
+        from ibx import Contract
+        w, c = make_test_client()
+        c._test_seed_instrument(756733, 0)
+        c._test_set_instrument_count(1)
+        contract = Contract()
+        contract.con_id, contract.symbol, contract.sec_type, contract.exchange, contract.currency = 756733, "SPY", "STK", "SMART", "USD"
+        return w, c, contract
+
+    def test_a_held_order_is_not_refused_and_is_listed_nowhere(self):
+        w, c, contract = self._client()
+        c.place_order(3, contract, self._order("BUY", 10.0, False))
+        c.place_order(4, contract, self._order("SELL", 20.0, False, 3))
+        c._test_dispatch_once()
+        c.req_open_orders()
+        c._test_dispatch_once()
+        assert [e[0] for e in w.events if e[0] in ("open_order", "order_status", "error")] == []
+        assert [e[0] for e in w.events if e[0] == "open_order_end"] == ["open_order_end"]
+
+    def test_the_last_order_of_a_bracket_sends_the_held_ones(self):
+        w, c, contract = self._client()
+        c.place_order(3, contract, self._order("BUY", 10.0, False))
+        c.place_order(4, contract, self._order("SELL", 20.0, False, 3))
+        c.place_order(5, contract, self._order("SELL", 5.0, True, 3))
+        for order_id in (3, 4, 5):
+            c._test_push_order_update(order_id, 0, "PreSubmitted", 0, 1)
+        c._test_dispatch_once()
+        shown = [(e[1], e[3].transmit) for e in w.events if e[0] == "open_order"]
+        assert shown == [(3, True), (4, True), (5, True)]
+
+
 class TestOpenOrderValues:
     """ibx#543: values of the order callbacks read on the reference and on ibx in the order scenarios of
     09/10/2026."""

@@ -502,6 +502,9 @@ pub fn at_their_effect(recs: &[Rec]) -> Vec<Rec> {
         }
     };
     let mut effect_of: HashMap<usize, usize> = HashMap::new();
+    // The orders placed with transmit off so far: the request that
+    // transmits them sends their messages, before its own.
+    let mut held: Vec<i64> = Vec::new();
     for (i, r) in recs.iter().enumerate() {
         if r.leg == "fix_out" && r.msg == "D"
             && let (Some(c), Some(id)) = (r.get(11), r.get(6121).and_then(|v| v.parse::<i64>().ok()))
@@ -509,6 +512,12 @@ pub fn at_their_effect(recs: &[Rec]) -> Vec<Rec> {
             by_base.insert(base(&c).to_string(), id);
         }
         if !(r.leg == "api_out" && matches!(r.msg.as_str(), "PLACE_ORDER" | "CANCEL_ORDER")) { continue; }
+        // An order placed with transmit off is held: its message goes out
+        // with a later request, so the request stays where it was made.
+        if r.request["order"]["transmit"].as_bool() == Some(false) {
+            held.extend(r.request["orderId"].as_i64());
+            continue;
+        }
         let Some(id) = r.request["orderId"].as_i64() else { continue };
         let mut scan = by_base.clone();
         for (j, e) in recs.iter().enumerate().skip(i + 1) {
@@ -518,12 +527,13 @@ pub fn at_their_effect(recs: &[Rec]) -> Vec<Rec> {
             {
                 scan.insert(base(&c).to_string(), oid);
             }
-            let sent = e.leg == "fix_out" && order_of(e, &scan) == Some(id);
+            let sent = e.leg == "fix_out" && order_of(e, &scan).is_some_and(|o| o == id || held.contains(&o));
             let refused = e.leg == "api_in" && e.callbacks.as_array().into_iter().flatten().any(|c| {
                 c[0] == "error" && c[1].as_i64() == Some(id) && !matches!(c[3].as_i64(), Some(399 | 201 | 202))
             });
             if sent || refused {
                 effect_of.insert(i, j);
+                if r.msg == "PLACE_ORDER" { held.clear(); }
                 break;
             }
         }
@@ -630,6 +640,16 @@ pub fn run(sc: &Scenario, opts: &Options, links: &mut Links, driver: &mut dyn Dr
     let line = |l: &String| (run.opts.mask)(&session_values(l, &now));
     run.out.ours = run.out.ours.iter().filter(|l| keep(l)).map(line).collect();
     run.out.theirs = run.out.theirs.iter().filter(|(_, l)| keep(l)).map(|(s, l)| (*s, line(l))).collect();
+    // A child order's OCA group is its parent's number: the reference's
+    // number read as ibx's number of the same order.
+    for (_, l) in run.out.theirs.iter_mut().filter(|(_, l)| l.starts_with("openOrder|")) {
+        for (theirs, mine) in &run.ids.order {
+            let group = format!(",ocaGroup={theirs},");
+            if l.contains(&group) {
+                *l = l.replace(&group, &format!(",ocaGroup={mine},"));
+            }
+        }
+    }
     run.out
 }
 
@@ -819,6 +839,16 @@ impl Run<'_> {
             };
             let mask_end = kd == HISTORICAL && msg_type(&gw) == "W" && self.no_end.pop_front().unwrap_or(false);
             let (mut a, mut b) = (ours.clone(), gw.clone());
+            // Another order named in the reference's message (a child's
+            // parent link and group) is read as ibx's id of that order.
+            if kd == ORDER {
+                self.pair_orders();
+                for (t, v) in b.iter_mut() {
+                    if matches!(t, 6107 | 583) && let Some(mine) = self.ids.order.get(base(v)) {
+                        *v = v.replacen(base(v), mine, 1);
+                    }
+                }
+            }
             (self.opts.frame_mask)(&mut a);
             (self.opts.frame_mask)(&mut b);
             let (a, b) = (normalised(kd, &a, mask_end), normalised(kd, &b, mask_end));

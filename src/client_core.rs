@@ -1275,6 +1275,9 @@ pub struct ClientCore {
 
     // Open order tracking
     pub open_orders: Mutex<HashMap<OrderId, TrackedOrder>>,
+    /// The orders placed with transmit off and not sent yet, oldest first
+    /// (ibx#509).
+    pub held_orders: Mutex<Vec<(OrderId, ApiContract, ApiOrder)>>,
     /// Open-order requests made while the auth link was lost, answered at
     /// the end of the order replay; one per kind, as the reference keeps
     /// one per request kind and client (ibx#251).
@@ -1731,6 +1734,7 @@ impl ClientCore {
             last_reports: Mutex::new(HashMap::new()),
             pending_commissions: Mutex::new(PendingCommissions::default()),
             open_orders: Mutex::new(HashMap::new()),
+            held_orders: Mutex::new(Vec::new()),
             held_open_orders: Mutex::new(Vec::new()),
             what_if_orders: Mutex::new(HashMap::new()),
             finished_orders: Mutex::new(HashSet::new()),
@@ -1789,6 +1793,7 @@ impl ClientCore {
         self.executions.lock().unwrap().clear();
         self.pending_commissions.lock().unwrap().clear();
         self.open_orders.lock().unwrap().clear();
+        self.held_orders.lock().unwrap().clear();
         self.what_if_orders.lock().unwrap().clear();
         // `finished_orders` and `highest_order_id` are kept: the server
         // still knows those orders after a reconnect, so their ids must not
@@ -3582,7 +3587,8 @@ impl ClientCore {
         order.tif = Self::held_tif(&order).to_string();
         self.note_order_id(order_id);
         let mut orders = self.open_orders.lock().unwrap();
-        if let Some(o) = orders.get_mut(&order_id) {
+        // An order that was never sent is placed as a new order.
+        if let Some(o) = orders.get_mut(&order_id).filter(|o| o.status != UNSENT_STATUS) {
             o.contract = contract;
             o.order = order;
             o.instrument = instrument;
@@ -3641,6 +3647,9 @@ impl ClientCore {
                 if let Some(i) = &info {
                     if order.perm_id == 0 { order.perm_id = i.order.perm_id; }
                     if order.account.is_empty() { order.account = i.order.account.clone(); }
+                    // The OCA group the order has on the server: a child
+                    // order shows its parent's number (ibx#509).
+                    if !i.order.oca_group.is_empty() { order.oca_group = i.order.oca_group.clone(); }
                     reported_trail_limit(&mut order, &i.order);
                 }
                 reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
@@ -4587,24 +4596,6 @@ impl ClientCore {
         // (SSHORTX, SELL LONG) fails here.
         if Self::action_known(&order.action) {
             order.side()?;
-        }
-
-        // transmit=false cannot be honoured: every order is sent to the
-        // broker immediately when place_order is called; there is no
-        // staging concept. Accepting it would send a "staged" bracket
-        // parent live on its own, so reject loudly at the call instead.
-        // See: https://github.com/deepentropy/ibx/issues/226
-        // A what-if with transmit off gets the reference's refusal 321
-        // instead (ibx#462).
-        if !order.transmit && !order.what_if {
-            return Err(
-                "transmit=false is not supported: orders are transmitted \
-                 immediately on place_order; there is no staging concept, so \
-                 the order would go live despite transmit=false. Place child \
-                 orders with parent_id/oca_group set and keep transmit=true \
-                 (the engine links them server-side)."
-                    .into(),
-            );
         }
 
         // An unrecognized tif would otherwise be sent as DAY silently.
@@ -5620,12 +5611,89 @@ impl ClientCore {
     /// the reference finds an order by its client id and order id, so that
     /// order is the order, and a placeOrder of its id changes it).
     pub fn working_order(&self, shared: &SharedState, order_id: OrderId) -> Option<ApiOrder> {
-        self.tracked_order(order_id).or_else(|| {
+        // An order that was never sent (held with transmit off, ibx#509,
+        // or refused before it left) is not a working order: placed again,
+        // it is a new order.
+        let tracked = self.open_orders.lock().unwrap().get(&order_id)
+            .map(|t| (t.status != UNSENT_STATUS).then(|| t.order.clone()));
+        if let Some(tracked) = tracked {
+            return tracked;
+        }
+        None.or_else(|| {
             let me = self.client_id.load(Ordering::Relaxed);
             shared.orders.get_order_info(order_id)
                 .filter(|info| is_open_status(&info.order_state.status) && i64::from(info.order.client_id) == me)
                 .map(|info| info.order)
         })
+    }
+
+    /// Keep an order placed with transmit off (ibx#509). The reference
+    /// (the bracket recordings of 26/09/2026; paper run of 09/10/2026)
+    /// sends nothing for it, answers nothing and lists it in no open-order
+    /// request; its id counts as used. Placed again with transmit off, it
+    /// takes the new values and keeps its place.
+    pub fn hold_order(&self, order_id: OrderId, contract: ApiContract, order: ApiOrder, instrument: InstrumentId) {
+        self.note_order_id(order_id);
+        let remaining = order.total_quantity;
+        self.open_orders.lock().unwrap().insert(order_id, TrackedOrder {
+            contract: contract.clone(), order: order.clone(), status: UNSENT_STATUS.into(), filled: 0.0, remaining,
+            instrument, last_fill_price: 0.0,
+        });
+        let mut held = self.held_orders.lock().unwrap();
+        match held.iter_mut().find(|h| h.0 == order_id) {
+            Some(h) => *h = (order_id, contract, order),
+            None => held.push((order_id, contract, order)),
+        }
+    }
+
+    /// Forget an order held with transmit off (at its cancel).
+    pub fn drop_held_order(&self, order_id: OrderId) {
+        self.held_orders.lock().unwrap().retain(|h| h.0 != order_id);
+    }
+
+    /// Forget every order held with transmit off (at a global cancel).
+    pub fn drop_held_orders(&self) {
+        self.held_orders.lock().unwrap().clear();
+    }
+
+    /// The orders a `placeOrder` with transmit on sends, in the order to
+    /// send them (ibx#509): the order itself and, with it, the held orders
+    /// of its tree of parent and children, as the reference sends them
+    /// together (26/09/2026: parent and take-profit held, the stop sends
+    /// the three; paper 09/10/2026: a child sends its held parent, a parent
+    /// its held children). The orders keep the place of their first
+    /// placeOrder, the placed order taking the place of its held version.
+    /// A held order with no link to the placed order stays held, also one
+    /// of the same OCA group.
+    pub fn orders_to_transmit(&self, order_id: OrderId, contract: &ApiContract, order: &ApiOrder) -> Vec<(OrderId, ApiContract, ApiOrder)> {
+        let mut held = self.held_orders.lock().unwrap();
+        let mut all = std::mem::take(&mut *held);
+        let placed = (order_id, contract.clone(), order.clone());
+        match all.iter_mut().find(|h| h.0 == order_id) {
+            Some(h) => *h = placed,
+            None => all.push(placed),
+        }
+        // The top of the tree: up the parents, as far as they are here.
+        let parent_of = |id: OrderId| all.iter().find(|h| h.0 == id).map(|h| h.2.parent_id).filter(|p| *p != 0);
+        let mut top = order_id;
+        for _ in 0..all.len() {
+            match parent_of(top) {
+                Some(parent) => top = parent,
+                None => break,
+            }
+        }
+        let mut tree: HashSet<OrderId> = HashSet::from([top]);
+        while let Some(id) = all.iter().find(|h| tree.contains(&h.2.parent_id) && !tree.contains(&h.0)).map(|h| h.0) {
+            tree.insert(id);
+        }
+        // The placed order is in its own tree unless its parents loop.
+        tree.insert(order_id);
+        let (mut group, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|h| tree.contains(&h.0));
+        *held = rest;
+        for h in &mut group {
+            h.2.transmit = true;
+        }
+        group
     }
 
     /// The contract a tracked order was placed with.

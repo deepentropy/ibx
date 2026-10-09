@@ -210,26 +210,21 @@ pub(crate) fn drain_and_send_orders(
         // Cancelled with nothing filled, 202 "Order was discarded", then
         // 161, the answer to a cancel of an order that cannot be cancelled.
         // A second cancel finds it cancelled (10148).
-        if let OrderRequest::Cancel { order_id } = &order_req
-            && let Some((instrument, qty, parent_id)) = context.unsent.remove(order_id)
-        {
-            let perm_id = context.new_server_id();
-            shared.orders.push_order_update(OrderUpdate {
-                order_id: *order_id,
-                instrument,
-                status: OrderStatus::Cancelled,
-                filled_qty_fixed: 0,
-                remaining_qty_fixed: qty,
-                avg_fill_price: 0,
-                perm_id,
-                parent_id,
-                timestamp_ns: context.now_ns(),
-            });
-            shared.orders.push_order_notice(*order_id, 202, "Order Canceled - reason:Order was discarded.".into());
-            shared.orders.push_order_notice(*order_id, 161,
-                format!("Cancel attempted when order is not in a cancellable state.  Order permId ={}", perm_id));
-            context.finish_unsent(*order_id, OrderStatus::Cancelled);
+        // An order held with transmit off ends the same way (ibx#509).
+        if let OrderRequest::Cancel { order_id } = &order_req && end_unsent(context, shared, *order_id) {
             continue;
+        }
+        // A new order under the id of one that was never sent (held with
+        // transmit off, now transmitted, ibx#509) is that order, on the
+        // contract its lookup found while it was held.
+        if !what_if && order_req.new_order_qty().is_some() {
+            for id in request_order_ids(&order_req) {
+                if let Some((held_on, ..)) = context.unsent.remove(&id)
+                    && let Some(instrument) = order_req.new_order_instrument_mut()
+                {
+                    *instrument = held_on;
+                }
+            }
         }
         if let OrderRequest::Cancel { order_id } = &order_req {
             if let Some((code, message)) = cancel_refusal(context, *order_id) {
@@ -1706,6 +1701,13 @@ fn global_cancel(
     hb: &mut HeartbeatState,
     shared: &Arc<SharedState>,
 ) {
+    // The orders that were never sent (held with transmit off, ibx#509)
+    // end as their own cancel ends them (paper 09/10/2026).
+    let mut unsent: Vec<OrderId> = context.unsent.keys().copied().collect();
+    unsent.sort_unstable();
+    for id in unsent {
+        end_unsent(context, shared, id);
+    }
     // The orders that wait (a what-if is not an order: it keeps waiting),
     // and those the reference kept pending.
     let parked = std::mem::take(&mut context.rth_parked);
@@ -2868,6 +2870,48 @@ pub(crate) fn sweep_rth_lookups(context: &mut Context) {
     release_rth_parked(context);
 }
 
+/// The end of an order that was never sent, at its cancel (ibx#542,
+/// ibx#509): orderStatus Cancelled with nothing filled, 202 "Order was
+/// discarded", then 161. False when `order_id` is not such an order.
+fn end_unsent(context: &mut Context, shared: &Arc<SharedState>, order_id: OrderId) -> bool {
+    let Some((instrument, qty, parent_id)) = context.unsent.remove(&order_id) else { return false };
+    let perm_id = context.new_server_id();
+    shared.orders.push_order_update(OrderUpdate {
+        order_id,
+        instrument,
+        status: OrderStatus::Cancelled,
+        filled_qty_fixed: 0,
+        remaining_qty_fixed: qty,
+        avg_fill_price: 0,
+        perm_id,
+        parent_id,
+        timestamp_ns: context.now_ns(),
+    });
+    shared.orders.push_order_notice(order_id, 202, "Order Canceled - reason:Order was discarded.".into());
+    shared.orders.push_order_notice(order_id, 161,
+        format!("Cancel attempted when order is not in a cancellable state.  Order permId ={}", perm_id));
+    context.finish_unsent(order_id, OrderStatus::Cancelled);
+    true
+}
+
+/// An order placed with transmit off (ibx#509; the bracket recordings of
+/// 26/09/2026 and the paper run of 09/10/2026): the reference sends
+/// nothing for it but the lookup of a contract given without a conId,
+/// lists it nowhere, and ends it at its cancel as an order that was never
+/// sent.
+pub(crate) fn hold_order(
+    conn: &mut Option<Connection>, context: &mut Context, hb: &mut HeartbeatState,
+    order_id: OrderId, instrument: crate::types::InstrumentId, qty: crate::types::Qty, parent_id: i64,
+) {
+    // Held again with new values: the order stays on the contract it has,
+    // which its lookup may have moved to another slot since.
+    let instrument = context.unsent.get(&order_id).map_or(instrument, |h| h.0);
+    context.unsent.insert(order_id, (instrument, qty, parent_id));
+    if context.market.con_id(instrument) == Some(0) && let Some(conn) = conn.as_mut() {
+        look_up_order_contract(context, conn, hb, instrument);
+    }
+}
+
 /// Request numbers of the contract lookups of orders (ibx#486): a range
 /// of their own, below the historical-data lookups (0xD000_0000).
 pub(crate) const ORDER_LOOKUP_FIRST_ID: u32 = 0xC000_0000;
@@ -2926,6 +2970,10 @@ pub(crate) fn order_contract_reply(context: &mut Context, shared: &SharedState, 
                         *i = known;
                     }
                 }
+                // An order held with transmit off takes it too (ibx#509).
+                for held in context.unsent.values_mut().filter(|h| h.0 == slot) {
+                    held.0 = known;
+                }
                 context.market.unregister(slot);
             }
             None => context.market.resolve_con_id(slot, con_id),
@@ -2943,7 +2991,11 @@ pub(crate) fn order_contract_reply(context: &mut Context, shared: &SharedState, 
                 context.api_pending.insert(oid, r);
             }
         }
-        context.market.unregister(slot);
+        // A held order keeps the slot: its contract is asked again when
+        // the order is transmitted, and refused then (ibx#509).
+        if !context.unsent.values().any(|h| h.0 == slot) {
+            context.market.unregister(slot);
+        }
     }
     release_rth_parked(context);
     true
@@ -5638,6 +5690,81 @@ mod tests {
         drain_frames(&mut context, &shared, &mut conn, &mut server);
         assert_eq!(shared.orders.drain_order_errors(),
             [(94, 10148, "OrderId 94 that needs to be cancelled cannot be cancelled, state: Cancelled.".to_string())]);
+    }
+
+    // ibx#509, paper 09/10/2026: an order held with transmit off sends
+    // nothing; its cancel, or a global cancel, ends it as an order that was
+    // never sent (Cancelled, 202 "Order was discarded", 161), and a second
+    // cancel finds it cancelled; sent as a new order, it is held no more.
+    #[test]
+    fn an_order_held_with_transmit_off_ends_at_its_cancel() {
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
+        let shared = Arc::new(SharedState::new());
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.set_symbol(0, "AAPL".to_string());
+        context.market.set_routing(0, "STK", "SMART");
+        let mut hb = HeartbeatState::new();
+        let one = crate::types::QTY_SCALE;
+        for id in [40, 41, 42] {
+            hold_order(&mut conn, &mut context, &mut hb, id, 0, one, if id == 41 { 40 } else { 0 });
+        }
+        assert!(drain_frames(&mut context, &shared, &mut conn, &mut server).is_empty(), "nothing sent");
+        assert!(shared.orders.drain_order_updates().is_empty() && shared.orders.drain_order_errors().is_empty());
+
+        // The cancel of a held child.
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 41 });
+        assert!(drain_frames(&mut context, &shared, &mut conn, &mut server).is_empty(), "nothing sent");
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.iter().map(|u| (u.order_id, u.status, u.remaining_qty_fixed, u.parent_id)).collect::<Vec<_>>(),
+            [(41, OrderStatus::Cancelled, one, 40)]);
+        let notices = shared.orders.drain_order_notices();
+        assert_eq!(notices.iter().map(|n| (n.0, n.1)).collect::<Vec<_>>(), [(41, 202), (41, 161)]);
+        assert_eq!(notices[0].2, "Order Canceled - reason:Order was discarded.");
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 41 });
+        drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(shared.orders.drain_order_errors(),
+            [(41, 10148, "OrderId 41 that needs to be cancelled cannot be cancelled, state: Cancelled.".to_string())]);
+
+        // Sent as a new order: no longer an order that was never sent.
+        context.pending_orders.push(OrderRequest::SubmitLimit { order_id: 40, instrument: 0, side: Side::Buy, qty: 1, price: px(100.0) });
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(frames.iter().filter(|f| tag(f, 35) == Some("D")).count(), 1);
+        assert!(!context.unsent.contains_key(&40));
+
+        // A held order by symbol: its lookup goes out at once; the answer
+        // names a contract the engine has, the order takes that slot and
+        // goes out on it when it is transmitted.
+        let slot = context.market.try_register_unresolved().unwrap();
+        context.set_symbol(slot, "AAPL".to_string());
+        context.market.set_routing(slot, "STK", "SMART");
+        hold_order(&mut conn, &mut context, &mut hb, 43, slot, one, 0);
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        let lookup = tag(&frames[0], 320).unwrap().to_string();
+        assert_eq!((frames.len(), tag(&frames[0], 35), tag(&frames[0], 55)), (1, Some("c"), Some("AAPL")));
+        let reply = format!("35=d|320={lookup}|322=*|323=4|55=AAPL|167=STK|6008=265598|");
+        assert!(order_contract_reply(&mut context, &shared, &lookup, reply.replace('|', "\x01").as_bytes()));
+        assert_eq!(context.unsent.get(&43).map(|h| h.0), Some(0), "the slot of the contract found");
+        // Held again with another quantity, under the slot it first had.
+        hold_order(&mut conn, &mut context, &mut hb, 43, slot, 2 * one, 0);
+        assert_eq!(context.unsent.get(&43), Some(&(0, 2 * one, 0)));
+        assert!(drain_frames(&mut context, &shared, &mut conn, &mut server).is_empty(), "no second lookup");
+        context.pending_orders.push(OrderRequest::SubmitLimit { order_id: 43, instrument: slot, side: Side::Buy, qty: 1, price: px(100.0) });
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        let sent: Vec<_> = frames.iter().filter(|f| tag(f, 35) == Some("D")).collect();
+        assert_eq!((sent.len(), tag(sent[0], 6121), tag(sent[0], 6008)), (1, Some("43"), Some("265598")));
+
+        // The global cancel ends the held order left.
+        shared.orders.drain_order_updates();
+        shared.orders.drain_order_notices();
+        context.pending_orders.push(OrderRequest::GlobalCancel);
+        drain_frames(&mut context, &shared, &mut conn, &mut server);
+        let ended: Vec<_> = shared.orders.drain_order_updates().into_iter()
+            .filter(|u| u.order_id == 42).map(|u| u.status).collect();
+        assert_eq!(ended, [OrderStatus::Cancelled]);
+        let notices: Vec<_> = shared.orders.drain_order_notices().into_iter().filter(|n| n.0 == 42).map(|n| n.1).collect();
+        assert_eq!(notices, [202, 161]);
     }
 
     // ibx#263: all-or-none is refused with 10257 and nothing is sent when

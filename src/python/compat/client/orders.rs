@@ -12,60 +12,66 @@ use crate::types::*;
 use super::{send_cmd, EClient};
 use super::super::contract::{Contract, Order, CommissionAndFeesReport, Execution};
 
-#[pymethods]
 impl EClient {
-    /// Place an order.
-    fn place_order(&self, py: Python<'_>, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
-        // Convert and validate order params first (fail fast, no connection needed)
-        let mut api_order = order.to_api();
-        // A condition that is not understood ends the request here (ibx#541).
-        api_order.conditions = order.convert_conditions(py)?;
-        api_order.order_combo_legs = order.convert_order_combo_legs(py);
-        // The contract with its combo legs (ibx#470).
-        let mut full_contract = contract.to_api();
-        full_contract.combo_legs = contract.convert_combo_legs(py);
-        // The reference's other names for an order type (ibx#469).
-        if let Some(name) = ClientCore::canonical_order_type(&api_order.order_type) {
-            api_order.order_type = name.to_string();
-        }
-        // GTX and NMIN go out as GTC, as the reference (ibx#307).
-        if let Some(name) = ClientCore::canonical_tif(&api_order.tif) {
-            api_order.tif = name.to_string();
-        }
-        ClientCore::validate_order(&api_order)
-            .map_err(|e| PyRuntimeError::new_err(e))?;
-        ClientCore::validate_order_contract(&contract.sec_type)
-            .map_err(|e| PyRuntimeError::new_err(e))?;
-        // After the checks above, which refuse an invalid order even with no
-        // connection (ibx#115).
-        if let Some(r) = self.not_connected(order_id) { return r; }
-        if !ClientCore::ids_fit("place_order", &[order_id, contract.con_id]) { return Ok(()); }
-
+    /// An order placed with transmit off (ibx#509): nothing is sent but the
+    /// lookup of a contract given without a conId, and nothing is answered.
+    /// A working order placed again with transmit off stays as it is
+    /// (paper 09/10/2026).
+    fn hold_order(&self, py: Python<'_>, oid: i64, contract: &ApiContract, order: &ApiOrder) -> PyResult<()> {
         let tx = self.tx()?;
+        let shared = self.shared_state()?;
+        if self.core.working_order(&shared, oid).is_some() {
+            return Ok(());
+        }
+        let refusal = ClientCore::order_id_refusal(oid)
+            .or_else(|| self.core.refusal_for_order_id(oid, order, &shared));
+        if let Some((code, message)) = refusal {
+            shared.orders.push_order_error(oid, code, message);
+            return Ok(());
+        }
+        let instrument = if contract.sec_type.eq_ignore_ascii_case("BAG") { 0 } else {
+            py.detach(|| self.core.order_instrument(&tx, oid, false, contract.con_id, &contract.symbol,
+                &contract.exchange, &contract.sec_type, &contract.currency)).map_err(PyRuntimeError::new_err)?
+        };
+        send_cmd(py, &tx, ControlCommand::HoldOrder {
+            order_id: oid, instrument,
+            qty: (order.total_quantity * crate::types::QTY_SCALE as f64).round() as crate::types::Qty,
+            parent_id: order.parent_id,
+        })?;
+        let mut held = order.clone();
+        held.order_id = oid;
+        self.core.hold_order(oid, contract.clone(), held, instrument);
+        Ok(())
+    }
+
+    /// Send one order: a new order, or the change of a working one.
+    fn send_order(&self, py: Python<'_>, order_id: i64, contract: &ApiContract, order: &ApiOrder) -> PyResult<()> {
+        let tx = self.tx()?;
+        let (api_order, full_contract) = (order, contract);
 
         // The id as given: the reference refuses 0 with 10149 below.
         let oid = order_id;
 
         // Warnings the reference sends while it reads the order (ibx#416).
         let shared = self.shared_state()?;
-        for (code, message) in ClientCore::implied_zone_warnings(&api_order) {
+        for (code, message) in ClientCore::implied_zone_warnings(api_order) {
             shared.orders.push_order_error(oid, code, message);
         }
         // Refused before sending, like the reference: error() only.
         let session_account = self.account_id.lock().unwrap().clone().unwrap_or_default();
         let contract_zone = shared.reference.time_zone_id(contract.con_id);
-        let account_pending = ClientCore::order_account_pending(&api_order, &shared.reference, &session_account);
+        let account_pending = ClientCore::order_account_pending(api_order, &shared.reference, &session_account);
         // The algo check's warnings come before its refusal (ibx#263).
         let mut algo_warnings = Vec::new();
-        let refusal = ClientCore::refusal_before_sending_for(&api_order, &contract.exchange, account_pending)
-            .or_else(|| ClientCore::algo_definition_refusal(&api_order, &contract.exchange, &shared.reference, &mut algo_warnings))
+        let refusal = ClientCore::refusal_before_sending_for(api_order, &contract.exchange, account_pending)
+            .or_else(|| ClientCore::algo_definition_refusal(api_order, &contract.exchange, &shared.reference, &mut algo_warnings))
             .or_else(|| ClientCore::account_config_refusal(
-                &api_order, shared.reference.account_features().as_deref(), &session_account))
-            .or_else(|| ClientCore::good_till_date_refusal(&api_order, contract_zone.as_deref()))
-            .or_else(|| ClientCore::condition_time_zone_refusal(&api_order, contract_zone.as_deref()))
-            .or_else(|| ClientCore::price_refusal(&api_order))
+                api_order, shared.reference.account_features().as_deref(), &session_account))
+            .or_else(|| ClientCore::good_till_date_refusal(api_order, contract_zone.as_deref()))
+            .or_else(|| ClientCore::condition_time_zone_refusal(api_order, contract_zone.as_deref()))
+            .or_else(|| ClientCore::price_refusal(api_order))
             .or_else(|| ClientCore::order_id_refusal(oid))
-            .or_else(|| self.core.refusal_for_order_id(oid, &api_order, &shared));
+            .or_else(|| self.core.refusal_for_order_id(oid, api_order, &shared));
         for (code, message) in algo_warnings {
             shared.orders.push_order_error(oid, code, message);
         }
@@ -75,7 +81,7 @@ impl EClient {
         }
         // A combo (BAG) order, read and checked as the reference reads it
         // (ibx#470).
-        let combo = match ClientCore::combo_order(&full_contract, &api_order, &shared.reference, &session_account) {
+        let combo = match ClientCore::combo_order(full_contract, api_order, &shared.reference, &session_account) {
             Ok(combo) => combo,
             Err((code, message)) => {
                 shared.orders.push_order_error(oid, code, message);
@@ -84,7 +90,7 @@ impl EClient {
         };
         // The condition times as the reference sends them (ibx#416); the
         // order is tracked as the caller placed it.
-        let sent = ClientCore::with_condition_times(&api_order);
+        let sent = ClientCore::with_condition_times(api_order);
 
         // A smart combo goes out on its currency's smart combo conId.
         let con_id = combo.as_ref().map(|c| c.smart_con_id).filter(|&c| c > 0).unwrap_or(contract.con_id);
@@ -94,7 +100,13 @@ impl EClient {
             py.detach(|| self.core.order_instrument(&tx, oid, api_order.what_if, con_id, &contract.symbol,
                 &contract.exchange, &contract.sec_type, &contract.currency)).map_err(PyRuntimeError::new_err)?
         } else {
-            self.find_or_register_con_id(py, con_id, contract)?
+            let known = self.core.con_id_to_instrument.lock().unwrap().get(&con_id).copied();
+            match known {
+                Some(id) => id,
+                None => py.detach(|| self.core.find_or_register_instrument(
+                    &tx, con_id, &contract.symbol, &contract.exchange, &contract.sec_type,
+                )).map_err(PyRuntimeError::new_err)?,
+            }
         };
         // A send only for a new currency, then with the interpreter lock
         // released (ibx#271).
@@ -108,7 +120,7 @@ impl EClient {
         let working = if api_order.what_if { None } else { self.core.working_order(&shared, oid) };
         if working.is_some() {
             let refusal = self.core.tracked_contract(oid)
-                .and_then(|placed| ClientCore::combo_modify_refusal(&full_contract, &placed));
+                .and_then(|placed| ClientCore::combo_modify_refusal(full_contract, &placed));
             if let Some((code, message)) = refusal {
                 shared.orders.push_order_error(oid, code, message);
                 return Ok(());
@@ -156,6 +168,51 @@ impl EClient {
 
         Ok(())
     }
+}
+
+#[pymethods]
+impl EClient {
+    /// Place an order.
+    fn place_order(&self, py: Python<'_>, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
+        // Convert and validate order params first (fail fast, no connection needed)
+        let mut api_order = order.to_api();
+        // A condition that is not understood ends the request here (ibx#541).
+        api_order.conditions = order.convert_conditions(py)?;
+        api_order.order_combo_legs = order.convert_order_combo_legs(py);
+        // The contract with its combo legs (ibx#470).
+        let mut full_contract = contract.to_api();
+        full_contract.combo_legs = contract.convert_combo_legs(py);
+        // The reference's other names for an order type (ibx#469).
+        if let Some(name) = ClientCore::canonical_order_type(&api_order.order_type) {
+            api_order.order_type = name.to_string();
+        }
+        // GTX and NMIN go out as GTC, as the reference (ibx#307).
+        if let Some(name) = ClientCore::canonical_tif(&api_order.tif) {
+            api_order.tif = name.to_string();
+        }
+        ClientCore::validate_order(&api_order)
+            .map_err(|e| PyRuntimeError::new_err(e))?;
+        ClientCore::validate_order_contract(&contract.sec_type)
+            .map_err(|e| PyRuntimeError::new_err(e))?;
+        // After the checks above, which refuse an invalid order even with no
+        // connection (ibx#115).
+        if let Some(r) = self.not_connected(order_id) { return r; }
+        if !ClientCore::ids_fit("place_order", &[order_id, contract.con_id]) { return Ok(()); }
+
+        // Transmit off: the order is held (ibx#509). A what-if with
+        // transmit off is refused with 321 by the checks of an order.
+        if !api_order.transmit && !api_order.what_if {
+            return self.hold_order(py, order_id, &full_contract, &api_order);
+        }
+        if api_order.what_if {
+            return self.send_order(py, order_id, &full_contract, &api_order);
+        }
+        // Transmit on: the order goes out with the held orders of its tree.
+        for (id, contract, order) in self.core.orders_to_transmit(order_id, &full_contract, &api_order) {
+            self.send_order(py, id, &contract, &order)?;
+        }
+        Ok(())
+    }
 
     /// Cancel an order.
     #[pyo3(signature = (order_id, manual_order_cancel_time=""))]
@@ -163,6 +220,7 @@ impl EClient {
         if let Some(r) = self.not_connected(-1) { return r; }
         if !ClientCore::ids_fit("cancel_order", &[order_id]) { return Ok(()); }
         let tx = self.tx()?;
+        self.core.drop_held_order(order_id);
         send_cmd(py, &tx, ControlCommand::Order(OrderRequest::Cancel { order_id }))?;
         let _ = manual_order_cancel_time;
         Ok(())
@@ -174,6 +232,7 @@ impl EClient {
     fn req_global_cancel(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
+        self.core.drop_held_orders();
         send_cmd(py, &tx, ControlCommand::Order(OrderRequest::GlobalCancel))
     }
 

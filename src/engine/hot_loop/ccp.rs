@@ -273,6 +273,17 @@ fn parent_order_id(parsed: &std::collections::HashMap<u32, String>, context: &Co
         .map_or(id, |(&order_id, _)| order_id)
 }
 
+/// The parent of a report's order: the report's parent link, or the
+/// parent the order is known to have when the report has no link (ibx#509:
+/// in the bracket recordings of 26/09/2026 some reports of a child carry
+/// no link, and the reference's orderStatus names the parent all the same).
+fn known_parent_id(parsed: &std::collections::HashMap<u32, String>, context: &Context, order_id: OrderId) -> i64 {
+    match parent_order_id(parsed, context) {
+        0 => context.book.get(&order_id).map_or(0, |e| e.parent),
+        parent => parent,
+    }
+}
+
 pub(crate) struct CcpState {
     /// The group of each account summary subscription, which its cancel
     /// restates (ibx#486).
@@ -1795,7 +1806,7 @@ impl CcpState {
         if report_status && !had_fill {
             if let Some(order) = context.order(clord_id).copied() {
                 let perm_id: i64 = perm_id_of(parsed);
-                let parent_id = parent_order_id(parsed, context);
+                let parent_id = known_parent_id(parsed, context, clord_id);
                 // Average fill price rides on status reports too (ibx#315).
                 let avg_px = parsed.get(&6).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 // Filled so far as the server counts it (tag 14): an order
@@ -1996,7 +2007,11 @@ impl CcpState {
                 tif: tif_str.to_string(),
                 account: if account.is_empty() { account_id.to_string() } else { account.clone() },
                 perm_id,
-                parent_id: parent_order_id(parsed, context),
+                parent_id: known_parent_id(parsed, context, clord_id),
+                // The OCA group the order has on the server, which the
+                // reference's openOrder shows: for a child, its parent's
+                // number (ibx#509, the bracket recordings of 26/09/2026).
+                oca_group: context.book.get(&clord_id).map(|e| e.oca_group.clone()).unwrap_or_default(),
                 // Filled so far, not the quantity still working (ibx#309).
                 filled_quantity: cum_qty,
                 outside_rth,

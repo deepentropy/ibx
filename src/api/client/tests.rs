@@ -727,19 +727,101 @@ fn place_order_empty_tif_stays_plain() {
         ControlCommand::Order(OrderRequest::SubmitStop { .. })));
 }
 
-// ── ibx#226: transmit=false must be rejected, not silently ignored ──
+// ── ibx#509: an order with transmit off is held, and sent with its tree ──
 
+/// The order ids of the new orders in `rx`, in the order sent, and the
+/// ids of the held ones.
+fn sent_and_held(rx: &crossbeam_channel::Receiver<ControlCommand>) -> (Vec<i64>, Vec<i64>) {
+    let (mut sent, mut held) = (Vec::new(), Vec::new());
+    while let Ok(cmd) = rx.try_recv() {
+        match cmd {
+            ControlCommand::Order(req) => sent.push(req.order_id()),
+            ControlCommand::HoldOrder { order_id, .. } => held.push(order_id),
+            _ => {}
+        }
+    }
+    (sent, held)
+}
+
+fn limit(action: &str, price: f64, transmit: bool, parent_id: i64) -> Order {
+    Order {
+        action: action.into(), total_quantity: 1.0, order_type: "LMT".into(), lmt_price: price,
+        transmit, parent_id, ..Default::default()
+    }
+}
+
+// The bracket recordings of 26/09/2026: parent and take-profit with
+// transmit off send nothing and answer nothing; the stop with transmit on
+// sends the three, in the order they were placed.
 #[test]
-fn place_order_transmit_false_is_rejected() {
+fn a_bracket_with_transmit_off_is_sent_together() {
     let (client, rx, shared) = test_client();
     shared.market.set_instrument_count(1);
-    let order = Order {
-        action: "BUY".into(), total_quantity: 1.0, order_type: "LMT".into(),
-        lmt_price: 100.0, transmit: false, ..Default::default()
-    };
-    let err = client.place_order(1, &spy(), &order).unwrap_err();
-    assert!(err.to_string().contains("transmit=false"), "got: {}", err);
-    assert!(rx.try_recv().is_err(), "nothing may reach the engine");
+    client.place_order(3, &spy(), &limit("BUY", 100.0, false, 0)).unwrap();
+    client.place_order(4, &spy(), &limit("SELL", 400.0, false, 3)).unwrap();
+    assert_eq!(sent_and_held(&rx), (vec![], vec![3, 4]));
+    assert!(shared.orders.drain_order_errors().is_empty());
+    assert!(client.core.collect_open_orders(&shared).is_empty(), "a held order is listed nowhere");
+    assert_eq!(client.core.next_valid_id(&shared), 5, "its id is used");
+
+    let stop = Order { order_type: "STP".into(), lmt_price: 0.0, aux_price: 50.0, ..limit("SELL", 0.0, true, 3) };
+    client.place_order(5, &spy(), &stop).unwrap();
+    assert_eq!(sent_and_held(&rx), (vec![3, 4, 5], vec![]));
+    assert!(client.core.held_orders.lock().unwrap().is_empty());
+    let open: Vec<i64> = client.core.collect_open_orders(&shared).into_iter().map(|(id, _)| id).collect();
+    assert_eq!(open.len(), 3, "{open:?}");
+    assert!(client.core.tracked_order(3).unwrap().transmit, "sent with transmit on");
+}
+
+// Paper 09/10/2026, the reference: a child with transmit on sends its
+// held parent; a parent placed again with transmit on goes out with its
+// new values and its held child; a held order with no link stays held,
+// also one of the same OCA group; placed again with transmit on, it is
+// sent with the new values.
+#[test]
+fn only_the_tree_of_the_placed_order_is_sent() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    // A held parent, an unrelated held order of an OCA group.
+    client.place_order(10, &spy(), &limit("BUY", 100.0, false, 0)).unwrap();
+    client.place_order(11, &spy(), &Order { oca_group: "g".into(), ..limit("BUY", 99.0, false, 0) }).unwrap();
+    client.place_order(12, &spy(), &limit("SELL", 400.0, true, 10)).unwrap();
+    assert_eq!(sent_and_held(&rx), (vec![10, 12], vec![10, 11]));
+    client.place_order(13, &spy(), &Order { oca_group: "g".into(), ..limit("BUY", 98.0, true, 0) }).unwrap();
+    assert_eq!(sent_and_held(&rx), (vec![13], vec![]));
+    // The held order placed again: off, then on.
+    client.place_order(11, &spy(), &limit("BUY", 97.0, false, 0)).unwrap();
+    client.place_order(11, &spy(), &limit("BUY", 96.0, true, 0)).unwrap();
+    assert_eq!(sent_and_held(&rx), (vec![11], vec![11]));
+    assert_eq!(client.core.tracked_order(11).unwrap().lmt_price, 96.0);
+
+    // A parent placed again with transmit on: its held child goes with it.
+    client.place_order(20, &spy(), &limit("BUY", 100.0, false, 0)).unwrap();
+    client.place_order(21, &spy(), &limit("SELL", 400.0, false, 20)).unwrap();
+    client.place_order(20, &spy(), &limit("BUY", 101.0, true, 0)).unwrap();
+    assert_eq!(sent_and_held(&rx), (vec![20, 21], vec![20, 21]));
+    assert_eq!(client.core.tracked_order(20).unwrap().lmt_price, 101.0);
+}
+
+// Paper 09/10/2026, the reference: a working order placed again with
+// transmit off stays as it is; the cancel of a held order goes to the
+// engine, which ends it, and the order is no longer held.
+#[test]
+fn a_working_order_with_transmit_off_is_left_and_a_held_order_can_be_cancelled() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    client.place_order(30, &spy(), &limit("BUY", 100.0, true, 0)).unwrap();
+    client.place_order(30, &spy(), &limit("BUY", 101.0, false, 0)).unwrap();
+    assert_eq!(sent_and_held(&rx), (vec![30], vec![]));
+    assert_eq!(client.core.tracked_order(30).unwrap().lmt_price, 100.0);
+
+    client.place_order(31, &spy(), &limit("BUY", 100.0, false, 0)).unwrap();
+    client.cancel_order(31, "").unwrap();
+    assert_eq!(sent_and_held(&rx), (vec![31], vec![31]), "the hold, then the cancel");
+    assert!(client.core.held_orders.lock().unwrap().is_empty());
+    client.place_order(32, &spy(), &limit("BUY", 100.0, false, 0)).unwrap();
+    client.req_global_cancel().unwrap();
+    assert!(client.core.held_orders.lock().unwrap().is_empty());
 }
 
 #[test]

@@ -1732,6 +1732,9 @@ impl HotLoop {
                 ControlCommand::Order(req) => {
                     self.context.pending_orders.push(req);
                 }
+                ControlCommand::HoldOrder { order_id, instrument, qty, parent_id } => {
+                    order_builder::hold_order(&mut self.ccp_conn, &mut self.context, &mut self.hb, order_id, instrument, qty, parent_id);
+                }
                 ControlCommand::RegisterInstrument { con_id, symbol, sec_type, exchange, reply_tx } => {
                     self.register_or_reject(con_id, symbol, &sec_type, &exchange, &reply_tx);
                 }

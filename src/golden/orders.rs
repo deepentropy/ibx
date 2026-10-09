@@ -158,6 +158,25 @@ pub(crate) fn replay_orders(fx: &Fixture) -> OrderReplay {
         }
     }
     s.settle();
+    // The reference's messages name another order (a child its parent, by
+    // the parent link and the group) by the reference's id of that order:
+    // read as ibx's id of the same order.
+    for (_, f) in theirs.iter_mut() {
+        for (t, v) in f.iter_mut() {
+            if matches!(t, 6107 | 583) && let Some(mine) = ids.get(base(v)) {
+                *v = v.replacen(base(v), mine, 1);
+            }
+        }
+    }
+    // The same in the callbacks: a child's OCA group is its parent's number.
+    for line in cb_theirs.iter_mut().filter(|l| l.starts_with("openOrder|")) {
+        for (theirs, mine) in &ids {
+            let group = format!(",ocaGroup={theirs},");
+            if line.contains(&group) {
+                *line = line.replace(&group, &format!(",ocaGroup={mine},"));
+            }
+        }
+    }
     let their_frames: Vec<Fields> = theirs.iter().map(|(_, f)| f.clone()).collect();
     let (kt, ko) = (keys(&their_frames), keys(&ours));
     let mut pairs: Vec<Pair> = Vec::new();
@@ -382,10 +401,9 @@ fn stp_first_open_order_limit_price() {
 
 // A bracket in the client library's form: parent and take-profit with
 // transmit off, the stop with transmit on; the reference holds the first
-// two and sends the three new orders together. ibx refuses transmit off
-// (ibx#226, ibx#509).
+// two and sends the three new orders together, the children naming their
+// parent, and so does ibx (ibx#509).
 #[test]
-#[ignore = "ibx#509: transmit=false orders are refused instead of held for the group"]
 fn bracket_with_transmit_off() {
     replay_and_compare("orders_bracket", all, KNOWN, &[]);
     replay_and_compare("orders_bracket_b", all, KNOWN, &[]);

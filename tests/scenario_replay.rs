@@ -204,7 +204,6 @@ fn directed_combo_without_definition_then_cancel() {
 // A bracket in the client library's form (26/09/2026): parent and
 // take-profit with transmit off, the stop with transmit on.
 #[test]
-#[ignore = "ibx#509: transmit=false orders are refused instead of held for the group"]
 fn bracket() {
     check("20260926/bracket", orders());
     check("20260926b/bracket", orders());
