@@ -4036,6 +4036,9 @@ impl ClientCore {
                     let mut order = o.order.clone();
                     if let Some(info) = &info {
                         reported_trail_limit(&mut order, &info.order);
+                        // The OCA group the order has on the server, as in
+                        // the order's own openOrder (ibx#509, ibx#547).
+                        if !info.order.oca_group.is_empty() { order.oca_group = info.order.oca_group.clone(); }
                     }
                     reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
                     let modified = self.modified_orders.lock().unwrap().contains(&oid);
@@ -5646,6 +5649,42 @@ impl ClientCore {
         }
     }
 
+    /// What the reference answers while it reads an order, before
+    /// anything is sent: the warnings, in their order, and the refusal if
+    /// one of its checks refuses the order (ibx#416, ibx#263, ibx#421,
+    /// ibx#335, ibx#462). Made at the placeOrder, also for an order placed
+    /// with transmit off, which is then not held (ibx#547, paper
+    /// 09/10/2026: 2174, 391, 439, 321 and 103 at the placeOrder with
+    /// transmit off).
+    pub fn order_read_checks(
+        &self, order_id: OrderId, con_id: i64, exchange: &str, order: &ApiOrder, shared: &SharedState, account: &str,
+    ) -> (Vec<(i64, String)>, Option<(i64, String)>) {
+        let mut notices = Self::implied_zone_warnings(order);
+        let contract_zone = shared.reference.time_zone_id(con_id);
+        let account_pending = Self::order_account_pending(order, &shared.reference, account);
+        // The algo check's warnings come before its refusal (ibx#263).
+        let mut algo_warnings = Vec::new();
+        let refusal = Self::refusal_before_sending_for(order, exchange, account_pending)
+            .or_else(|| Self::algo_definition_refusal(order, exchange, &shared.reference, &mut algo_warnings))
+            .or_else(|| Self::account_config_refusal(order, shared.reference.account_features().as_deref(), account))
+            .or_else(|| Self::good_till_date_refusal(order, contract_zone.as_deref()))
+            .or_else(|| Self::condition_time_zone_refusal(order, contract_zone.as_deref()))
+            .or_else(|| Self::price_refusal(order))
+            .or_else(|| Self::order_id_refusal(order_id))
+            .or_else(|| self.refusal_for_order_id(order_id, order, shared));
+        notices.extend(algo_warnings);
+        (notices, refusal)
+    }
+
+    /// The commands of the orders one placeOrder transmits, as one group
+    /// the engine sends together (ibx#547).
+    pub fn order_group(built: Vec<ControlCommand>) -> ControlCommand {
+        ControlCommand::OrderGroup(built.into_iter().filter_map(|cmd| match cmd {
+            ControlCommand::Order(request) => Some(request),
+            _ => None,
+        }).collect())
+    }
+
     /// Forget an order held with transmit off (at its cancel).
     pub fn drop_held_order(&self, order_id: OrderId) {
         self.held_orders.lock().unwrap().retain(|h| h.0 != order_id);
@@ -5665,13 +5704,17 @@ impl ClientCore {
     /// placeOrder, the placed order taking the place of its held version.
     /// A held order with no link to the placed order stays held, also one
     /// of the same OCA group.
-    pub fn orders_to_transmit(&self, order_id: OrderId, contract: &ApiContract, order: &ApiOrder) -> Vec<(OrderId, ApiContract, ApiOrder)> {
+    ///
+    /// With each order, whether it was held: the reference gave the
+    /// warnings of such an order when it was placed with transmit off, and
+    /// does not give them again (ibx#547, paper 09/10/2026).
+    pub fn orders_to_transmit(&self, order_id: OrderId, contract: &ApiContract, order: &ApiOrder) -> Vec<(OrderId, ApiContract, ApiOrder, bool)> {
         let mut held = self.held_orders.lock().unwrap();
-        let mut all = std::mem::take(&mut *held);
-        let placed = (order_id, contract.clone(), order.clone());
+        let mut all: Vec<(OrderId, ApiContract, ApiOrder, bool)> = std::mem::take(&mut *held).into_iter()
+            .map(|(id, contract, order)| (id, contract, order, true)).collect();
         match all.iter_mut().find(|h| h.0 == order_id) {
-            Some(h) => *h = placed,
-            None => all.push(placed),
+            Some(h) => *h = (order_id, contract.clone(), order.clone(), true),
+            None => all.push((order_id, contract.clone(), order.clone(), false)),
         }
         // The top of the tree: up the parents, as far as they are here.
         let parent_of = |id: OrderId| all.iter().find(|h| h.0 == id).map(|h| h.2.parent_id).filter(|p| *p != 0);
@@ -5689,7 +5732,7 @@ impl ClientCore {
         // The placed order is in its own tree unless its parents loop.
         tree.insert(order_id);
         let (mut group, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|h| tree.contains(&h.0));
-        *held = rest;
+        *held = rest.into_iter().map(|(id, contract, order, _)| (id, contract, order)).collect();
         for h in &mut group {
             h.2.transmit = true;
         }

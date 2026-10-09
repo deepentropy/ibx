@@ -223,6 +223,10 @@ pub struct Context {
     /// Requests with outside-RTH waiting for their lookup, in order; later
     /// requests of the same order wait behind them.
     pub(crate) rth_parked: Vec<OrderRequest>,
+    /// The orders of each group transmitted together that still waits for
+    /// a contract (ibx#547): order id and instrument. No order of a group
+    /// goes out before the contract of each is known.
+    pub(crate) order_groups: Vec<Vec<(OrderId, InstrumentId)>>,
     pub(crate) next_rth_lookup: u32,
     /// The session counts US stock sizes in round lots (ibx#287).
     pub(crate) scale_us_lots: bool,
@@ -323,6 +327,7 @@ impl Context {
             rth_types: HashMap::new(),
             rth_lookups: Vec::new(),
             rth_parked: Vec::new(),
+            order_groups: Vec::new(),
             next_rth_lookup: 0,
             what_ifs: HashMap::new(),
             what_if_send: None,

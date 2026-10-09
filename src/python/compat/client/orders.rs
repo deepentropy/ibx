@@ -23,9 +23,16 @@ impl EClient {
         if self.core.working_order(&shared, oid).is_some() {
             return Ok(());
         }
-        let refusal = ClientCore::order_id_refusal(oid)
-            .or_else(|| self.core.refusal_for_order_id(oid, order, &shared));
-        if let Some((code, message)) = refusal {
+        // The order is read and checked now, as the reference does; one
+        // that is refused is not held (ibx#547).
+        let session_account = self.account_id.lock().unwrap().clone().unwrap_or_default();
+        let (notices, refusal) = self.core.order_read_checks(
+            oid, contract.con_id, &contract.exchange, order, &shared, &session_account);
+        let combo = ClientCore::combo_order(contract, order, &shared.reference, &session_account);
+        for (code, message) in notices {
+            shared.orders.push_order_error(oid, code, message);
+        }
+        if let Some((code, message)) = refusal.or(combo.err()) {
             shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }
@@ -45,35 +52,24 @@ impl EClient {
     }
 
     /// Send one order: a new order, or the change of a working one.
-    fn send_order(&self, py: Python<'_>, order_id: i64, contract: &ApiContract, order: &ApiOrder) -> PyResult<()> {
+    fn send_order(&self, py: Python<'_>, order_id: i64, contract: &ApiContract, order: &ApiOrder, was_held: bool, built: &mut Vec<ControlCommand>) -> PyResult<()> {
         let tx = self.tx()?;
         let (api_order, full_contract) = (order, contract);
 
         // The id as given: the reference refuses 0 with 10149 below.
         let oid = order_id;
 
-        // Warnings the reference sends while it reads the order (ibx#416).
+        // The warnings and the refusal of the order as it is read; the
+        // warnings of an order that was held were given when it was placed
+        // with transmit off (ibx#547).
         let shared = self.shared_state()?;
-        for (code, message) in ClientCore::implied_zone_warnings(api_order) {
-            shared.orders.push_order_error(oid, code, message);
-        }
-        // Refused before sending, like the reference: error() only.
         let session_account = self.account_id.lock().unwrap().clone().unwrap_or_default();
-        let contract_zone = shared.reference.time_zone_id(contract.con_id);
-        let account_pending = ClientCore::order_account_pending(api_order, &shared.reference, &session_account);
-        // The algo check's warnings come before its refusal (ibx#263).
-        let mut algo_warnings = Vec::new();
-        let refusal = ClientCore::refusal_before_sending_for(api_order, &contract.exchange, account_pending)
-            .or_else(|| ClientCore::algo_definition_refusal(api_order, &contract.exchange, &shared.reference, &mut algo_warnings))
-            .or_else(|| ClientCore::account_config_refusal(
-                api_order, shared.reference.account_features().as_deref(), &session_account))
-            .or_else(|| ClientCore::good_till_date_refusal(api_order, contract_zone.as_deref()))
-            .or_else(|| ClientCore::condition_time_zone_refusal(api_order, contract_zone.as_deref()))
-            .or_else(|| ClientCore::price_refusal(api_order))
-            .or_else(|| ClientCore::order_id_refusal(oid))
-            .or_else(|| self.core.refusal_for_order_id(oid, api_order, &shared));
-        for (code, message) in algo_warnings {
-            shared.orders.push_order_error(oid, code, message);
+        let (notices, refusal) = self.core.order_read_checks(
+            oid, contract.con_id, &contract.exchange, api_order, &shared, &session_account);
+        if !was_held {
+            for (code, message) in notices {
+                shared.orders.push_order_error(oid, code, message);
+            }
         }
         if let Some((code, message)) = refusal {
             shared.orders.push_order_error(oid, code, message);
@@ -145,7 +141,7 @@ impl EClient {
             ClientCore::build_order_request(&sent, oid, instrument)
                 .map_err(|e| PyRuntimeError::new_err(e))?
         };
-        send_cmd(py, &tx, cmd)?;
+        built.push(cmd);
 
         // Track order in shared core
         let api_contract = ApiContract {
@@ -204,14 +200,29 @@ impl EClient {
         if !api_order.transmit && !api_order.what_if {
             return self.hold_order(py, order_id, &full_contract, &api_order);
         }
+        let tx = self.tx()?;
+        let mut built = Vec::new();
         if api_order.what_if {
-            return self.send_order(py, order_id, &full_contract, &api_order);
+            self.send_order(py, order_id, &full_contract, &api_order, false, &mut built)?;
+        } else {
+            // Transmit on: the order goes out with the held orders of its
+            // tree, together (ibx#547). An order that fails ends the list;
+            // the ones before it go.
+            for (id, contract, order, was_held) in self.core.orders_to_transmit(order_id, &full_contract, &api_order) {
+                if let Err(e) = self.send_order(py, id, &contract, &order, was_held, &mut built) {
+                    if built.len() > 1 {
+                        send_cmd(py, &tx, ClientCore::order_group(built))?;
+                    } else if let Some(cmd) = built.pop() {
+                        send_cmd(py, &tx, cmd)?;
+                    }
+                    return Err(e);
+                }
+            }
         }
-        // Transmit on: the order goes out with the held orders of its tree.
-        for (id, contract, order) in self.core.orders_to_transmit(order_id, &full_contract, &api_order) {
-            self.send_order(py, id, &contract, &order)?;
+        if built.len() > 1 {
+            return send_cmd(py, &tx, ClientCore::order_group(built));
         }
-        Ok(())
+        built.pop().map_or(Ok(()), |cmd| send_cmd(py, &tx, cmd))
     }
 
     /// Cancel an order.

@@ -24,14 +24,30 @@ impl EClient {
         if !order.transmit && !order.what_if {
             return self.hold_order(order_id, contract, order);
         }
+        let mut built = Vec::new();
         if order.what_if {
-            return self.send_order(order_id, contract, order);
+            self.send_order(order_id, contract, order, false, &mut built)?;
+            return self.send_built(built);
         }
-        // Transmit on: the order goes out with the held orders of its tree.
-        for (id, contract, order) in self.core.orders_to_transmit(order_id, contract, order) {
-            self.send_order(id, &contract, &order)?;
+        // Transmit on: the order goes out with the held orders of its tree,
+        // together (ibx#547). An order that fails ends the list; the ones
+        // before it go.
+        let mut result = Ok(());
+        for (id, contract, order, was_held) in self.core.orders_to_transmit(order_id, contract, order) {
+            result = self.send_order(id, &contract, &order, was_held, &mut built);
+            if result.is_err() { break; }
         }
-        Ok(())
+        self.send_built(built)?;
+        result
+    }
+
+    /// Send the commands of one placeOrder: one as it is, several new
+    /// orders as a group the engine sends together (ibx#547).
+    fn send_built(&self, mut built: Vec<ControlCommand>) -> Result<(), String> {
+        if built.len() < 2 {
+            return built.pop().map_or(Ok(()), |cmd| self.send(cmd));
+        }
+        self.send(ClientCore::order_group(built))
     }
 
     /// An order placed with transmit off (ibx#509): nothing is sent but the
@@ -42,9 +58,15 @@ impl EClient {
         if self.core.working_order(&self.shared, oid).is_some() {
             return Ok(());
         }
-        let refusal = ClientCore::order_id_refusal(oid)
-            .or_else(|| self.core.refusal_for_order_id(oid, order, &self.shared));
-        if let Some((code, message)) = refusal {
+        // The order is read and checked now, as the reference does; one
+        // that is refused is not held (ibx#547).
+        let (notices, refusal) = self.core.order_read_checks(
+            oid, contract.con_id, &contract.exchange, order, &self.shared, &self.account_id);
+        let combo = ClientCore::combo_order(contract, order, &self.shared.reference, &self.account_id);
+        for (code, message) in notices {
+            self.shared.orders.push_order_error(oid, code, message);
+        }
+        if let Some((code, message)) = refusal.or(combo.err()) {
             self.shared.orders.push_order_error(oid, code, message);
             return Ok(());
         }
@@ -64,30 +86,19 @@ impl EClient {
     }
 
     /// Send one order: a new order, or the change of a working one.
-    fn send_order(&self, order_id: i64, contract: &Contract, order: &Order) -> Result<(), String> {
+    fn send_order(&self, order_id: i64, contract: &Contract, order: &Order, was_held: bool, built: &mut Vec<ControlCommand>) -> Result<(), String> {
         // The id as given: the reference refuses 0 with 10149 below.
         let oid = order_id;
 
-        // Warnings the reference sends while it reads the order (ibx#416).
-        for (code, message) in ClientCore::implied_zone_warnings(order) {
-            self.shared.orders.push_order_error(oid, code, message);
-        }
-        // Refused before sending, like the reference: error() only.
-        let contract_zone = self.shared.reference.time_zone_id(contract.con_id);
-        let account_pending = ClientCore::order_account_pending(order, &self.shared.reference, &self.account_id);
-        // The algo check's warnings come before its refusal (ibx#263).
-        let mut algo_warnings = Vec::new();
-        let refusal = ClientCore::refusal_before_sending_for(order, &contract.exchange, account_pending)
-            .or_else(|| ClientCore::algo_definition_refusal(order, &contract.exchange, &self.shared.reference, &mut algo_warnings))
-            .or_else(|| ClientCore::account_config_refusal(
-                order, self.shared.reference.account_features().as_deref(), &self.account_id))
-            .or_else(|| ClientCore::good_till_date_refusal(order, contract_zone.as_deref()))
-            .or_else(|| ClientCore::condition_time_zone_refusal(order, contract_zone.as_deref()))
-            .or_else(|| ClientCore::price_refusal(order))
-            .or_else(|| ClientCore::order_id_refusal(oid))
-            .or_else(|| self.core.refusal_for_order_id(oid, order, &self.shared));
-        for (code, message) in algo_warnings {
-            self.shared.orders.push_order_error(oid, code, message);
+        // The warnings and the refusal of the order as it is read; the
+        // warnings of an order that was held were given when it was placed
+        // with transmit off (ibx#547).
+        let (notices, refusal) = self.core.order_read_checks(
+            oid, contract.con_id, &contract.exchange, order, &self.shared, &self.account_id);
+        if !was_held {
+            for (code, message) in notices {
+                self.shared.orders.push_order_error(oid, code, message);
+            }
         }
         if let Some((code, message)) = refusal {
             self.shared.orders.push_order_error(oid, code, message);
@@ -141,7 +152,7 @@ impl EClient {
         } else {
             ClientCore::build_order_request(&sent, oid, instrument)?
         };
-        self.send(cmd)?;
+        built.push(cmd);
         self.core.cache_contract(contract.con_id, contract.clone());
         if order.what_if {
             self.core.track_what_if(oid, contract.clone(), order.clone());

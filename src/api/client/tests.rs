@@ -736,6 +736,7 @@ fn sent_and_held(rx: &crossbeam_channel::Receiver<ControlCommand>) -> (Vec<i64>,
     while let Ok(cmd) = rx.try_recv() {
         match cmd {
             ControlCommand::Order(req) => sent.push(req.order_id()),
+            ControlCommand::OrderGroup(group) => sent.extend(group.iter().map(|req| req.order_id())),
             ControlCommand::HoldOrder { order_id, .. } => held.push(order_id),
             _ => {}
         }
@@ -766,7 +767,10 @@ fn a_bracket_with_transmit_off_is_sent_together() {
 
     let stop = Order { order_type: "STP".into(), lmt_price: 0.0, aux_price: 50.0, ..limit("SELL", 0.0, true, 3) };
     client.place_order(5, &spy(), &stop).unwrap();
-    assert_eq!(sent_and_held(&rx), (vec![3, 4, 5], vec![]));
+    // One group: the engine sends the three together (ibx#547).
+    assert!(matches!(rx.try_recv(), Ok(ControlCommand::OrderGroup(group))
+        if group.iter().map(|r| r.order_id()).collect::<Vec<_>>() == [3, 4, 5]));
+    assert!(rx.try_recv().is_err());
     assert!(client.core.held_orders.lock().unwrap().is_empty());
     let open: Vec<i64> = client.core.collect_open_orders(&shared).into_iter().map(|(id, _)| id).collect();
     assert_eq!(open.len(), 3, "{open:?}");
@@ -801,6 +805,37 @@ fn only_the_tree_of_the_placed_order_is_sent() {
     client.place_order(20, &spy(), &limit("BUY", 101.0, true, 0)).unwrap();
     assert_eq!(sent_and_held(&rx), (vec![20, 21], vec![20, 21]));
     assert_eq!(client.core.tracked_order(20).unwrap().lmt_price, 101.0);
+}
+
+// ibx#547, paper 09/10/2026, the reference: an order placed with transmit
+// off is read and checked at once. One that a check refuses is not held;
+// the warnings of one that is held are given then, and not again when it
+// is sent.
+#[test]
+fn a_held_order_is_checked_when_it_is_placed() {
+    let (client, rx, shared) = test_client();
+    shared.market.set_instrument_count(1);
+    // A good-till date that is no date: refused, not held.
+    let bad = Order { tif: "GTD".into(), good_till_date: "notadate".into(), ..limit("BUY", 100.0, false, 0) };
+    client.place_order(60, &spy(), &bad).unwrap();
+    assert_eq!(sent_and_held(&rx), (vec![], vec![]));
+    assert_eq!(shared.orders.drain_order_errors().len(), 1);
+    assert!(client.core.held_orders.lock().unwrap().is_empty());
+    // An id below the highest one used: 103, not held.
+    client.place_order(70, &spy(), &limit("BUY", 100.0, true, 0)).unwrap();
+    client.place_order(65, &spy(), &limit("BUY", 100.0, false, 0)).unwrap();
+    assert_eq!(sent_and_held(&rx), (vec![70], vec![]));
+    assert_eq!(shared.orders.drain_order_errors().iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(65, 103)]);
+    // A time condition with no zone: the warning at the hold only.
+    let timed = |transmit| Order {
+        conditions: vec![OrderCondition::Time { time: "20991231 23:59:59".into(), is_more: true }],
+        ..limit("BUY", 100.0, transmit, 0)
+    };
+    client.place_order(80, &spy(), &timed(false)).unwrap();
+    assert_eq!(shared.orders.drain_order_errors().iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(80, 2174)]);
+    client.place_order(80, &spy(), &timed(true)).unwrap();
+    assert_eq!(sent_and_held(&rx), (vec![80], vec![80]));
+    assert!(shared.orders.drain_order_errors().is_empty(), "no second warning");
 }
 
 // Paper 09/10/2026, the reference: a working order placed again with

@@ -535,6 +535,18 @@ impl Connection {
                 return Err(self.record_write_error(e));
             }
         }
+        // The frames that wait leave in one write, as the reference writes
+        // the messages it sends together (ibx#547: the orders of a bracket
+        // in one write, 26/09 and 09/10/2026), and with one system call.
+        // Not while a frame is partly written: that write is completed
+        // with the same bytes first.
+        if self.out.len() > 1 && self.out_pos == 0 {
+            let mut all = Vec::with_capacity(self.out.iter().map(Vec::len).sum());
+            for frame in self.out.drain(..) {
+                all.extend_from_slice(&frame);
+            }
+            self.out.push_back(all);
+        }
         let result = loop {
             let Some(front) = self.out.front() else { break Ok(()) };
             // A partial TLS record is completed by calling again with the

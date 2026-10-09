@@ -1732,6 +1732,9 @@ impl HotLoop {
                 ControlCommand::Order(req) => {
                     self.context.pending_orders.push(req);
                 }
+                ControlCommand::OrderGroup(requests) => {
+                    order_builder::take_order_group(&mut self.context, requests);
+                }
                 ControlCommand::HoldOrder { order_id, instrument, qty, parent_id } => {
                     order_builder::hold_order(&mut self.ccp_conn, &mut self.context, &mut self.hb, order_id, instrument, qty, parent_id);
                 }

@@ -2067,6 +2067,11 @@ pub enum ControlCommand {
     UpdateParam { key: String, value: String },
     /// Submit an order from external caller (bridge mode).
     Order(OrderRequest),
+    /// The new orders one placeOrder transmits together (ibx#547): a held
+    /// parent and its children with the order that transmits them. The
+    /// engine sends them in this order in one write, once the contract of
+    /// each is known.
+    OrderGroup(Vec<OrderRequest>),
     /// An order placed with transmit off (ibx#509): nothing is sent for
     /// it but the lookup of a contract given without a conId; the engine
     /// keeps it, unlisted, for its cancel. The client sends it as a new

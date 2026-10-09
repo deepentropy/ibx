@@ -57,6 +57,27 @@ pub(crate) fn drain_and_send_orders(
             global_cancel(conn, context, account_id, hb, shared);
             continue;
         }
+        // A new order under the id of one that was never sent (held with
+        // transmit off, now transmitted, ibx#509) is that order, on the
+        // contract its lookup found while it was held.
+        if !what_if && order_req.new_order_qty().is_some() {
+            for id in request_order_ids(&order_req) {
+                if let Some((held_on, ..)) = context.unsent.remove(&id)
+                    && let Some(instrument) = order_req.new_order_instrument_mut()
+                {
+                    *instrument = held_on;
+                }
+            }
+            // The orders transmitted together leave together (ibx#547):
+            // each waits until the contract of every one is known.
+            if let Some(unknown) = group_contracts_unknown(context, oid) {
+                for instrument in unknown {
+                    look_up_order_contract(context, conn, hb, instrument);
+                }
+                context.rth_parked.push(rewrap(order_req));
+                continue;
+            }
+        }
         // A request that depends on one waiting for its contract definition
         // waits behind it, so the orders go out in the order they were
         // placed, as the reference sends them: a child behind its parent, an
@@ -213,18 +234,6 @@ pub(crate) fn drain_and_send_orders(
         // An order held with transmit off ends the same way (ibx#509).
         if let OrderRequest::Cancel { order_id } = &order_req && end_unsent(context, shared, *order_id) {
             continue;
-        }
-        // A new order under the id of one that was never sent (held with
-        // transmit off, now transmitted, ibx#509) is that order, on the
-        // contract its lookup found while it was held.
-        if !what_if && order_req.new_order_qty().is_some() {
-            for id in request_order_ids(&order_req) {
-                if let Some((held_on, ..)) = context.unsent.remove(&id)
-                    && let Some(instrument) = order_req.new_order_instrument_mut()
-                {
-                    *instrument = held_on;
-                }
-            }
         }
         if let OrderRequest::Cancel { order_id } = &order_req {
             if let Some((code, message)) = cancel_refusal(context, *order_id) {
@@ -2894,6 +2903,44 @@ fn end_unsent(context: &mut Context, shared: &Arc<SharedState>, order_id: OrderI
     true
 }
 
+/// The new orders one placeOrder transmits together (ibx#547; the
+/// reference's messages of 26/09 and 09/10/2026: a held parent, its held
+/// children and the order that transmits them leave in one write, after
+/// the contract lookup of the transmitting order came back). They join
+/// the queue in their order; none goes out while a contract is unknown.
+pub(crate) fn take_order_group(context: &mut Context, requests: Vec<OrderRequest>) {
+    let group: Vec<(OrderId, crate::types::InstrumentId)> = requests.iter().filter_map(|r| {
+        let id = r.order_id();
+        let instrument = context.unsent.get(&id).map(|h| h.0).or_else(|| r.instrument())?;
+        Some((id, instrument))
+    }).collect();
+    if group.len() > 1 {
+        context.order_groups.push(group);
+    }
+    for request in requests {
+        context.pending_orders.push(request);
+    }
+}
+
+/// The instruments of the group of `order_id` whose contract is not known
+/// yet, `None` when the order is in no group or the group can go. A group
+/// that can go is forgotten.
+fn group_contracts_unknown(context: &mut Context, order_id: OrderId) -> Option<Vec<crate::types::InstrumentId>> {
+    let at = context.order_groups.iter().position(|g| g.iter().any(|(id, _)| *id == order_id))?;
+    let unknown: Vec<crate::types::InstrumentId> = context.order_groups[at].iter()
+        .map(|(_, i)| *i).filter(|i| context.market.con_id(*i) == Some(0)).collect();
+    if unknown.is_empty() {
+        // Gone once its last order is through.
+        let group = &mut context.order_groups[at];
+        group.retain(|(id, _)| *id != order_id);
+        if group.is_empty() {
+            context.order_groups.remove(at);
+        }
+        return None;
+    }
+    Some(unknown)
+}
+
 /// An order placed with transmit off (ibx#509; the bracket recordings of
 /// 26/09/2026 and the paper run of 09/10/2026): the reference sends
 /// nothing for it but the lookup of a contract given without a conId,
@@ -2924,6 +2971,18 @@ fn look_up_order_contract(context: &mut Context, conn: &mut Connection, hb: &mut
     if context.order_lookups.iter().any(|(_, i)| *i == instrument) {
         return;
     }
+    // An order placed while the lookup of the same contract is on its way
+    // takes its answer (ibx#547; the bracket recordings of 26/09/2026:
+    // three orders placed at once, one lookup; placed three seconds apart
+    // on 09/10/2026, one lookup each).
+    let same = |m: &crate::engine::market_state::MarketState, a, b| {
+        m.symbol(a) == m.symbol(b) && m.order_routing(a) == m.order_routing(b)
+            && m.exchange(a) == m.exchange(b) && m.currency(a) == m.currency(b)
+    };
+    if let Some(&(in_flight, _)) = context.order_lookups.iter().find(|(_, other)| same(&context.market, *other, instrument)) {
+        context.order_lookups.push((in_flight, instrument));
+        return;
+    }
     let lookup_id = ORDER_LOOKUP_FIRST_ID + context.next_order_lookup % ORDER_LOOKUP_IDS;
     context.next_order_lookup = context.next_order_lookup.wrapping_add(1);
     let (sec_type, _) = context.market.order_routing(instrument);
@@ -2950,51 +3009,64 @@ fn look_up_order_contract(context: &mut Context, conn: &mut Connection, hb: &mut
 /// reply's records as any other reply.
 pub(crate) fn order_contract_reply(context: &mut Context, shared: &SharedState, req_id: &str, msg: &[u8]) -> bool {
     let Some(number) = crate::control::contracts::secdef_request_number(req_id) else { return false };
-    let Some(idx) = context.order_lookups.iter().position(|(id, _)| crate::types::ReqId::from(*id) == number) else { return false };
-    let (_, slot) = context.order_lookups.swap_remove(idx);
+    // The slots that wait for this answer: the one that asked, and those
+    // of the orders placed while it was on its way.
+    let slots: Vec<crate::types::InstrumentId> = context.order_lookups.iter()
+        .filter(|(id, _)| crate::types::ReqId::from(*id) == number).map(|(_, slot)| *slot).collect();
+    if slots.is_empty() { return false; }
+    context.order_lookups.retain(|(id, _)| crate::types::ReqId::from(*id) != number);
     let mut con_ids: Vec<i64> = crate::control::contracts::parse_secdef_records(msg).unwrap_or_default()
         .iter().map(|d| d.con_id).filter(|c| *c != 0).collect();
     con_ids.sort_unstable();
     con_ids.dedup();
-    if let [con_id] = con_ids[..] {
-        // The slot of that conId when it routes the same way: the
-        // waiting orders take it and this slot is freed; else this slot
-        // keeps the conId.
-        let same_route = |m: &crate::engine::market_state::MarketState, a, b| {
-            m.order_routing(a) == m.order_routing(b) && m.currency(a) == m.currency(b)
-        };
-        match context.market.instrument_by_con_id(con_id).filter(|&known| known != slot && same_route(&context.market, known, slot)) {
-            Some(known) => {
-                for req in context.rth_parked.iter_mut() {
-                    if let Some(i) = req.new_order_instrument_mut().filter(|i| **i == slot) {
-                        *i = known;
+    for slot in slots {
+        if let [con_id] = con_ids[..] {
+            // The slot of that conId when it routes the same way: the
+            // waiting orders take it and this slot is freed; else this slot
+            // keeps the conId.
+            let same_route = |m: &crate::engine::market_state::MarketState, a, b| {
+                m.order_routing(a) == m.order_routing(b) && m.currency(a) == m.currency(b)
+            };
+            match context.market.instrument_by_con_id(con_id).filter(|&known| known != slot && same_route(&context.market, known, slot)) {
+                Some(known) => {
+                    for req in context.rth_parked.iter_mut() {
+                        if let Some(i) = req.new_order_instrument_mut().filter(|i| **i == slot) {
+                            *i = known;
+                        }
                     }
+                    // An order held with transmit off takes it too (ibx#509).
+                    for held in context.unsent.values_mut().filter(|h| h.0 == slot) {
+                        held.0 = known;
+                    }
+                    for member in context.order_groups.iter_mut().flatten().filter(|m| m.1 == slot) {
+                        member.1 = known;
+                    }
+                    context.market.unregister(slot);
                 }
-                // An order held with transmit off takes it too (ibx#509).
-                for held in context.unsent.values_mut().filter(|h| h.0 == slot) {
-                    held.0 = known;
+                None => context.market.resolve_con_id(slot, con_id),
+            }
+            log::info!("Order contract lookup {}: conId {}", req_id, con_id);
+        } else {
+            log::warn!("Order contract lookup {}: {} contracts: error 200", req_id, con_ids.len());
+            let (refused, kept): (Vec<OrderRequest>, Vec<OrderRequest>) = std::mem::take(&mut context.rth_parked).into_iter()
+                .partition(|r| r.instrument() == Some(slot) && !matches!(r, OrderRequest::CancelAll { .. }));
+            context.rth_parked = kept;
+            for r in refused {
+                let oid = r.order_id();
+                shared.orders.push_order_error(oid, crate::engine::combo::NO_DEFINITION.0, crate::engine::combo::NO_DEFINITION.1.to_string());
+                if !matches!(r, OrderRequest::SubmitWhatIf { .. }) {
+                    context.api_pending.insert(oid, r);
                 }
+            }
+            // The orders of a group on another contract go on without it.
+            for group in context.order_groups.iter_mut() {
+                group.retain(|m| m.1 != slot);
+            }
+            // A held order keeps the slot: its contract is asked again when
+            // the order is transmitted, and refused then (ibx#509).
+            if !context.unsent.values().any(|h| h.0 == slot) {
                 context.market.unregister(slot);
             }
-            None => context.market.resolve_con_id(slot, con_id),
-        }
-        log::info!("Order contract lookup {}: conId {}", req_id, con_id);
-    } else {
-        log::warn!("Order contract lookup {}: {} contracts: error 200", req_id, con_ids.len());
-        let (refused, kept): (Vec<OrderRequest>, Vec<OrderRequest>) = std::mem::take(&mut context.rth_parked).into_iter()
-            .partition(|r| r.instrument() == Some(slot) && !matches!(r, OrderRequest::CancelAll { .. }));
-        context.rth_parked = kept;
-        for r in refused {
-            let oid = r.order_id();
-            shared.orders.push_order_error(oid, crate::engine::combo::NO_DEFINITION.0, crate::engine::combo::NO_DEFINITION.1.to_string());
-            if !matches!(r, OrderRequest::SubmitWhatIf { .. }) {
-                context.api_pending.insert(oid, r);
-            }
-        }
-        // A held order keeps the slot: its contract is asked again when
-        // the order is transmitted, and refused then (ibx#509).
-        if !context.unsent.values().any(|h| h.0 == slot) {
-            context.market.unregister(slot);
         }
     }
     release_rth_parked(context);
@@ -5765,6 +5837,42 @@ mod tests {
         assert_eq!(ended, [OrderStatus::Cancelled]);
         let notices: Vec<_> = shared.orders.drain_order_notices().into_iter().filter(|n| n.0 == 42).map(|n| n.1).collect();
         assert_eq!(notices, [202, 161]);
+    }
+
+    // ibx#547, the reference's messages of 26/09 and 09/10/2026: the
+    // orders one placeOrder transmits leave together, after the contract
+    // of each is known; orders placed while the lookup of their contract
+    // is on its way share it.
+    #[test]
+    fn the_orders_of_a_group_leave_together_after_one_lookup() {
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
+        let shared = Arc::new(SharedState::new());
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.set_symbol(0, "AAPL".to_string());
+        context.market.set_routing(0, "STK", "SMART");
+        let by_symbol = |context: &mut Context| {
+            let slot = context.market.try_register_unresolved().unwrap();
+            context.set_symbol(slot, "AAPL".to_string());
+            context.market.set_routing(slot, "STK", "SMART");
+            slot
+        };
+        // The parent on a contract that is known, two children by symbol.
+        let (a, b) = (by_symbol(&mut context), by_symbol(&mut context));
+        let limit = |order_id, instrument| OrderRequest::SubmitLimit { order_id, instrument, side: Side::Buy, qty: 1, price: px(100.0) };
+        take_order_group(&mut context, vec![limit(50, 0), limit(51, a), limit(52, b)]);
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(frames.iter().map(|f| tag(f, 35).unwrap().to_string()).collect::<Vec<_>>(), ["c"],
+            "one lookup, and the parent waits for it too");
+        let lookup = tag(&frames[0], 320).unwrap().to_string();
+        let reply = format!("35=d|320={lookup}|322=*|323=4|55=AAPL|167=STK|6008=265598|");
+        assert!(order_contract_reply(&mut context, &shared, &lookup, reply.replace('|', "").as_bytes()));
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        let sent: Vec<_> = frames.iter().filter(|f| tag(f, 35) == Some("D")).map(|f| tag(f, 6121).unwrap().to_string()).collect();
+        assert_eq!(sent, ["50", "51", "52"]);
+        assert!(frames.iter().filter(|f| tag(f, 35) == Some("D")).all(|f| tag(f, 6008) == Some("265598")));
+        assert!(context.order_groups.is_empty() && context.order_lookups.is_empty());
     }
 
     // ibx#263: all-or-none is refused with 10257 and nothing is sent when
