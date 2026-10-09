@@ -205,6 +205,32 @@ pub(crate) fn drain_and_send_orders(
         // (ibx#464; captured 23/09/2026): 10147 for an order it does not
         // know, 10148 with the state for one that is finished or has a
         // cancel pending.
+        // The cancel of an order refused with 387 before it was sent ends
+        // it as the reference does (ibx#542, paper 09/10/2026): orderStatus
+        // Cancelled with nothing filled, 202 "Order was discarded", then
+        // 161, the answer to a cancel of an order that cannot be cancelled.
+        // A second cancel finds it cancelled (10148).
+        if let OrderRequest::Cancel { order_id } = &order_req
+            && let Some((instrument, qty, parent_id)) = context.unsent.remove(order_id)
+        {
+            let perm_id = context.new_server_id();
+            shared.orders.push_order_update(OrderUpdate {
+                order_id: *order_id,
+                instrument,
+                status: OrderStatus::Cancelled,
+                filled_qty_fixed: 0,
+                remaining_qty_fixed: qty,
+                avg_fill_price: 0,
+                perm_id,
+                parent_id,
+                timestamp_ns: context.now_ns(),
+            });
+            shared.orders.push_order_notice(*order_id, 202, "Order Canceled - reason:Order was discarded.".into());
+            shared.orders.push_order_notice(*order_id, 161,
+                format!("Cancel attempted when order is not in a cancellable state.  Order permId ={}", perm_id));
+            context.finish_unsent(*order_id, OrderStatus::Cancelled);
+            continue;
+        }
         if let OrderRequest::Cancel { order_id } = &order_req {
             if let Some((code, message)) = cancel_refusal(context, *order_id) {
                 log::warn!("Cancel of order {} refused: {}", order_id, message);
@@ -2660,6 +2686,9 @@ fn pegged_type_refusal(
             let oid = req.order_id();
             log::warn!("Order {} refused: its order type is not in the list of this exchange", oid);
             shared.orders.push_order_error(oid, 387, crate::engine::outside_rth::UNSUPPORTED_ORDER_TYPE.to_string());
+            // Kept, unlisted, for its cancel (ibx#542).
+            let parent = req.new_order_side().and_then(|(_, a)| a).map_or(0, |a| a.parent_id);
+            context.unsent.insert(oid, (instrument, req.new_order_qty().unwrap_or(0), parent));
             Some(true)
         }
         Definition::Known(..) => None,
@@ -5570,6 +5599,45 @@ mod tests {
         let (frames, errors) = run("SMART", &with_prot, mkt_prt(97));
         assert_eq!((frames.len(), tag(&frames[0], 40)), (1, Some("U")));
         assert!(errors.is_empty());
+    }
+
+    // ibx#542, paper 09/10/2026 (the reference and ibx on the same case):
+    // an order refused with 387 is kept, unlisted; its cancel gives
+    // orderStatus Cancelled, 202 "Order was discarded" and 161; a second
+    // cancel finds it cancelled.
+    #[test]
+    fn the_cancel_of_an_order_refused_with_387_ends_it() {
+        const LIST: &str = "DAY/3,LMT/3,MKT/1,STP/1";
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
+        let shared = Arc::new(SharedState::new());
+        let mut context = Context::new();
+        context.market.register(265598);
+        context.set_symbol(0, "AAPL".to_string());
+        context.market.set_routing(0, "STK", "SMART");
+        context.pending_orders.push(OrderRequest::SubmitPegMkt { order_id: 94, instrument: 0, side: Side::Buy, qty: 1, price: 0, offset: px(0.05) });
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        let id = tag(&frames[0], 320).unwrap().to_string();
+        assert!(rth_definition_reply(&mut context, &id, &definition_reply(&id, tag(&frames[0], 6004).unwrap(), LIST)));
+        assert!(drain_frames(&mut context, &shared, &mut conn, &mut server).is_empty(), "nothing sent");
+        assert_eq!(shared.orders.drain_order_errors().iter().map(|e| e.1).collect::<Vec<_>>(), [387]);
+        assert!(shared.orders.drain_order_updates().is_empty(), "no status with the refusal");
+
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 94 });
+        assert!(drain_frames(&mut context, &shared, &mut conn, &mut server).is_empty(), "nothing sent");
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.iter().map(|u| (u.order_id, u.status, u.filled_qty_fixed, u.remaining_qty_fixed)).collect::<Vec<_>>(),
+            [(94, OrderStatus::Cancelled, 0, crate::types::QTY_SCALE)]);
+        let notices = shared.orders.drain_order_notices();
+        assert_eq!(notices.iter().map(|n| (n.0, n.1)).collect::<Vec<_>>(), [(94, 202), (94, 161)]);
+        assert_eq!(notices[0].2, "Order Canceled - reason:Order was discarded.");
+        assert_eq!(notices[1].2, format!("Cancel attempted when order is not in a cancellable state.  Order permId ={}", updates[0].perm_id));
+        assert!(shared.orders.drain_order_errors().is_empty());
+
+        context.pending_orders.push(OrderRequest::Cancel { order_id: 94 });
+        drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert_eq!(shared.orders.drain_order_errors(),
+            [(94, 10148, "OrderId 94 that needs to be cancelled cannot be cancelled, state: Cancelled.".to_string())]);
     }
 
     // ibx#263: all-or-none is refused with 10257 and nothing is sent when

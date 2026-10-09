@@ -791,6 +791,11 @@ pub struct PortfolioUpdateEntry {
 /// True when `status` names an IB order state that is still working on the broker.
 /// Whitelist (rather than blacklist) so non-canonical or empty strings — and
 /// any future terminal states added by IB — are treated as "not open".
+/// The status kept for an order refused before it was sent (ibx#542). Not
+/// a status of the API: it is never given to the caller, and it is not an
+/// open status.
+pub const UNSENT_STATUS: &str = "Unsent";
+
 #[inline]
 pub fn is_open_status(status: &str) -> bool {
     matches!(
@@ -3670,6 +3675,15 @@ impl ClientCore {
         // The redirect precaution discards the order (ibx#486).
         if matches!(code, 10311 | 10329) {
             self.discarded.lock().unwrap().insert(order_id);
+        }
+        // Refused with 387 before it was sent: the order is not an open
+        // order, and no open-order request lists it; its cancel ends it
+        // (ibx#542).
+        if code == 387
+            && let Some(o) = self.open_orders.lock().unwrap().get_mut(&order_id)
+            && o.status == "PendingSubmit"
+        {
+            o.status = UNSENT_STATUS.into();
         }
     }
 

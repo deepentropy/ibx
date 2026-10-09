@@ -283,6 +283,10 @@ pub struct Context {
     /// Bounded: the oldest are dropped past `FINISHED_ORDERS_MAX`.
     finished_orders: HashMap<OrderId, OrderStatus>,
     finished_order_ids: std::collections::VecDeque<OrderId>,
+    /// Orders refused with 387 before anything was sent, with their
+    /// instrument, quantity and parent (ibx#542): the reference keeps such
+    /// an order, unlisted, until its cancel ends it.
+    pub(crate) unsent: HashMap<OrderId, (InstrumentId, Qty, i64)>,
     /// The book entry of each order held (see [`BookEntry`]).
     pub(crate) book: HashMap<OrderId, BookEntry>,
     /// Orders of this client the reference keeps in its API pending map
@@ -354,6 +358,7 @@ impl Context {
             md_resolved: Vec::new(),
             next_md_lookup: 0,
             finished_orders: HashMap::new(),
+            unsent: HashMap::new(),
             finished_order_ids: std::collections::VecDeque::new(),
             book: HashMap::new(),
             api_pending: HashMap::new(),
@@ -1479,6 +1484,14 @@ impl Context {
                     }
                 }
             }
+        }
+    }
+
+    /// Keep `status` as the end of an order that was never held (refused
+    /// before it was sent, ibx#542), for a later cancel of the same id.
+    pub(crate) fn finish_unsent(&mut self, order_id: OrderId, status: OrderStatus) {
+        if self.finished_orders.insert(order_id, status).is_none() {
+            self.finished_order_ids.push_back(order_id);
         }
     }
 
