@@ -87,6 +87,70 @@ def test_order_defaults():
     assert o.conditions == []
 
 
+def _conditional(conditions):
+    from ibx import Contract, EClient, EWrapper, Order
+    client = EClient(EWrapper())
+    client._test_connect("TEST123")
+    client._test_seed_instrument(756733, 0)
+    contract = Contract()
+    contract.con_id, contract.symbol, contract.sec_type, contract.exchange, contract.currency = 756733, "SPY", "STK", "SMART", "USD"
+    order = Order()
+    order.action, order.total_quantity, order.order_type, order.lmt_price, order.tif = "BUY", 1, "LMT", 10.0, "GTC"
+    order.conditions = conditions
+    return client, contract, order
+
+
+def test_an_order_with_a_condition_that_is_not_understood_is_not_sent():
+    """ibx#541: such a condition was skipped with a log line and the order sent without it."""
+    import pytest
+    for bad in (object(), "20991231 23:59:59", {"condType": 3}):
+        client, contract, order = _conditional([TimeCondition(True, "20991231-23:59:59"), bad])
+        with pytest.raises(ValueError, match="order condition 2 .* is not understood"):
+            client.place_order(1, contract, order)
+        assert client._test_take_order_conditions() is None, "nothing went to the engine"
+
+
+def test_the_condition_classes_of_the_official_library_are_read():
+    """ibx#541: a program ported from the official client library keeps its conditions."""
+    conditions = pytest.importorskip("ibapi.order_condition")
+    price = conditions.PriceCondition()
+    price.isMore, price.price, price.conId, price.exchange, price.triggerMethod = False, 12.5, 265598, "SMART", 2
+    time_ = conditions.TimeCondition()
+    time_.isMore, time_.time = True, "20991231 23:59:59 US/Eastern"
+    margin = conditions.MarginCondition()
+    margin.isMore, margin.percent = True, 30
+    execution = conditions.ExecutionCondition()
+    execution.symbol, execution.exchange, execution.secType = "AAPL", "SMART", "STK"
+    volume = conditions.VolumeCondition()
+    volume.isMore, volume.volume, volume.conId, volume.exchange = True, 1000, 265598, "SMART"
+    change = conditions.PercentChangeCondition()
+    change.isMore, change.changePercent, change.conId, change.exchange = False, 1.5, 265598, "SMART"
+    client, contract, order = _conditional([price, time_, margin, execution, volume, change])
+    client.place_order(1, contract, order)
+    sent = client._test_take_order_conditions()
+    assert [s.split(" ")[0] for s in sent] == ["Price", "Time", "Margin", "Execution", "Volume", "PercentChange"], sent
+    assert "con_id: 265598" in sent[0] and "is_more: false" in sent[0] and "trigger_method: 2" in sent[0], sent[0]
+    # The time goes out in the form the server takes (ibx#416).
+    assert 'time: "21000101-04:59:59"' in sent[1] and "is_more: true" in sent[1], sent[1]
+    assert "percent: 30" in sent[2] and 'symbol: "AAPL"' in sent[3] and "volume: 1000" in sent[4], sent
+    assert "percent: 1.5" in sent[5], sent[5]
+
+
+def test_official_conditions_joined_by_or_are_refused():
+    """The conditions of an order are joined by "and": one joined to the next by "or" would change its meaning."""
+    conditions = pytest.importorskip("ibapi.order_condition")
+    first, second = conditions.TimeCondition(), conditions.TimeCondition()
+    first.isMore, first.time, first.isConjunctionConnection = True, "20991231 23:59:59 US/Eastern", False
+    second.isMore, second.time, second.isConjunctionConnection = True, "20991231 23:59:59 US/Eastern", False
+    client, contract, order = _conditional([first, second])
+    with pytest.raises(ValueError, match='joined by "or"'):
+        client.place_order(1, contract, order)
+    # The flag of the last condition joins nothing.
+    first.isConjunctionConnection = True
+    client.place_order(1, contract, order)
+    assert len(client._test_take_order_conditions()) == 2
+
+
 def test_order_list_attributes_are_the_lists():
     # As the official API's: appending to the list changes the order.
     o = Order()

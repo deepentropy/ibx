@@ -1566,19 +1566,67 @@ impl Contract {
     }
 }
 
+/// A condition object of the official API, read by its attributes
+/// (`condType` 1 price, 3 time, 4 margin, 5 execution, 6 volume, 7 percent
+/// change). `joined`: another condition follows it; the conditions of an
+/// order are joined by "and" here, so one joined by "or" is refused.
+fn official_condition(any: &Bound<'_, PyAny>, joined: bool) -> Result<OrderCondition, String> {
+    fn get<'py, T: pyo3::conversion::FromPyObjectOwned<'py>>(any: &Bound<'py, PyAny>, name: &str) -> Result<T, String> {
+        any.getattr(name).map_err(|_| format!("no `{name}`"))?
+            .extract::<T>().map_err(|_| format!("`{name}` has an unexpected value"))
+    }
+    let kind: i64 = get(any, "condType")?;
+    if joined && !get::<bool>(any, "isConjunctionConnection")? {
+        return Err("conditions joined by \"or\" are not supported".into());
+    }
+    let exchange = |any: &Bound<'_, PyAny>| get::<Option<String>>(any, "exchange").map(Option::unwrap_or_default);
+    let con_id = |any: &Bound<'_, PyAny>| get::<Option<i64>>(any, "conId").map(Option::unwrap_or_default);
+    let is_more = get::<bool>(any, "isMore");
+    Ok(match kind {
+        1 => OrderCondition::Price {
+            con_id: con_id(any)?, exchange: exchange(any)?,
+            price: crate::api::types::price_from_f64(get::<Option<f64>>(any, "price")?.unwrap_or(0.0)),
+            is_more: is_more?, trigger_method: get::<Option<i64>>(any, "triggerMethod")?.unwrap_or(0) as u8,
+        },
+        3 => OrderCondition::Time { time: get::<Option<String>>(any, "time")?.unwrap_or_default(), is_more: is_more? },
+        4 => OrderCondition::Margin { percent: get::<Option<u32>>(any, "percent")?.unwrap_or(0), is_more: is_more? },
+        5 => OrderCondition::Execution {
+            symbol: get::<Option<String>>(any, "symbol")?.unwrap_or_default(), exchange: exchange(any)?,
+            sec_type: get::<Option<String>>(any, "secType")?.unwrap_or_default(),
+        },
+        6 => OrderCondition::Volume {
+            con_id: con_id(any)?, exchange: exchange(any)?,
+            volume: get::<Option<i64>>(any, "volume")?.unwrap_or(0), is_more: is_more?,
+        },
+        7 => OrderCondition::PercentChange {
+            con_id: con_id(any)?, exchange: exchange(any)?,
+            percent: get::<Option<f64>>(any, "changePercent")?.filter(|p| *p != f64::MAX).unwrap_or(0.0),
+            is_more: is_more?,
+        },
+        other => return Err(format!("condition type {other} is unknown")),
+    })
+}
+
 impl Order {
-    /// Convert the conditions (this module's condition classes) to the
-    /// engine's.
-    pub fn convert_conditions(&self, py: Python<'_>) -> Vec<OrderCondition> {
-        items(py, &self.conditions).iter().filter_map(|any| {
-            if let Ok(c) = any.cast::<PriceCondition>() { return Some(c.borrow().to_internal()); }
-            if let Ok(c) = any.cast::<TimeCondition>() { return Some(c.borrow().to_internal()); }
-            if let Ok(c) = any.cast::<MarginCondition>() { return Some(c.borrow().to_internal()); }
-            if let Ok(c) = any.cast::<ExecutionCondition>() { return Some(c.borrow().to_internal()); }
-            if let Ok(c) = any.cast::<VolumeCondition>() { return Some(c.borrow().to_internal()); }
-            if let Ok(c) = any.cast::<PercentChangeCondition>() { return Some(c.borrow().to_internal()); }
-            log::warn!("Unknown order condition type, skipping");
-            None
+    /// Convert the conditions to the engine's: this module's condition
+    /// classes, and the official API's (read by their attributes). A
+    /// condition that is not understood is an error: the order must not go
+    /// out without it (ibx#541; it was skipped, and the order sent as a
+    /// plain order).
+    pub fn convert_conditions(&self, py: Python<'_>) -> PyResult<Vec<OrderCondition>> {
+        let list = items(py, &self.conditions);
+        let last = list.len().saturating_sub(1);
+        list.iter().enumerate().map(|(i, any)| {
+            if let Ok(c) = any.cast::<PriceCondition>() { return Ok(c.borrow().to_internal()); }
+            if let Ok(c) = any.cast::<TimeCondition>() { return Ok(c.borrow().to_internal()); }
+            if let Ok(c) = any.cast::<MarginCondition>() { return Ok(c.borrow().to_internal()); }
+            if let Ok(c) = any.cast::<ExecutionCondition>() { return Ok(c.borrow().to_internal()); }
+            if let Ok(c) = any.cast::<VolumeCondition>() { return Ok(c.borrow().to_internal()); }
+            if let Ok(c) = any.cast::<PercentChangeCondition>() { return Ok(c.borrow().to_internal()); }
+            official_condition(any, i < last).map_err(|why| pyo3::exceptions::PyValueError::new_err(format!(
+                "order condition {} ({}) is not understood: {}. The order is not sent.",
+                i + 1, any.get_type().name().map(|n| n.to_string()).unwrap_or_default(), why,
+            )))
         }).collect()
     }
 

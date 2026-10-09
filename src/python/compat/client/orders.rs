@@ -18,7 +18,8 @@ impl EClient {
     fn place_order(&self, py: Python<'_>, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
         // Convert and validate order params first (fail fast, no connection needed)
         let mut api_order = order.to_api();
-        api_order.conditions = order.convert_conditions(py);
+        // A condition that is not understood ends the request here (ibx#541).
+        api_order.conditions = order.convert_conditions(py)?;
         api_order.order_combo_legs = order.convert_order_combo_legs(py);
         // The contract with its combo legs (ibx#470).
         let mut full_contract = contract.to_api();

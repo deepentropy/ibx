@@ -295,6 +295,25 @@ impl EClient {
         Ok(None)
     }
 
+    /// The conditions of the first order sent since the last call, as the
+    /// engine got them (ibx#541, test-only); None when no order was sent.
+    /// The queued commands are taken.
+    #[doc(hidden)]
+    fn _test_take_order_conditions(&self) -> PyResult<Option<Vec<String>>> {
+        let rx = self._test_control_rx.lock().unwrap().clone()
+            .ok_or_else(|| PyRuntimeError::new_err("No test command channel"))?;
+        let mut found = None;
+        while let Ok(cmd) = rx.try_recv() {
+            if let ControlCommand::Order(req) = cmd
+                && found.is_none()
+                && let Some((_, attrs)) = req.new_order_side()
+            {
+                found = Some(attrs.map(|a| a.conditions.iter().map(|c| format!("{c:?}")).collect()).unwrap_or_default());
+            }
+        }
+        Ok(found)
+    }
+
     /// Set the combo openOrder shows for an order, as the engine does when
     /// the order goes out (ibx#470, test-only). `legs` are (conId, ratio,
     /// action, exchange).
