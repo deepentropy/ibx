@@ -323,7 +323,12 @@ impl EClient {
     fn req_completed_orders(&self, py: Python<'_>, api_only: bool) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
         let _ = api_only;
-        if let Some(shared) = self.shared.lock().unwrap().clone() {
+        // The lock is let go before the callbacks: held across one that
+        // releases the interpreter lock (a file write, a lock, a sleep), it
+        // stops the event loop, which takes it with the interpreter lock
+        // held, and with it the whole program.
+        let shared = self.shared.lock().unwrap().clone();
+        if let Some(shared) = shared {
             let completed = shared.orders.drain_completed_orders();
             for co in &completed {
                 let status_str = crate::client_core::order_status_str(co.status);

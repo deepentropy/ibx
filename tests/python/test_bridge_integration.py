@@ -647,6 +647,42 @@ class TestReqCompletedOrdersOrderState:
         end_events = [e for e in w.events if e[0] == "completed_orders_end"]
         assert len(end_events) == 1
 
+    def test_a_callback_that_lets_go_of_the_interpreter_lock_does_not_stop_the_program(self):
+        """With the event loop running, a completed_order callback that sleeps (as one that writes a file or
+        takes a lock does) used to stop the whole interpreter: the request held a lock of the client across the
+        callback, and the event loop waited for that lock with the interpreter lock held. Run in its own process:
+        a stopped interpreter cannot fail a test."""
+        import subprocess
+        import sys
+        import textwrap
+        script = textwrap.dedent('''
+            import threading, time
+            from ibx import EClient, EWrapper
+
+            class W(EWrapper):
+                seen = []
+                def completed_order(self, contract, order, order_state):
+                    time.sleep(0.2)
+                    self.seen.append("completed_order")
+                def completed_orders_end(self):
+                    self.seen.append("end")
+
+            w = W()
+            c = EClient(w)
+            c._test_connect("TEST123")
+            c._test_push_completed_order(
+                order_id=99, instrument=0, status="Filled", filled_qty=100, symbol="SPY", action="BUY",
+                total_quantity=100.0, lmt_price=400.0, completed_status="Filled",
+                completed_time="20260430-15:30:00", commission_and_fees_currency="USD", warning_text="",
+                commission_and_fees=2.50)
+            threading.Thread(target=c.run, daemon=True).start()
+            time.sleep(0.05)
+            c.req_completed_orders(False)
+            print(",".join(w.seen))
+        ''')
+        done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+        assert done.stdout.strip() == "completed_order,end", (done.stdout, done.stderr[-400:])
+
 
 class TestOrderAllocation:
     """Regression: OrderAllocation class is exposed and round-trips through OrderState."""

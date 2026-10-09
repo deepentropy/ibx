@@ -220,7 +220,9 @@ impl EClient {
         self.wrapper.call_method1(py, "managed_accounts", (self.managed_accounts_text().as_str(),))?;
         // nextValidId once the orders of the logon are known, as the
         // reference sends it (ibx#466).
-        let next_id = match self.shared.lock().unwrap().clone() {
+        // The lock is let go before the wait (see `req_completed_orders`).
+        let shared = self.shared.lock().unwrap().clone();
+        let next_id = match shared {
             Some(shared) => py.detach(|| {
                 ClientCore::wait_order_replay(&shared);
                 self.core.next_valid_id(&shared)
