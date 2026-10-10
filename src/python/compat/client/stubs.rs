@@ -126,6 +126,10 @@ impl EClient {
 
     fn req_current_time(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        // Paced like every request: on the reference a current time
+        // request made in a burst was answered at its turn (run of
+        // 10/10/2026, ibx#561).
+        self.turn(py);
         // The local clock plus the offset to the server clock of the
         // logon, as the reference (ibx#421).
         let now = self.shared_state()?.reference.server_time_secs();
@@ -135,6 +139,7 @@ impl EClient {
 
     fn req_current_time_in_millis(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         // The clock of req_current_time, in milliseconds (ibx#516).
         let now = self.shared_state()?.reference.server_time_millis();
         self.wrapper.call_method1(py, "current_time_in_millis", (now,))?;

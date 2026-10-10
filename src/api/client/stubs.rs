@@ -48,6 +48,10 @@ impl EClient {
     /// Answered locally, as the reference: the local clock plus the
     /// offset to the server clock of the logon (ibx#421).
     pub fn req_current_time(&self, wrapper: &mut impl Wrapper) {
+        // Paced like every request: on the reference a current time
+        // request made in a burst was answered at its turn (run of
+        // 10/10/2026, ibx#561).
+        self.shared.command_clock().take_turn();
         wrapper.current_time(self.shared.reference.server_time_secs());
     }
 
@@ -55,6 +59,8 @@ impl EClient {
     /// `reqCurrentTimeInMillis` in C++. Answered locally from the clock of
     /// `req_current_time` (ibx#516).
     pub fn req_current_time_in_millis(&self, wrapper: &mut impl Wrapper) {
+        // As `req_current_time` (ibx#561).
+        self.shared.command_clock().take_turn();
         wrapper.current_time_in_millis(self.shared.reference.server_time_millis());
     }
 
