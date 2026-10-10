@@ -299,6 +299,9 @@ pub struct Options {
     /// for the definitions the reference had before this one (see
     /// [`Options::replies_from`]).
     pub replies: Vec<Rec>,
+    /// Pace the requests and send the market data in passes, by the times
+    /// of the recording (ibx#563).
+    pub paced: bool,
     /// Other market data farms of the recording played on the farm link
     /// (see [`Options::farms`]).
     pub farms: Vec<&'static str>,
@@ -319,6 +322,7 @@ impl Default for Options {
             frame_mask: |_| {},
             skip_frame: |_| false,
             replies: Vec::new(),
+            paced: false,
             farms: Vec::new(),
             hmds_farms: Vec::new(),
         }
@@ -326,6 +330,15 @@ impl Default for Options {
 }
 
 impl Options {
+    /// Replay with the pacing of requests and the market data passes on,
+    /// by the times of the recording (ibx#563). A message ibx sends later
+    /// than the reference did is waited for: the order is compared, not
+    /// the times.
+    pub fn paced(mut self) -> Self {
+        self.paced = true;
+        self
+    }
+
     pub fn compare(mut self, kinds: &[&'static str]) -> Self {
         self.compare = kinds.to_vec();
         self
@@ -611,6 +624,9 @@ pub fn replay(sc: &Scenario, opts: &Options) -> Outcome {
 pub fn run(sc: &Scenario, opts: &Options, links: &mut Links, driver: &mut dyn Driver) -> Outcome {
     crate::gateway::set_machine_zone_for_test(Some(super::session::zone_of(&sc.header)));
     let recs = prepare(sc, opts);
+    if opts.paced {
+        links.pace();
+    }
     let mut run = Run {
         links, driver, opts, recs, at: 0,
         seen: [0; 3], queue: Default::default(), lookups: Vec::new(), ids: Ids::default(),
@@ -669,8 +685,14 @@ impl Run<'_> {
     }
 
     fn go(&mut self) {
+        let first = self.recs.first().map_or(0, |r| r.nanos);
         while self.at < self.recs.len() {
             let r = self.recs[self.at].clone();
+            // The time of the recording: what is due by then goes out.
+            if self.links.is_paced() {
+                self.links.at(r.nanos.saturating_sub(first));
+                self.settle();
+            }
             match r.leg.as_str() {
                 "api_out" => self.request(&r),
                 "api_in" => {
@@ -701,6 +723,13 @@ impl Run<'_> {
             self.at += 1;
         }
         self.settle();
+        // What still waits for its turn or its pass.
+        for _ in 0..200 {
+            if !self.links.to_next_due() {
+                break;
+            }
+            self.settle();
+        }
         for link in [Link::Farm, Link::Ccp, Link::Hmds] {
             if let Some(f) = self.queue[link.index()].front() {
                 self.out.frame_error = Some(format!(
@@ -831,6 +860,14 @@ impl Run<'_> {
             return;
         }
         if self.opts.compare.contains(&kd) && !(self.opts.skip_frame)(&gw) {
+            // Paced: ibx may send it at a later step or pass than the
+            // reference did; the time goes on until it does.
+            for _ in 0..200 {
+                if !self.queue[link.index()].is_empty() || !self.links.to_next_due() {
+                    break;
+                }
+                self.settle();
+            }
             let Some(ours) = self.queue[link.index()].pop_front() else {
                 self.out.frame_error = Some(format!(
                     "seq {} {}: ibx did not send {}", r.seq, r.conn, normalised(kd, &gw, self.no_end.front() == Some(&true)),

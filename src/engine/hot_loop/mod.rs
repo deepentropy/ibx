@@ -75,6 +75,9 @@ pub struct HotLoop {
     cmd_received: u64,
     /// The market data messages that wait for the next pass (ibx#560).
     md_pass: crate::engine::md_pass::MdPass,
+    /// The time the pacing of requests and the market data passes go by,
+    /// when a test sets it (ibx#563); else the clock.
+    pace_clock: Option<Instant>,
     /// Slots told to market data requests whose turn has not come, by
     /// conId, oldest first (ibx#561). A slot here is not given back.
     md_slots_told: Vec<(i64, InstrumentId)>,
@@ -173,6 +176,7 @@ impl HotLoop {
             cmd_queue: std::collections::VecDeque::with_capacity(16),
             cmd_received: 0,
             md_pass: Default::default(),
+            pace_clock: None,
             md_slots_told: Vec::new(),
             pacer: None,
             farm: FarmState::new(),
@@ -621,7 +625,8 @@ impl HotLoop {
         }
         if !news_contract {
             if self.md_pass.on {
-                let mut sink = crate::engine::md_pass::HoldSink { farm: id, pass: &mut self.md_pass };
+                let now = self.pace_now();
+                let mut sink = crate::engine::md_pass::HoldSink { farm: id, pass: &mut self.md_pass, now };
                 self.farm.subscribe_top(sub, id, &mut sink, &mut self.hb);
             } else {
                 let Some(sink) = farm_sink!(self, id) else { return };
@@ -646,7 +651,7 @@ impl HotLoop {
         for w in waiting {
             let primary = self.context.listing_exchanges.get(&sub.con_id).cloned().unwrap_or_default();
             let msgs = self.farm.start_generic(sub.instrument, sub.con_id, &sub.exchange, &sub.sec_type, &primary, &w.codes, id);
-            self.send_farm_messages(msgs);
+            self.send_md_messages(msgs);
         }
     }
 
@@ -803,7 +808,7 @@ impl HotLoop {
         if !self.md_pass.on {
             return self.send_farm_messages(msgs);
         }
-        let now = Instant::now();
+        let now = self.pace_now();
         for (id, msg) in msgs {
             self.md_pass.hold(now, id, msg);
         }
@@ -814,7 +819,7 @@ impl HotLoop {
         if !self.md_pass.on {
             return;
         }
-        let msgs = self.md_pass.take_due(Instant::now(), !self.running);
+        let msgs = self.md_pass.take_due(self.pace_now(), !self.running);
         if !msgs.is_empty() {
             self.send_farm_messages(msgs);
         }
@@ -1681,7 +1686,7 @@ impl HotLoop {
                 }
             }
             Some(pacer) => {
-                let now = Instant::now();
+                let now = self.pace_clock.unwrap_or_else(Instant::now);
                 let mut waiting = self.cmd_queue.iter().filter(|q| crate::engine::pacer::is_request(&q.cmd)).count();
                 while let Some(q) = self.cmd_queue.front() {
                     if crate::engine::pacer::is_request(&q.cmd) {
@@ -1819,7 +1824,8 @@ impl HotLoop {
                                 f.note_request(Instant::now());
                             }
                             if self.md_pass.on {
-                                let mut sink = crate::engine::md_pass::HoldSink { farm: farm_id, pass: &mut self.md_pass };
+                                let now = self.pace_now();
+                                let mut sink = crate::engine::md_pass::HoldSink { farm: farm_id, pass: &mut self.md_pass, now };
                                 self.farm.subscribe_snapshot(&sub, farm_id, &mut sink, &mut self.hb);
                             } else if let Some(sink) = farm_sink!(self, farm_id) {
                                 self.farm.subscribe_snapshot(&sub, farm_id, sink, &mut self.hb);
@@ -2982,6 +2988,39 @@ impl HotLoop {
         self.pacer = Some(Default::default());
         // With it, the market data messages leave in passes (ibx#560).
         self.md_pass.on = true;
+    }
+
+    /// The time of the pacing and of the market data passes.
+    #[inline]
+    fn pace_now(&self) -> Instant {
+        self.pace_clock.unwrap_or_else(Instant::now)
+    }
+
+    /// Set the time the pacing of requests and the market data passes go
+    /// by, for a test that replays recorded times (ibx#563). It never goes
+    /// back.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_pace_clock(&mut self, now: Instant) {
+        self.pace_clock = Some(self.pace_clock.map_or(now, |was| was.max(now)));
+    }
+
+    /// The time set by `set_pace_clock`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pace_clock(&self) -> Option<Instant> {
+        self.pace_clock
+    }
+
+    /// The time at which something that waits now is due: the next step of
+    /// the pacing when requests wait, the next market data pass.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn next_pace_time(&self) -> Option<Instant> {
+        let held = self.cmd_queue.iter().any(|q| crate::engine::pacer::is_request(&q.cmd));
+        let step = self.pacer.as_ref().filter(|_| held).and_then(|p| p.next_step());
+        let pass = self.md_pass.due();
+        match (step, pass) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Mutably access heartbeat state for testing (e.g., setting timestamps).

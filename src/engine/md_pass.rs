@@ -59,6 +59,12 @@ impl MdPass {
         });
     }
 
+    /// When the pass that waits is due.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn due(&self) -> Option<Instant> {
+        self.due
+    }
+
     /// A pass is due within a few ms: the engine does not rest until then
     /// (its rest is far coarser than 5 ms on some systems).
     pub(crate) fn waits(&self) -> bool {
@@ -78,15 +84,21 @@ impl MdPass {
 }
 
 /// What makes two market data messages one: the farm, the action, the
-/// kind of their entries (top of book or not) and their data mode.
-fn key(farm: FarmId, msg: &[(u32, String)]) -> Option<(FarmId, String, bool, String)> {
+/// kind of their entries (top of book, news, or another generic tick) and
+/// their data mode. News entries keep their own message, as recorded on
+/// 02/10/2026.
+fn key(farm: FarmId, msg: &[(u32, String)]) -> Option<(FarmId, String, u8, String)> {
     if msg.first().is_none_or(|(tag, v)| *tag != 35 || v != "V") {
         return None;
     }
     let action = msg.iter().find(|(tag, _)| *tag == 263)?.1.clone();
     let mut kinds = msg.iter().filter(|(tag, _)| *tag == 264).map(|(_, v)| v.as_str()).peekable();
     kinds.peek()?;
-    let top = kinds.all(|k| k == "442" || k == "443");
+    let top = match kinds.peek().copied() {
+        Some("442" | "443") if kinds.all(|k| k == "442" || k == "443") => 0,
+        Some("292") => 1,
+        _ => 2,
+    };
     let mode = msg.iter().find(|(tag, _)| *tag == 9887).map(|(_, v)| v.clone()).unwrap_or_default();
     Some((farm, action, top, mode))
 }
@@ -94,7 +106,7 @@ fn key(farm: FarmId, msg: &[(u32, String)]) -> Option<(FarmId, String, bool, Str
 /// The messages of a pass: those of one key become one message, with the
 /// entries in the order they came and their count; the others as they are.
 fn group(held: Vec<FarmMessage>) -> Vec<FarmMessage> {
-    let mut out: Vec<(Option<(FarmId, String, bool, String)>, FarmMessage)> = Vec::new();
+    let mut out: Vec<(Option<(FarmId, String, u8, String)>, FarmMessage)> = Vec::new();
     for (farm, msg) in held {
         let k = key(farm, &msg);
         let first_entry = msg.iter().position(|(tag, _)| *tag == 262);
@@ -117,6 +129,7 @@ fn group(held: Vec<FarmMessage>) -> Vec<FarmMessage> {
 pub(crate) struct HoldSink<'a> {
     pub(crate) farm: FarmId,
     pub(crate) pass: &'a mut MdPass,
+    pub(crate) now: Instant,
 }
 
 impl FixSink for HoldSink<'_> {
@@ -126,7 +139,7 @@ impl FixSink for HoldSink<'_> {
 
     fn send_comp(&mut self, fields: &[(u32, &str)]) -> bool {
         let msg = fields.iter().map(|(tag, v)| (*tag, v.to_string())).collect();
-        self.pass.hold(Instant::now(), self.farm, msg);
+        self.pass.hold(self.now, self.farm, msg);
         true
     }
 }
@@ -168,6 +181,16 @@ mod tests {
             262=34|6008=265598|207=BEST|167=CS|264=443|9830=1");
         assert_eq!(text(&out[1].1), "35=V|263=2|146=2|262=38|6008=272093|207=NEWS|167=CS|264=292|9830=1|\
             262=35|6008=265598|207=NEWS|167=CS|264=292|9830=1");
+    }
+
+    // News entries and the other generic ticks are not one message.
+    #[test]
+    fn news_and_generic_ticks_stay_apart() {
+        let generic = |id: u32, kind: &str| vec![(35, "V".to_string()), (52, "t".into()), (263, "1".into()), (146, "1".into()),
+            (262, id.to_string()), (6008, "265598".into()), (207, "BEST".into()), (167, "CS".into()), (264, kind.into()), (9830, "1".into())];
+        let out = group(vec![(FARM, news("1", "265598", 3)), (FARM, generic(4, "233")), (FARM, generic(5, "236"))]);
+        let counts: Vec<&str> = out.iter().map(|(_, m)| m.iter().find(|(t, _)| *t == 146).unwrap().1.as_str()).collect();
+        assert_eq!(counts, ["1", "2"]);
     }
 
     // A request and a cancel, another farm, another data mode: not merged.

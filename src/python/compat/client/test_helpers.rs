@@ -643,6 +643,53 @@ impl EClient {
         Ok(())
     }
 
+    /// Pace the requests of this test connection, with no engine: the
+    /// test grants the turns with `_test_grant_turns` (ibx#563).
+    #[doc(hidden)]
+    fn _test_pace(&self) -> PyResult<()> {
+        self.shared_state()?.command_clock().pace_for_test();
+        Ok(())
+    }
+
+    /// Play the engine for what the client gave it to answer at its turn:
+    /// up to `count` turns are granted and errors written, oldest first.
+    /// Returns how many were taken.
+    #[doc(hidden)]
+    #[pyo3(signature = (count=usize::MAX))]
+    fn _test_grant_turns(&self, count: usize) -> PyResult<usize> {
+        let shared = self.shared_state()?;
+        let clock = shared.command_clock();
+        let mut taken = 0;
+        // What is not taken stays for the next call.
+        let mut rest = Vec::new();
+        clock.set_engine_thread(true);
+        for (after, cmd) in clock.take_deferred() {
+            if taken >= count {
+                rest.push((after, cmd));
+                continue;
+            }
+            taken += 1;
+            let cmd = match cmd {
+                ControlCommand::Unpaced(inner) => *inner,
+                cmd => cmd,
+            };
+            match cmd {
+                ControlCommand::Turn { reply_tx } => { let _ = reply_tx.send(()); }
+                ControlCommand::LocalError { queue, req_id, code, message } => match queue {
+                    crate::types::ErrorQueue::Order => shared.orders.push_order_error(req_id, code, message),
+                    crate::types::ErrorQueue::OrderNotice => shared.orders.push_order_notice(req_id, code, message),
+                    crate::types::ErrorQueue::Historical => shared.reference.push_historical_error(req_id, code as i32, message),
+                    crate::types::ErrorQueue::TickByTick => shared.market.push_tbt_error(req_id, code as i32, message),
+                    crate::types::ErrorQueue::Connection => shared.push_connection_notice(code, message),
+                },
+                _ => {}
+            }
+        }
+        clock.set_engine_thread(false);
+        clock.give_back_deferred(rest);
+        Ok(taken)
+    }
+
     /// Run ONE iteration of the event dispatch loop.
     #[doc(hidden)]
     fn _test_dispatch_once(&self, py: Python<'_>) -> PyResult<()> {

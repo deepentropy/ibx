@@ -125,6 +125,11 @@ impl Pacer {
         true
     }
 
+    /// When the step after the current one starts; `None` at rest.
+    pub(crate) fn next_step(&self) -> Option<Instant> {
+        self.interval.as_ref().map(|iv| iv.start + STEP * (iv.step.wrapping_add(1)))
+    }
+
     /// No request waits: the pacer is at rest once the last one is done.
     pub(crate) fn nothing_waits(&mut self, now: Instant) {
         self.was_empty = true;

@@ -244,6 +244,15 @@ impl CommandClock {
         if deferred.is_empty() { Vec::new() } else { std::mem::take(&mut *deferred) }
     }
 
+    /// Put back commands taken by `take_deferred` and not handled, ahead
+    /// of those given since.
+    #[cfg(any(test, feature = "test-support", feature = "python"))]
+    pub fn give_back_deferred(&self, mut rest: Vec<(u64, ControlCommand)>) {
+        let mut deferred = self.deferred.lock().unwrap();
+        rest.append(&mut deferred);
+        *deferred = rest;
+    }
+
     /// An error of the client itself: true when the engine takes it and
     /// writes it at the turn of its request.
     #[inline]
@@ -281,6 +290,21 @@ impl CommandClock {
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         self.defer(ControlCommand::Turn { reply_tx });
         Some(reply_rx)
+    }
+
+    /// The requests are paced and an engine runs, on another thread than
+    /// the caller's: for a test that plays the engine itself (ibx#563).
+    #[cfg(any(test, feature = "test-support", feature = "python"))]
+    pub fn pace_for_test(&self) {
+        self.paced.store(true, Ordering::Release);
+        self.running.store(true, Ordering::Release);
+    }
+
+    /// The calling thread is (or is no longer) the one that runs the
+    /// engine, for a test that steps the engine itself (ibx#563).
+    #[cfg(any(test, feature = "test-support", feature = "python"))]
+    pub fn set_engine_thread(&self, on: bool) {
+        ON_ENGINE_THREAD.with(|flag| flag.set(on));
     }
 
     /// Wait until the engine has handled the commands sent so far. At once

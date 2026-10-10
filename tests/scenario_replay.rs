@@ -35,11 +35,21 @@ fn orders() -> Options {
 /// Replay a scenario and check both legs; the outcome for more checks.
 #[track_caller]
 fn check(name: &str, opts: Options) -> Outcome {
-    let o = replay(&load_scenario(name), &opts);
+    let sc = load_scenario(name);
+    let o = replay(&sc, &opts);
     if std::env::var_os("IBX_SCENARIO_DUMP").is_some() {
         dump(name, &o);
     }
     o.assert_same();
+    // Once more as a session opened by a logon runs: the requests paced
+    // and the market data sent in passes, by the times of the recording
+    // (ibx#563). The same messages in the same order, the same callbacks.
+    let paced = replay(&sc, &opts.clone().paced());
+    if std::env::var_os("IBX_SCENARIO_DUMP").is_some() {
+        dump(&format!("{name} (paced)"), &paced);
+    }
+    paced.assert_same();
+    assert_eq!(paced.frames_compared, o.frames_compared, "{name}: frames compared with the pacing on");
     o
 }
 

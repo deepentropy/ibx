@@ -62,7 +62,13 @@ pub struct Links {
     pub farm_out: Vec<Fields>,
     pub ccp_out: Vec<Fields>,
     pub hmds_out: Vec<Fields>,
+    /// The requests are paced and the market data sent in passes, by the
+    /// clock of `at` (ibx#563); the time `at(0)` stands for.
+    paced: Option<std::time::Instant>,
 }
+
+/// How long a call may run before it is taken as waiting for its turn.
+const CALL_WAITS: std::time::Duration = std::time::Duration::from_millis(30);
 
 impl Links {
     pub fn new() -> Self {
@@ -100,6 +106,46 @@ impl Links {
         Self {
             engine, shared, control_tx, farm, ccp, hmds,
             farm_out: Vec::new(), ccp_out: Vec::new(), hmds_out: Vec::new(),
+            paced: None,
+        }
+    }
+
+    /// Pace the requests and send the market data in passes, as a session
+    /// opened by a logon (ibx#555, ibx#560), by a clock the test sets with
+    /// `at`. The answers the client gives itself take their turn too.
+    pub fn pace(&mut self) {
+        let start = std::time::Instant::now();
+        self.engine.pace_requests();
+        self.engine.set_pace_clock(start);
+        let clock = self.shared.command_clock();
+        clock.set_paced(None);
+        // The engine is stepped by the thread of the test.
+        clock.set_running(true);
+        self.paced = Some(start);
+    }
+
+    pub fn is_paced(&self) -> bool {
+        self.paced.is_some()
+    }
+
+    /// Set the clock of the pacing `nanos` after its start; it never goes
+    /// back. Nothing when the links are not paced.
+    pub fn at(&mut self, nanos: u64) {
+        if let Some(start) = self.paced {
+            self.engine.set_pace_clock(start + std::time::Duration::from_nanos(nanos));
+        }
+    }
+
+    /// Move the clock to the time at which what waits is due (the next
+    /// step of the pacing, the next market data pass); false when nothing
+    /// waits.
+    pub fn to_next_due(&mut self) -> bool {
+        match self.engine.next_pace_time().filter(|_| self.paced.is_some()) {
+            Some(due) => {
+                self.engine.set_pace_clock(due);
+                true
+            }
+            None => false,
         }
     }
 
@@ -162,17 +208,39 @@ impl Links {
     /// The engine's thread reads the machine zone of this one.
     pub fn during<R>(&mut self, f: impl FnOnce() -> R) -> R {
         let stop = AtomicBool::new(false);
+        let paced = self.paced.is_some();
+        let clock = self.shared.command_clock().clone();
         let engine = &mut self.engine;
         let zone = crate::gateway::machine_zone_for_test();
         let out = std::thread::scope(|s| {
             s.spawn(|| {
                 crate::gateway::set_machine_zone_for_test(zone.as_deref());
+                if paced {
+                    clock.set_engine_thread(true);
+                }
+                let mut waited = std::time::Instant::now();
                 while !stop.load(Ordering::Acquire) {
                     engine.step_for_test();
+                    // A call that waits for its turn: the time of the
+                    // pacing goes to that turn (ibx#563).
+                    if paced && waited.elapsed() >= CALL_WAITS {
+                        if let Some(due) = engine.next_pace_time() {
+                            engine.set_pace_clock(due);
+                        }
+                        waited = std::time::Instant::now();
+                    }
                     std::thread::yield_now();
                 }
             });
+            // The caller is not the engine while it calls: what it answers
+            // itself takes its turn.
+            if paced {
+                self.shared.command_clock().set_engine_thread(false);
+            }
             let out = f();
+            if paced {
+                self.shared.command_clock().set_engine_thread(true);
+            }
             stop.store(true, Ordering::Release);
             out
         });

@@ -20,6 +20,8 @@ pub struct Rec {
     pub leg: String,
     /// `api:<port>`, `CCP`, `usfarm`, ...
     pub conn: String,
+    /// When it was recorded, in ns of the recording's clock.
+    pub nanos: u64,
     /// The frame's message type, or the API message's name.
     pub msg: String,
     pub raw: Vec<u8>,
@@ -105,6 +107,7 @@ pub fn load_path(path: &Path) -> Scenario {
             seq,
             leg: s("leg"),
             conn: s("conn"),
+            nanos: v["nanos"].as_u64().unwrap_or(0),
             msg: if v["msg_type"].is_string() { s("msg_type") } else { s("msg_name") },
             raw: v["raw_b64"].as_str().map(|b| base64::engine::general_purpose::STANDARD.decode(b).unwrap()).unwrap_or_default(),
             request: decoded["request"].clone(),
