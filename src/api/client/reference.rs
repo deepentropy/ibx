@@ -188,7 +188,7 @@ impl EClient {
             Ok(increments) => wrapper.market_rule(market_rule_id as i64, &increments.iter()
                 .map(|pi| crate::api::types::PriceIncrement { low_edge: pi.low_edge, increment: pi.increment })
                 .collect::<Vec<_>>()),
-            Err((code, message)) => wrapper.error(-1, code, &message, ""),
+            Err((code, message)) => self.local_error(wrapper, -1, code, &message),
         }
     }
 

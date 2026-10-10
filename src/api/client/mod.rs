@@ -187,8 +187,8 @@ impl EClient {
     /// `process_msgs()`, or keep `capacity` generous.
     ///
     /// Attaching a channel makes the engine build events it would otherwise
-    /// skip, which for bar batches and contract definitions means one deep copy
-    /// each. Use [`connect()`](EClient::connect) when you only need the wrapper
+    /// skip, which means one copy of each answer (bar batches, contract
+    /// definitions, option chains, scanner rows and the others, ibx#498). Use [`connect()`](EClient::connect) when you only need the wrapper
     /// callbacks (ibx#242).
     pub fn connect_with_events(
         config: &EClientConfig,
@@ -197,6 +197,14 @@ impl EClient {
         let (event_tx, event_rx) = crossbeam_channel::bounded(capacity.max(1));
         let client = Self::connect_inner(config, Some(event_tx))?;
         Ok((client, event_rx))
+    }
+
+    /// An error this client answers itself, with no queue behind it: to
+    /// the wrapper, and to the event channel when one is attached
+    /// (ibx#498).
+    pub(crate) fn local_error(&self, wrapper: &mut impl crate::api::wrapper::Wrapper, req_id: i64, code: i64, text: &str) {
+        wrapper.error(req_id, code, text, "");
+        self.shared.emit_error(req_id, code, text);
     }
 
     fn connect_inner(

@@ -300,7 +300,7 @@ impl EClient {
         // Requests that joined a subscription, and subscriptions the
         // server rejected (ibx#444, ibx#447).
         let (notices, commands) = self.core.take_md_rejects(&self.shared);
-        Self::md_notices(wrapper, notices);
+        self.md_notices(wrapper, notices);
         {
             // The client's own follow-up of a refusal, not an API request:
             // not paced (ibx#555).
@@ -328,13 +328,13 @@ impl EClient {
                     }
                     wrapper.tick_snapshot_end(req_id);
                 }
-                Err((code, text)) => wrapper.error(req_id, code, &text, ""),
+                Err((code, text)) => self.local_error(wrapper, req_id, code, &text),
             }
         }
 
         // What the requests that joined a running subscription get at once
         // (ibx#444).
-        Self::md_notices(wrapper, self.core.take_md_joins());
+        self.md_notices(wrapper, self.core.take_md_joins());
 
         // Request parameters, once per request (ibx#449), after the market
         // data type (ibx#446).
@@ -381,7 +381,7 @@ impl EClient {
         }
         // Paper: the requests still without data after their wait (10197,
         // ibx#444).
-        Self::md_notices(wrapper, self.core.take_md_no_data(std::time::Instant::now()));
+        self.md_notices(wrapper, self.core.take_md_no_data(std::time::Instant::now()));
 
         // Historical ticks — route to the variant-specific callback (iso
         // ibapi); before the tick-by-tick ticks, as the past ticks of a
@@ -440,14 +440,14 @@ impl EClient {
     }
 
     /// The callbacks of market data requests beside their ticks (ibx#444).
-    fn md_notices(wrapper: &mut impl Wrapper, notices: Vec<crate::client_core::MdNotice>) {
+    fn md_notices(&self, wrapper: &mut impl Wrapper, notices: Vec<crate::client_core::MdNotice>) {
         use crate::client_core::MdNotice;
         for notice in notices {
             match notice {
                 MdNotice::MarketDataType { req_id, market_data_type } => wrapper.market_data_type(req_id, market_data_type),
                 MdNotice::TickReqParams { req_id, min_tick, bbo_exchange, permissions } =>
                     wrapper.tick_req_params(req_id, min_tick, &bbo_exchange, permissions),
-                MdNotice::Error { req_id, code, text } => wrapper.error(req_id, code, &text, ""),
+                MdNotice::Error { req_id, code, text } => self.local_error(wrapper, req_id, code, &text),
                 MdNotice::News { req_id, news } => wrapper.tick_news(
                     req_id, news.timestamp, &news.provider_code, &news.article_id, &news.headline, &news.extra_data,
                 ),
@@ -529,7 +529,7 @@ impl EClient {
         for (req_id, answer) in self.core.take_smart_components(&self.shared) {
             match answer {
                 Ok(components) => wrapper.smart_components(req_id, &components),
-                Err((code, msg)) => wrapper.error(req_id, code, &msg, ""),
+                Err((code, msg)) => self.local_error(wrapper, req_id, code, &msg),
             }
         }
 

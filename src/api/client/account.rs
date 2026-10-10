@@ -52,7 +52,7 @@ impl EClient {
             wrapper.position_end();
         }
         if let Some((code, message)) = batch.error {
-            wrapper.error(-1, code, &message, "");
+            self.local_error(wrapper, -1, code, &message);
         }
     }
 
@@ -190,7 +190,7 @@ impl EClient {
         let _request = crate::engine::park::one_request();
         if !crate::client_core::ClientCore::ids_fit("req_account_updates_multi", &[req_id]) { return; }
         if let Err((code, message)) = self.core.subscribe_account_multi(req_id, account, model_code, ledger_and_nlv) {
-            wrapper.error(req_id, code, &message, "");
+            self.local_error(wrapper, req_id, code, &message);
             return;
         }
         self.dispatch_multi(wrapper);
@@ -265,7 +265,7 @@ impl EClient {
                 wrapper.position_multi_end(req_id);
             }
             if let Some((code, message)) = batch.error {
-                wrapper.error(req_id, code, &message, "");
+                self.local_error(wrapper, req_id, code, &message);
             }
         }
     }

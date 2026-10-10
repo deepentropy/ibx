@@ -1127,8 +1127,16 @@ fn market_data_rejects_are_reported() {
     shared.market.push_md_reject(crate::bridge::MdReject::Delayed { instrument: 0 });
     shared.market.push_md_reject(crate::bridge::MdReject::NotSubscribed {
         instrument: 1, delayed_available: false, needs_api_subscription: false, description: String::new(), kept_params: None });
+    let (tx, events) = crossbeam_channel::unbounded();
+    shared.attach_event_channel(&tx);
     let mut w = RecordingWrapper::default();
     client.process_msgs(&mut w);
+    // The same errors on the event channel, with their request ids (ibx#498).
+    let on_channel: Vec<(i64, i64)> = events.try_iter().filter_map(|e| match e {
+        crate::bridge::Event::Error { req_id, code, .. } => Some((req_id, code)),
+        _ => None,
+    }).collect();
+    assert_eq!(on_channel, [(5, 10167), (6, 354)]);
     let at = |e: &str| w.events.iter().position(|x| x == e);
     let mdt = at("market_data_type:5:3").expect("type 3");
     let delayed = at("error:5:10167:Requested market data is not subscribed. Displaying delayed market data.").expect("10167");
@@ -3510,6 +3518,22 @@ fn req_market_rule_answers_known_rules_and_refuses_others() {
         "error:-1:322:Error processing request.-'cd' : cause - Market rule with id = 999999 is missing".to_string(),
         "error:-1:322:Error processing request.-'cd' : cause - Price increment rule for market rule with id = 5 is missing".to_string(),
     ]);
+}
+
+// ibx#498: an error the client answers itself (here the market rule
+// lookup) also goes to an attached event channel.
+#[test]
+fn an_error_answered_by_the_client_goes_to_the_event_channel() {
+    let (client, _rx, shared) = test_client();
+    let (tx, events) = crossbeam_channel::unbounded();
+    shared.attach_event_channel(&tx);
+    let mut w = RecordingWrapper::default();
+    client.req_market_rule(999999, &mut w);
+    assert_eq!(w.events.len(), 1);
+    match events.try_recv() {
+        Ok(crate::bridge::Event::Error { req_id: -1, code: 322, message }) => assert!(message.ends_with("999999 is missing")),
+        other => panic!("the 322 was expected on the channel: {other:?}"),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════

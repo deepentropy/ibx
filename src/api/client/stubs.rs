@@ -6,13 +6,13 @@ use crate::api::wrapper::Wrapper;
 
 use super::EClient;
 
-/// The error of a refused display group request (ibx#424).
-fn display_group_refused(wrapper: &mut impl Wrapper, text: &str) {
-    let (id, code) = crate::client_core::DISPLAY_GROUP_REFUSAL;
-    wrapper.error(id, code, text, "");
-}
-
 impl EClient {
+    /// The error of a refused display group request (ibx#424).
+    fn display_group_refused(&self, wrapper: &mut impl Wrapper, text: &str) {
+        let (id, code) = crate::client_core::DISPLAY_GROUP_REFUSAL;
+        self.local_error(wrapper, id, code, text);
+    }
+
     // ── Smart Components ──
 
     /// Request smart routing components for a BBO exchange. Matches `reqSmartComponents` in C++.
@@ -28,7 +28,7 @@ impl EClient {
         if !crate::client_core::ClientCore::ids_fit("req_smart_components", &[req_id]) { return; }
         match self.core.req_smart_components(req_id, bbo_exchange, &self.shared) {
             Some(Ok(components)) => wrapper.smart_components(req_id, &components),
-            Some(Err((code, msg))) => wrapper.error(req_id, code, &msg, ""),
+            Some(Err((code, msg))) => self.local_error(wrapper, req_id, code, &msg),
             None => {}
         }
     }
@@ -167,7 +167,7 @@ impl EClient {
         if !crate::client_core::ClientCore::ids_fit("query_display_groups", &[req_id]) { return; }
         match crate::client_core::ClientCore::query_display_groups(req_id) {
             Ok(groups) => wrapper.display_group_list(req_id, groups),
-            Err(text) => display_group_refused(wrapper, &text),
+            Err(text) => self.display_group_refused(wrapper, &text),
         }
     }
 
@@ -183,7 +183,7 @@ impl EClient {
         if !crate::client_core::ClientCore::ids_fit("subscribe_to_group_events", &[req_id]) { return; }
         match self.core.subscribe_to_group_events(req_id, group_id) {
             Ok(contract_info) => wrapper.display_group_updated(req_id, contract_info),
-            Err(text) => display_group_refused(wrapper, &text),
+            Err(text) => self.display_group_refused(wrapper, &text),
         }
     }
 
