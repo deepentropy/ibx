@@ -144,7 +144,7 @@ pub fn not_a_request() -> RequestScope {
 
 /// The command as it is sent in the scope of this thread.
 #[inline]
-fn scoped(cmd: ControlCommand) -> ControlCommand {
+pub(crate) fn scoped(cmd: ControlCommand) -> ControlCommand {
     match SCOPE.with(|s| s.get()) {
         Scope::Each => cmd,
         _ if !super::pacer::is_request(&cmd) => cmd,
@@ -194,6 +194,13 @@ impl ControlSender {
         }
         self.sent(sent.is_ok());
         sent
+    }
+
+    /// Whether the engine of this sender paces the requests (a sender made
+    /// from a plain channel has none that does).
+    #[inline]
+    pub(crate) fn paced(&self) -> bool {
+        self.marks
     }
 
     /// The command as it is sent in the scope of this thread.

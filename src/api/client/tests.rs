@@ -6591,6 +6591,41 @@ fn requests_the_reference_session_does_not_have() {
     ]);
 }
 
+// ibx#561: on a paced session a market data request asks for its slot
+// first, which the engine tells at once, and sends its subscribe with no
+// reply to wait for.
+#[test]
+fn a_paced_market_data_request_does_not_wait_for_its_subscribe() {
+    let shared = Arc::new(SharedState::new());
+    let (raw_tx, rx) = crossbeam_channel::unbounded();
+    let tx = crate::engine::park::ControlSender::new(raw_tx, None, None);
+    let core = crate::client_core::ClientCore::new();
+    let engine = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        while let Ok(cmd) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            match cmd {
+                ControlCommand::MarketDataSlot { con_id, reply_tx, .. } => {
+                    seen.push(format!("slot {con_id}"));
+                    let _ = reply_tx.send(Ok(7));
+                }
+                // Never answered: the call must not wait for it.
+                ControlCommand::Subscribe { con_id, reply_tx, .. } => {
+                    seen.push(format!("subscribe {con_id} reply {}", reply_tx.is_some()));
+                }
+                other => seen.push(format!("{other:?}").chars().take(20).collect()),
+            }
+        }
+        seen
+    });
+    let started = std::time::Instant::now();
+    let slot = core.register_mkt_data(&shared, &tx, 1, 265598, "AAPL", "SMART", "STK", "USD", &Default::default(), false, "mdoff", 0)
+        .unwrap();
+    assert_eq!(slot, Some(7));
+    assert!(started.elapsed() < std::time::Duration::from_millis(200), "{:?}", started.elapsed());
+    drop(tx);
+    assert_eq!(engine.join().unwrap(), ["slot 265598", "subscribe 265598 reply false"]);
+}
+
 // Without SECDEFTA in the logon feature list, a matching symbols request
 // is refused with 321 before the pattern checks, and nothing is sent.
 #[test]

@@ -2072,13 +2072,7 @@ impl ClientCore {
             return Ok(None);
         }
 
-        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
-        control_tx.send(ControlCommand::RegisterInstrument {
-            con_id, symbol: symbol.to_string(),
-            sec_type: sec_type.to_string(), exchange: exchange.to_string(),
-            reply_tx: None,
-        }).map_err(|e| format!("Engine stopped: {}", e))?;
-        control_tx.send(ControlCommand::Subscribe {
+        let subscribe = |reply_tx| ControlCommand::Subscribe {
             con_id,
             symbol: symbol.to_string(),
             exchange: exchange.to_string(),
@@ -2088,10 +2082,31 @@ impl ClientCore {
             right: right.to_string(),
             multiplier: multiplier.to_string(),
             mode_9887, snapshot,
-            reply_tx: Some(reply_tx),
-        }).map_err(|e| format!("Engine stopped: {}", e))?;
-
+            reply_tx,
+        };
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        if control_tx.paced() {
+            // The slot is told at once; the request itself waits for its
+            // turn among the requests made before it, and the call does
+            // not (ibx#561).
+            control_tx.send(ControlCommand::MarketDataSlot {
+                con_id, symbol: symbol.to_string(),
+                sec_type: sec_type.to_string(), exchange: exchange.to_string(),
+                mode_9887, snapshot, reply_tx,
+            }).map_err(|e| format!("Engine stopped: {}", e))?;
+        } else {
+            control_tx.send(ControlCommand::RegisterInstrument {
+                con_id, symbol: symbol.to_string(),
+                sec_type: sec_type.to_string(), exchange: exchange.to_string(),
+                reply_tx: None,
+            }).map_err(|e| format!("Engine stopped: {}", e))?;
+            control_tx.send(subscribe(Some(reply_tx))).map_err(|e| format!("Engine stopped: {}", e))?;
+        }
         let instrument_id = Self::recv_registration(reply_rx)?;
+        if control_tx.paced() {
+            control_tx.send(subscribe(None)).map_err(|e| format!("Engine stopped: {}", e))?;
+        }
+
         self.con_id_to_instrument.lock().unwrap().insert(con_id, instrument_id);
         let attached = attach(instrument_id, false);
         if delayed_known && self.req_to_instrument.lock().unwrap().contains_key(&req_id) {

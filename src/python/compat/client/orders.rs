@@ -256,6 +256,7 @@ impl EClient {
     #[pyo3(signature = (num_ids=1))]
     fn req_ids(&self, py: Python<'_>, num_ids: i32) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         let shared = self.shared_state()?;
         let next_id = py.detach(|| {
             ClientCore::wait_order_replay(&shared);
@@ -314,6 +315,7 @@ impl EClient {
     #[pyo3(signature = (req_id, exec_filter=None))]
     fn req_executions(&self, py: Python<'_>, req_id: i64, exec_filter: Option<Py<PyAny>>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         if !crate::client_core::ClientCore::ids_fit("req_executions", &[req_id]) { return Ok(()); }
         let filter = if let Some(ref fobj) = exec_filter {
             let get = |attr: &str| -> String {
@@ -393,6 +395,7 @@ impl EClient {
     #[pyo3(signature = (api_only=false))]
     fn req_completed_orders(&self, py: Python<'_>, api_only: bool) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         let _ = api_only;
         // The lock is let go before the callbacks: held across one that
         // releases the interpreter lock (a file write, a lock, a sleep), it
@@ -446,6 +449,7 @@ impl EClient {
     /// The open orders, each as open_order then order_status, then the end
     /// of the list.
     pub(crate) fn answer_open_orders(&self, py: Python<'_>, shared: &SharedState, request: crate::client_core::OpenOrdersRequest) -> PyResult<()> {
+        self.turn(py);
         // In the book's order, with the order id and client id the
         // reference shows; OPEN_ORDER then ORDER_STATUS for each.
         let orders = self.core.open_orders_listing(shared, request);

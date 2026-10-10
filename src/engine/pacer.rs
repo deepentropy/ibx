@@ -43,12 +43,24 @@ pub(crate) fn is_request(cmd: &ControlCommand) -> bool {
 pub(crate) fn is_aside(cmd: &ControlCommand) -> bool {
     matches!(cmd,
         ControlCommand::RegisterInstrument { .. }
+        | ControlCommand::MarketDataSlot { .. }
         | ControlCommand::RegisterOrderContract { .. }
         | ControlCommand::SetInstrumentCurrency { .. }
         | ControlCommand::UpdateParam { .. }
         | ControlCommand::DropSnapshot { .. }
         | ControlCommand::Ping
         | ControlCommand::Shutdown)
+}
+
+/// A command as the engine keeps it until it is taken: `channel` tells a
+/// command of the channel from one the client gave aside of it, and
+/// `ordinal` is its place among the commands of the channel (for the
+/// second kind: the command of the channel it follows).
+#[derive(Debug)]
+pub(crate) struct Queued {
+    pub(crate) ordinal: u64,
+    pub(crate) channel: bool,
+    pub(crate) cmd: ControlCommand,
 }
 
 #[derive(Debug)]

@@ -21,6 +21,8 @@ impl EClient {
     /// `tick_req_params`); an unknown one gives error 321. When the map has
     /// not come yet, the answer comes from `process_msgs`, within 2 s.
     pub fn req_smart_components(&self, req_id: i64, bbo_exchange: &str, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         if !crate::client_core::ClientCore::ids_fit("req_smart_components", &[req_id]) { return; }
         match self.core.req_smart_components(req_id, bbo_exchange, &self.shared) {
             Some(Ok(components)) => wrapper.smart_components(req_id, &components),
@@ -34,6 +36,8 @@ impl EClient {
     /// Request available news providers. Matches `reqNewsProviders` in C++.
     /// Gateway-local — returns provider list from init data.
     pub fn req_news_providers(&self, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         let providers = self.shared.reference.news_providers();
         wrapper.news_providers(&providers);
     }
@@ -128,6 +132,8 @@ impl EClient {
     /// Query display groups. Matches `queryDisplayGroups` in C++.
     /// Gateway-local, as the reference (ibx#424): the fixed list of groups.
     pub fn query_display_groups(&self, req_id: i64, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         if !crate::client_core::ClientCore::ids_fit("query_display_groups", &[req_id]) { return; }
         match crate::client_core::ClientCore::query_display_groups(req_id) {
             Ok(groups) => wrapper.display_group_list(req_id, groups),
@@ -140,6 +146,8 @@ impl EClient {
     /// the group at once, `none` since no group has one; error 321 for a
     /// group outside 1 to 7 or a request id already subscribed.
     pub fn subscribe_to_group_events(&self, req_id: i64, group_id: i32, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         if !crate::client_core::ClientCore::ids_fit("subscribe_to_group_events", &[req_id]) { return; }
         match self.core.subscribe_to_group_events(req_id, group_id) {
             Ok(contract_info) => wrapper.display_group_updated(req_id, contract_info),
@@ -184,6 +192,8 @@ impl EClient {
     /// Gateway-local — returns tiers parsed from CCP logon tag 6522, none
     /// when the logon has no tiers (ibx#480).
     pub fn req_soft_dollar_tiers(&self, req_id: i64, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         if !crate::client_core::ClientCore::ids_fit("req_soft_dollar_tiers", &[req_id]) { return; }
         let tiers = self.shared.reference.soft_dollar_tiers();
         wrapper.soft_dollar_tiers(req_id, &tiers);
@@ -194,6 +204,8 @@ impl EClient {
     /// Request family codes. Matches `reqFamilyCodes` in C++.
     /// Gateway-local — returns codes parsed from CCP logon tag 6823.
     pub fn req_family_codes(&self, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         let codes = self.shared.reference.family_codes();
         wrapper.family_codes(&codes);
     }
@@ -218,6 +230,8 @@ impl EClient {
     /// Request user info. Matches `reqUserInfo` in C++.
     /// Gateway-local — returns whiteBrandingId from CCP logon.
     pub fn req_user_info(&self, req_id: i64, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         if !crate::client_core::ClientCore::ids_fit("req_user_info", &[req_id]) { return; }
         let id = self.shared.reference.white_branding_id();
         wrapper.user_info(req_id, &id);

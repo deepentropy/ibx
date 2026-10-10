@@ -70,7 +70,12 @@ pub struct HotLoop {
     /// Reusable buffer for control commands (avoids per-iteration allocation).
     cmd_buf: Vec<ControlCommand>,
     /// The commands received and not taken yet, in order (ibx#555).
-    cmd_queue: std::collections::VecDeque<ControlCommand>,
+    cmd_queue: std::collections::VecDeque<crate::engine::pacer::Queued>,
+    /// Commands read from the channel so far.
+    cmd_received: u64,
+    /// Slots told to market data requests whose turn has not come, by
+    /// conId, oldest first (ibx#561). A slot here is not given back.
+    md_slots_told: Vec<(i64, InstrumentId)>,
     /// The pacing of API requests, as the reference's; `None` takes every
     /// command at once (engines built by hand, tests).
     pacer: Option<crate::engine::pacer::Pacer>,
@@ -164,6 +169,8 @@ impl HotLoop {
             hb: HeartbeatState::new(),
             cmd_buf: Vec::with_capacity(16),
             cmd_queue: std::collections::VecDeque::with_capacity(16),
+            cmd_received: 0,
+            md_slots_told: Vec::new(),
             pacer: None,
             farm: FarmState::new(),
             ccp: CcpState::new(),
@@ -216,6 +223,9 @@ impl HotLoop {
         };
         self.parker = Parker::new(waker.clone());
         self.set_control_rx(rx);
+        if self.pacer.is_some() {
+            self.shared.command_clock().set_paced(waker.clone());
+        }
         ControlSender::new(tx, waker, Some(self.shared.command_clock().clone()))
     }
 
@@ -1229,6 +1239,10 @@ impl HotLoop {
         if !self.context.open_orders_for(instrument).is_empty() {
             return;
         }
+        // Told to a market data request that waits for its turn (ibx#561).
+        if self.md_slots_told.iter().any(|(_, slot)| *slot == instrument) {
+            return;
+        }
         if self.farm.has_md_subscription(instrument)
             || self.context.lot_parked.iter().chain(&self.context.lot_ready).chain(&self.context.md_resolved)
                 .chain(self.context.md_lookups.iter().map(|(_, s, _)| s))
@@ -1555,16 +1569,33 @@ impl HotLoop {
             None => return,
         };
 
-        self.cmd_queue.extend(rx.try_iter());
+        use crate::engine::pacer::Queued;
+        for cmd in rx.try_iter() {
+            self.cmd_received += 1;
+            self.cmd_queue.push_back(Queued { ordinal: self.cmd_received, channel: true, cmd });
+        }
 
         // try_iter() stops on both Empty and Disconnected — do one extra
         // try_recv() to distinguish.  If a straggler command arrived between
         // try_iter() finishing and this call, push it into the batch.
         let sender_dropped = match rx.try_recv() {
-            Ok(cmd)  => { self.cmd_queue.push_back(cmd); false }
+            Ok(cmd)  => {
+                self.cmd_received += 1;
+                self.cmd_queue.push_back(Queued { ordinal: self.cmd_received, channel: true, cmd });
+                false
+            }
             Err(crossbeam_channel::TryRecvError::Empty)        => false,
             Err(crossbeam_channel::TryRecvError::Disconnected) => true,
         };
+
+        // The answers the client gives itself (ibx#561), each behind the
+        // commands sent before it.
+        if self.pacer.is_some() {
+            for (after, cmd) in self.shared.command_clock().take_deferred() {
+                let at = self.cmd_queue.partition_point(|q| q.ordinal <= after);
+                self.cmd_queue.insert(at, Queued { ordinal: after, channel: false, cmd });
+            }
+        }
 
         // The commands taken in this pass, in order. API requests are
         // paced as the reference paces them (ibx#555); a further command
@@ -1572,32 +1603,46 @@ impl HotLoop {
         // (a contract registration, housekeeping) is taken at once. A
         // shutdown ends the pacing.
         self.cmd_buf.clear();
-        let shutdown = self.cmd_queue.iter().any(|c| matches!(c, ControlCommand::Shutdown));
+        // Told once their answers are written (ibx#529): the commands of
+        // the channel among those taken.
+        let mut taken = 0u64;
+        let mut take = |buf: &mut Vec<ControlCommand>, q: Queued| {
+            taken += u64::from(q.channel);
+            buf.push(q.cmd);
+        };
+        let shutdown = self.cmd_queue.iter().any(|q| matches!(q.cmd, ControlCommand::Shutdown));
         match self.pacer.as_mut().filter(|_| !shutdown) {
-            None => self.cmd_buf.extend(self.cmd_queue.drain(..)),
+            None => {
+                for q in self.cmd_queue.drain(..) {
+                    take(&mut self.cmd_buf, q);
+                }
+            }
             Some(pacer) => {
                 let now = Instant::now();
-                let mut waiting = self.cmd_queue.iter().filter(|c| crate::engine::pacer::is_request(c)).count();
-                while let Some(cmd) = self.cmd_queue.front() {
-                    if crate::engine::pacer::is_request(cmd) {
+                let mut waiting = self.cmd_queue.iter().filter(|q| crate::engine::pacer::is_request(&q.cmd)).count();
+                while let Some(q) = self.cmd_queue.front() {
+                    if crate::engine::pacer::is_request(&q.cmd) {
                         if !pacer.admit(now, waiting) {
                             break;
                         }
                         waiting -= 1;
                     }
-                    self.cmd_buf.extend(self.cmd_queue.pop_front());
+                    if let Some(q) = self.cmd_queue.pop_front() {
+                        take(&mut self.cmd_buf, q);
+                    }
                 }
                 if waiting == 0 {
                     pacer.nothing_waits(now);
-                } else if self.cmd_queue.iter().any(crate::engine::pacer::is_aside) {
-                    let (aside, held): (Vec<_>, Vec<_>) = self.cmd_queue.drain(..).partition(crate::engine::pacer::is_aside);
-                    self.cmd_buf.extend(aside);
+                } else if self.cmd_queue.iter().any(|q| crate::engine::pacer::is_aside(&q.cmd)) {
+                    let (aside, held): (Vec<_>, Vec<_>) = self.cmd_queue.drain(..)
+                        .partition(|q| crate::engine::pacer::is_aside(&q.cmd));
+                    for q in aside {
+                        take(&mut self.cmd_buf, q);
+                    }
                     self.cmd_queue.extend(held);
                 }
             }
         }
-        // Told once their answers are written (ibx#529).
-        let taken = self.cmd_buf.len() as u64;
 
         // Drain the buffer so we can mutably borrow self in the loop body.
         // Requests whose contract was looked up (ibx#427) go first.
@@ -1612,13 +1657,46 @@ impl HotLoop {
             };
             match cmd {
                 ControlCommand::Unpaced(_) => {}
+                // An answer of the client itself, at the turn of its
+                // request (ibx#561).
+                ControlCommand::LocalError { queue, req_id, code, message } => match queue {
+                    crate::types::ErrorQueue::Order => self.shared.orders.push_order_error(req_id, code, message),
+                    crate::types::ErrorQueue::OrderNotice => self.shared.orders.push_order_notice(req_id, code, message),
+                    crate::types::ErrorQueue::Historical => self.shared.reference.push_historical_error(req_id, code as i32, message),
+                    crate::types::ErrorQueue::TickByTick => self.shared.market.push_tbt_error(req_id, code as i32, message),
+                    crate::types::ErrorQueue::Connection => self.shared.push_connection_notice(code, message),
+                },
+                ControlCommand::MarketDataSlot { con_id, symbol, sec_type, exchange, mode_9887, snapshot, reply_tx } => {
+                    // As `Subscribe` decides it: the slot of the running
+                    // top of book of the contract, else the slot of its
+                    // conId.
+                    let found = self.context.market.instrument_by_con_id(con_id);
+                    let joined = (mode_9887 == 0 && !found.is_some_and(|slot| self.joins_top(slot, snapshot)))
+                        .then(|| self.running_top_slot(con_id, found, snapshot)).flatten();
+                    let slot = match joined {
+                        Some(slot) => {
+                            let _ = reply_tx.send(Ok(slot));
+                            Some(slot)
+                        }
+                        None => self.register_slot_or_reject(Some(con_id), symbol, &sec_type, &exchange, &Some(reply_tx)),
+                    };
+                    if let Some(slot) = slot {
+                        self.md_slots_told.push((con_id, slot));
+                    }
+                }
+                ControlCommand::Turn { reply_tx } => {
+                    let _ = reply_tx.send(());
+                }
                 ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, snapshot, reply_tx } => {
                     // The top of book of the contract runs on another slot
                     // than the one its conId finds (a request made by
                     // symbol after an order on the contract): the request
                     // shares it there, nothing is sent (ibx#534).
+                    // The slot told to the call when it was made (ibx#561).
+                    let told = self.md_slots_told.iter().position(|(c, _)| *c == con_id && con_id != 0)
+                        .map(|at| self.md_slots_told.remove(at).1);
                     let found = self.context.market.instrument_by_con_id(con_id);
-                    if con_id != 0 && mode_9887 == 0 && !found.is_some_and(|slot| self.joins_top(slot, snapshot))
+                    if told.is_none() && con_id != 0 && mode_9887 == 0 && !found.is_some_and(|slot| self.joins_top(slot, snapshot))
                         && let Some(slot) = self.running_top_slot(con_id, found, snapshot)
                     {
                         log::info!("Market data for con_id {} joins the subscription of instrument {}", con_id, slot);
@@ -1629,7 +1707,16 @@ impl HotLoop {
                     }
                     // No conId: resolved first, as the reference (ibx#278).
                     let key = (con_id != 0).then_some(con_id);
-                    if let Some(id) = self.register_slot_or_reject(key, symbol.clone(), &sec_type, &exchange, &reply_tx) {
+                    let slot = match told {
+                        Some(slot) => {
+                            if let Some(tx) = &reply_tx {
+                                let _ = tx.send(Ok(slot));
+                            }
+                            Some(slot)
+                        }
+                        None => self.register_slot_or_reject(key, symbol.clone(), &sec_type, &exchange, &reply_tx),
+                    };
+                    if let Some(id) = slot {
                         let filters = crate::types::SecDefFilters {
                             last_trade_date_or_contract_month: last_trade_date.clone(), strike,
                             right: right.clone(), multiplier: multiplier.clone(), ..Default::default()
@@ -4253,6 +4340,89 @@ mod tests {
         engine.poll_control_commands();
         assert!(engine.cmd_queue.is_empty());
         assert!(!engine.running);
+    }
+
+    // ibx#561: the slot told to a market data request is kept for it until
+    // its subscribe comes, also when the slot would be given back.
+    #[test]
+    fn the_slot_told_to_a_market_data_request_is_kept_for_it() {
+        let shared = Arc::new(SharedState::new());
+        let (mut engine, _server, tx) = scanner_engine(&shared);
+        let ask = |con_id: i64| {
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            (ControlCommand::MarketDataSlot {
+                con_id, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+                mode_9887: 0, snapshot: false, reply_tx,
+            }, reply_rx)
+        };
+        let (cmd, reply) = ask(265598);
+        tx.send(cmd).unwrap();
+        engine.poll_control_commands();
+        let slot = reply.try_recv().unwrap().unwrap();
+        assert_eq!(engine.md_slots_told, [(265598, slot)]);
+        // Nothing runs on the slot yet: it is not given back.
+        engine.try_reclaim_instrument(slot);
+        assert_eq!(engine.context.market.instrument_by_con_id(265598), Some(slot));
+
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        tx.send(ControlCommand::Subscribe {
+            con_id: 265598, symbol: "AAPL".into(), exchange: "SMART".into(), sec_type: "STK".into(),
+            last_trade_date: String::new(), strike: 0.0, right: String::new(), multiplier: String::new(),
+            mode_9887: 0, snapshot: false, reply_tx: Some(reply_tx),
+        }).unwrap();
+        engine.poll_control_commands();
+        assert_eq!(reply_rx.try_recv().unwrap(), Ok(slot), "the subscribe takes the slot told");
+        assert!(engine.md_slots_told.is_empty());
+    }
+
+    // ibx#561: an error the client writes itself and a request it answers
+    // itself come out at their turn, behind the requests made before them.
+    #[test]
+    fn answers_of_the_client_take_their_turn() {
+        let shared = Arc::new(SharedState::new());
+        let (mut engine, mut server, _) = scanner_engine(&shared);
+        load_scanner_params(&mut engine, &mut server, "<ScanParameterResponse/>");
+        engine.pace_requests();
+        let clock = shared.command_clock().clone();
+        clock.set_paced(None);
+        let (raw_tx, rx) = crossbeam_channel::unbounded();
+        engine.set_control_rx(rx);
+        let tx = ControlSender::new(raw_tx, None, Some(clock.clone()));
+        // This thread is the engine's.
+        clock.set_running(true);
+        tx.send(scanner_cmd(1, 7, "TOP_PERC_GAIN")).unwrap();
+        tx.send(scanner_cmd(2, 7, "TOP_PERC_GAIN")).unwrap();
+        let started = Instant::now();
+        let client = {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                shared.orders.push_order_error(9, 321, "refused".into());
+                shared.command_clock().take_turn();
+                started.elapsed()
+            })
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        engine.poll_control_commands();
+        assert_eq!(engine.cmd_queue.len(), 3, "the second request, the error, the turn");
+        assert!(shared.orders.drain_order_errors().is_empty(), "the error waits for its turn");
+        std::thread::sleep(Duration::from_millis(100));
+        engine.poll_control_commands();
+        assert!(shared.orders.drain_order_errors().is_empty());
+        std::thread::sleep(Duration::from_millis(100));
+        engine.poll_control_commands();
+        assert_eq!(shared.orders.drain_order_errors(), [(9, 321, "refused".to_string())]);
+        assert!(!client.is_finished(), "the turn of the call has not come");
+        std::thread::sleep(Duration::from_millis(100));
+        engine.poll_control_commands();
+        let waited = client.join().unwrap();
+        assert!(waited >= Duration::from_millis(300), "{waited:?}");
+        assert!(engine.cmd_queue.is_empty());
+        clock.set_running(false);
+
+        // With no engine running, both are at once.
+        shared.orders.push_order_error(10, 321, "refused".into());
+        shared.command_clock().take_turn();
+        assert_eq!(shared.orders.drain_order_errors().len(), 1);
     }
 
     fn load_scanner_params(engine: &mut HotLoop, server: &mut crate::protocol::connection::MemTransport, xml: &str) {

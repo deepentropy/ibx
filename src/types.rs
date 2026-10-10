@@ -1969,6 +1969,16 @@ pub struct ContractLookup {
     pub filters: SecDefFilters,
 }
 
+/// The queue an error written by the client belongs to (ibx#561).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorQueue {
+    Order,
+    OrderNotice,
+    Historical,
+    TickByTick,
+    Connection,
+}
+
 /// Commands sent from the control plane to the hot loop via SPSC channel.
 #[derive(Debug, Clone)]
 pub enum ControlCommand {
@@ -2282,6 +2292,24 @@ pub enum ControlCommand {
     FetchUserInfo { req_id: ReqId },
     /// Graceful shutdown.
     Shutdown,
+    /// The slot a market data request of this contract will use, told at
+    /// once so that the call does not wait for the turn of its request
+    /// (ibx#561). The `Subscribe` that follows takes that slot.
+    MarketDataSlot {
+        con_id: i64,
+        symbol: String,
+        sec_type: String,
+        exchange: String,
+        mode_9887: i32,
+        snapshot: bool,
+        reply_tx: crossbeam_channel::Sender<Result<InstrumentId, String>>,
+    },
+    /// The answer to a request refused by the client itself, written to
+    /// its queue when the turn of the request comes (ibx#561).
+    LocalError { queue: ErrorQueue, req_id: i64, code: i64, message: String },
+    /// A request answered by the client itself waits for its turn: the
+    /// engine tells it here (ibx#561).
+    Turn { reply_tx: crossbeam_channel::Sender<()> },
     /// A command that is not an API request of its own (ibx#555): a
     /// further command of a request already counted, or the client's own
     /// housekeeping. It is taken in its turn, without pacing.

@@ -127,6 +127,13 @@ impl ErrorTap {
     /// Send it once the error is in its queue, so the event never shows
     /// before the queue has it. Non-blocking, as every event: dropped when
     /// the channel is full. The waiting consumer is woken.
+    /// An error written by the thread of the caller while the requests are
+    /// paced: the engine takes it and writes it at its turn (ibx#561).
+    #[inline]
+    fn defer(&self, queue: ErrorQueue, req_id: i64, code: i64, message: &str) -> bool {
+        self.clock.get().is_some_and(|clock| clock.defer_error(queue, req_id, code, message))
+    }
+
     #[inline]
     fn send(&self, event: Option<Event>) {
         if let (Some(tx), Some(event)) = (self.events.get(), event) {
@@ -166,6 +173,12 @@ pub struct CommandClock {
     handled: AtomicU64,
     /// The loop of the engine runs on its thread.
     running: AtomicBool,
+    /// The engine paces the requests: an answer of the client itself is
+    /// given to it and comes out at the turn of its request (ibx#561).
+    paced: AtomicBool,
+    /// Those answers, each with the count of commands sent before it.
+    deferred: Mutex<Vec<(u64, ControlCommand)>>,
+    waker: std::sync::OnceLock<Arc<crate::engine::park::Waker>>,
 }
 
 impl CommandClock {
@@ -192,6 +205,71 @@ impl CommandClock {
     pub(crate) fn set_running(&self, on: bool) {
         ON_ENGINE_THREAD.with(|flag| flag.set(on));
         self.running.store(on, Ordering::Release);
+        if !on {
+            // Nothing takes them any more: a call that waits for its turn
+            // goes on.
+            self.deferred.lock().unwrap().clear();
+        }
+    }
+
+    /// The engine paces the requests, and is woken by `waker`.
+    pub(crate) fn set_paced(&self, waker: Option<Arc<crate::engine::park::Waker>>) {
+        if let Some(waker) = waker {
+            let _ = self.waker.set(waker);
+        }
+        self.paced.store(true, Ordering::Release);
+    }
+
+    /// Whether an answer of the calling thread goes through the engine: the
+    /// requests are paced, the loop runs, and this is not its thread.
+    #[inline]
+    fn takes_turns(&self) -> bool {
+        self.paced.load(Ordering::Acquire) && self.running.load(Ordering::Acquire)
+            && !ON_ENGINE_THREAD.with(|flag| flag.get())
+    }
+
+    /// Give the engine a command of the client that follows the commands
+    /// sent so far.
+    fn defer(&self, cmd: ControlCommand) {
+        let after = self.sent.load(Ordering::Acquire);
+        self.deferred.lock().unwrap().push((after, crate::engine::park::scoped(cmd)));
+        if let Some(waker) = self.waker.get() {
+            waker.wake();
+        }
+    }
+
+    /// The commands given by `defer` since the last call.
+    pub(crate) fn take_deferred(&self) -> Vec<(u64, ControlCommand)> {
+        let mut deferred = self.deferred.lock().unwrap();
+        if deferred.is_empty() { Vec::new() } else { std::mem::take(&mut *deferred) }
+    }
+
+    /// An error of the client itself: true when the engine takes it and
+    /// writes it at the turn of its request.
+    #[inline]
+    fn defer_error(&self, queue: ErrorQueue, req_id: i64, code: i64, message: &str) -> bool {
+        if !self.takes_turns() {
+            return false;
+        }
+        self.defer(ControlCommand::LocalError { queue, req_id, code, message: message.to_string() });
+        true
+    }
+
+    /// Longest wait for a turn: a queue of fifty requests is emptied in a
+    /// few seconds.
+    const TURN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// A request answered by the calling thread waits here for its turn
+    /// among the requests made before it, as on the reference, where every
+    /// request goes through one paced queue (ibx#561). At once when the
+    /// requests are not paced.
+    pub fn take_turn(&self) {
+        if !self.takes_turns() {
+            return;
+        }
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        self.defer(ControlCommand::Turn { reply_tx });
+        let _ = reply_rx.recv_timeout(Self::TURN_LIMIT);
     }
 
     /// Wait until the engine has handled the commands sent so far. At once
@@ -554,6 +632,7 @@ impl MarketDataState {
     }
 
     #[doc(hidden)] pub fn push_tbt_error(&self, req_id: ReqId, code: i32, text: String) {
+        if self.error_tap.defer(ErrorQueue::TickByTick, req_id, code as i64, &text) { return; }
         let event = self.error_tap.event(req_id, code as i64, &text);
         self.tbt_errors.lock().unwrap().push((req_id, code, text));
         self.error_tap.send(event);
@@ -1039,6 +1118,7 @@ impl OrderState {
     }
 
     #[doc(hidden)] pub fn push_order_error(&self, order_id: i64, code: i64, message: String) {
+        if self.error_tap.defer(ErrorQueue::Order, order_id, code, &message) { return; }
         let event = self.error_tap.event(order_id, code, &message);
         self.order_errors.lock().unwrap().push((order_id, code, message));
         self.error_tap.send(event);
@@ -1047,6 +1127,7 @@ impl OrderState {
     /// A notice of a server report (201, 202), given after the status the
     /// same report gives, as the reference writes them (ibx#486).
     #[doc(hidden)] pub fn push_order_notice(&self, order_id: i64, code: i64, message: String) {
+        if self.error_tap.defer(ErrorQueue::OrderNotice, order_id, code, &message) { return; }
         let event = self.error_tap.event(order_id, code, &message);
         self.order_notices.lock().unwrap().push((order_id, code, message));
         self.error_tap.send(event);
@@ -1447,6 +1528,7 @@ impl ReferenceState {
     }
 
     #[doc(hidden)] pub fn push_historical_error(&self, req_id: ReqId, code: i32, message: String) {
+        if self.error_tap.defer(ErrorQueue::Historical, req_id, code as i64, &message) { return; }
         let event = self.error_tap.event(req_id, code as i64, &message);
         self.historical_errors.lock().unwrap().push((req_id, code, message));
         self.error_tap.send(event);
@@ -2260,6 +2342,7 @@ impl SharedState {
     }
 
     pub fn push_connection_notice(&self, code: i64, message: String) {
+        if self.error_tap.defer(ErrorQueue::Connection, -1, code, &message) { return; }
         let event = self.error_tap.event(-1, code, &message);
         self.connection_notices.lock().unwrap().push((code, message));
         self.error_tap.send(event);

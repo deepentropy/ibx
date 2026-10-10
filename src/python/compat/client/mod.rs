@@ -339,6 +339,14 @@ impl EClient {
     }
 
     /// Clone the shared state Arc, or return "Not connected".
+    /// A request answered here waits for its turn among the requests made
+    /// before it (ibx#561); the interpreter runs meanwhile.
+    pub(crate) fn turn(&self, py: Python<'_>) {
+        if let Ok(shared) = self.shared_state() {
+            py.detach(|| shared.command_clock().take_turn());
+        }
+    }
+
     pub(crate) fn shared_state(&self) -> PyResult<Arc<SharedState>> {
         self.shared.lock().unwrap().clone()
             .ok_or_else(|| PyRuntimeError::new_err("Not connected"))

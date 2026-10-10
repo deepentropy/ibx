@@ -53,6 +53,18 @@ const TESTED_CONTROL_COMMANDS: &[&str] = &[
 
 const KNOWN_CONTROL_COMMAND_GAPS: &[(&str, &str)] = &[
     (
+        "MarketDataSlot",
+        "The slot of a market data request, told ahead of the request (ibx#561); part of req_mkt_data, covered by the client and engine unit tests and the market data phases",
+    ),
+    (
+        "LocalError",
+        "An error of the client itself, given to the engine for its turn (ibx#561), not a request; covered by the engine unit tests",
+    ),
+    (
+        "Turn",
+        "The turn of a request the client answers itself (ibx#561), not a request of its own; covered by the engine unit tests",
+    ),
+    (
         "Unpaced",
         "A wrapper around another command for the pacing of requests (ibx#555), not a request; covered by the engine and sender unit tests",
     ),

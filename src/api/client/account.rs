@@ -17,6 +17,8 @@ impl EClient {
     /// `cancel_positions`. What is ready now is sent through `wrapper`; the
     /// rest comes through `process_msgs`. No wait in the caller's thread.
     pub fn req_positions(&self, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         // Accounts whose application is not approved (ibx#421).
         match crate::client_core::ClientCore::positions_pending_check(&self.shared.reference) {
             Err((code, message)) => {
@@ -148,6 +150,8 @@ impl EClient {
     /// separated, as the reference (ibx#420); the logon account when the
     /// logon had no list.
     pub fn req_managed_accts(&self, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         wrapper.managed_accounts(&self.shared.reference.managed_accounts_text(&self.account_id));
     }
 

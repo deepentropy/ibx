@@ -147,6 +147,7 @@ impl EClient {
     /// on such a session; a running contract details request goes on.
     fn cancel_contract_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        self.turn(py);
         let (code, text) = crate::client_core::CANCEL_CONTRACT_DATA_UNSUPPORTED;
         self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
         Ok(())
@@ -156,6 +157,7 @@ impl EClient {
     /// on.
     fn cancel_historical_ticks(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        self.turn(py);
         let (code, text) = crate::client_core::CANCEL_HISTORICAL_TICKS_UNSUPPORTED;
         self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
         Ok(())
@@ -166,6 +168,7 @@ impl EClient {
     fn verify_request(&self, py: Python<'_>, api_name: &str, api_version: &str) -> PyResult<()> {
         let _ = (api_name, api_version);
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         let (id, code, text) = crate::client_core::VERIFY_REQUEST_NO_INTENT;
         self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
         Ok(())
@@ -176,6 +179,7 @@ impl EClient {
     fn verify_message(&self, py: Python<'_>, api_data: &str) -> PyResult<()> {
         let _ = api_data;
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         let (id, code, text) = crate::client_core::VERIFY_MESSAGE_OUT_OF_SEQUENCE;
         self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
         Ok(())
@@ -186,6 +190,7 @@ impl EClient {
     fn verify_and_auth_request(&self, py: Python<'_>, api_name: &str, api_version: &str, opaque_isv_key: &str) -> PyResult<()> {
         let _ = (api_name, api_version, opaque_isv_key);
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         let (id, code, text) = crate::client_core::VERIFY_AND_AUTH_REQUEST_NO_INTENT;
         self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
         Ok(())
@@ -203,6 +208,7 @@ impl EClient {
 
     fn request_fa(&self, py: Python<'_>, _fa_data_type: i32) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         // Not an FA session: error 321 as the reference (ibx#481).
         if !self.shared_state()?.reference.fa_session() {
             let (id, code, text) = crate::client_core::REQUEST_FA_NOT_FA;
@@ -216,6 +222,7 @@ impl EClient {
     #[pyo3(signature = (req_id, fa_data_type, cxml))]
     fn replace_fa(&self, py: Python<'_>, req_id: i64, fa_data_type: i32, cxml: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(req_id) { return r; }
+        self.turn(py);
         if !crate::client_core::ClientCore::ids_fit("replace_fa", &[req_id]) { return Ok(()); }
         // Not an FA session: error 321 for the request as the reference
         // (ibx#481).
@@ -233,6 +240,7 @@ impl EClient {
 
     fn query_display_groups(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         if !crate::client_core::ClientCore::ids_fit("query_display_groups", &[req_id]) { return Ok(()); }
         // The fixed list of groups, as the reference (ibx#424).
         match crate::client_core::ClientCore::query_display_groups(req_id) {
@@ -247,6 +255,7 @@ impl EClient {
     /// or a request id already subscribed.
     fn subscribe_to_group_events(&self, py: Python<'_>, req_id: i64, group_id: i32) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         if !crate::client_core::ClientCore::ids_fit("subscribe_to_group_events", &[req_id]) { return Ok(()); }
         match self.core.subscribe_to_group_events(req_id, group_id) {
             Ok(contract_info) => { self.wrapper.call_method1(py, "display_group_updated", (req_id, contract_info))?; }
@@ -293,6 +302,7 @@ impl EClient {
     /// come yet is answered by the message loop, within 2 s.
     fn req_smart_components(&self, py: Python<'_>, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         if !crate::client_core::ClientCore::ids_fit("req_smart_components", &[req_id]) { return Ok(()); }
         let shared = self.shared_state()?;
         match self.core.req_smart_components(req_id, bbo_exchange, &shared) {
@@ -305,6 +315,7 @@ impl EClient {
 
     fn req_news_providers(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         let shared = self.shared_state()?;
         let np = shared.reference.news_providers();
         let mut providers: Vec<Py<NewsProviderPy>> = Vec::with_capacity(np.len());
@@ -321,6 +332,7 @@ impl EClient {
 
     fn req_soft_dollar_tiers(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         if !crate::client_core::ClientCore::ids_fit("req_soft_dollar_tiers", &[req_id]) { return Ok(()); }
         let shared = self.shared_state()?;
         let tiers = shared.reference.soft_dollar_tiers();
@@ -342,6 +354,7 @@ impl EClient {
 
     fn req_family_codes(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         let shared = self.shared_state()?;
         let codes = shared.reference.family_codes();
         let py_list = pyo3::types::PyList::new(py, codes.iter().map(|fc| {
@@ -375,6 +388,7 @@ impl EClient {
 
     fn req_user_info(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         if !crate::client_core::ClientCore::ids_fit("req_user_info", &[req_id]) { return Ok(()); }
         let shared = self.shared_state()?;
         let id = shared.reference.white_branding_id();
@@ -390,6 +404,7 @@ impl EClient {
     /// permission, error 10279.
     fn req_wsh_meta_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         if !crate::client_core::ClientCore::ids_fit("req_wsh_meta_data", &[req_id]) { return Ok(()); }
         let (code, text) = crate::client_core::wsh_meta_data_error(&self.shared_state()?.reference);
         self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
@@ -409,6 +424,7 @@ impl EClient {
     #[pyo3(signature = (req_id, wsh_event_data=None))]
     fn req_wsh_event_data(&self, py: Python<'_>, req_id: i64, wsh_event_data: Option<WshEventDataPy>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         if !crate::client_core::ClientCore::ids_fit("req_wsh_event_data", &[req_id]) { return Ok(()); }
         let _ = wsh_event_data;
         let (code, text) = crate::client_core::wsh_event_data_error(&self.shared_state()?.reference);

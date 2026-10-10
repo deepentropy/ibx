@@ -208,6 +208,8 @@ impl EClient {
     /// (orders with the client's id); right after the connect the answer
     /// waits for the order replay of the logon. Nothing is reserved.
     pub fn req_ids(&self, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         ClientCore::wait_order_replay(&self.shared);
         wrapper.next_valid_id(self.core.next_valid_id(&self.shared));
     }
@@ -228,6 +230,8 @@ impl EClient {
     /// link is lost, the request is answered only after the order replay,
     /// from `process_msgs` (ibx#251).
     pub fn req_open_orders(&self, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::Open, &self.shared) {
             return;
         }
@@ -239,6 +243,8 @@ impl EClient {
     /// Held like [`req_open_orders`](Self::req_open_orders) until the order
     /// replay (ibx#251).
     pub fn req_all_open_orders(&self, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::All, &self.shared) {
             return;
         }
@@ -269,6 +275,8 @@ impl EClient {
     /// Request completed orders. Matches `reqCompletedOrders` in C++.
     /// Immediately delivers all archived completed orders, then calls `completed_orders_end`.
     pub fn req_completed_orders(&self, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         for order in self.shared.orders.drain_completed_orders() {
             let status_str = crate::client_core::order_status_str(order.status);
             if let Some(info) = self.shared.orders.get_order_info(order.order_id) {
@@ -311,6 +319,8 @@ impl EClient {
     /// Replays stored executions (optionally filtered), firing `exec_details` +
     /// `commission_and_fees_report` for each, then `exec_details_end`.
     pub fn req_executions(&self, req_id: i64, filter: &ExecutionFilter, wrapper: &mut impl Wrapper) {
+        // Answered here: after the requests made before it (ibx#561).
+        self.shared.command_clock().take_turn();
         if !crate::client_core::ClientCore::ids_fit("req_executions", &[req_id]) { return; }
         // No lock is held during the callbacks (ibx#265). As the reference:
         // every execution, then the commission reports, then the end.

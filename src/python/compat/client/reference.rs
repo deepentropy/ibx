@@ -444,6 +444,7 @@ impl EClient {
     /// Request market rule details.
     fn req_market_rule(&self, py: Python<'_>, market_rule_id: i32) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         let rule = self.shared.lock().unwrap().clone()
             .and_then(|shared| shared.reference.market_rule(market_rule_id));
         // An id not received, or a rule with no price increments: 322

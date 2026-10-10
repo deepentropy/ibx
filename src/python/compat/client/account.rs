@@ -145,6 +145,7 @@ impl EClient {
     /// account list, in logon order, comma separated (ibx#420).
     fn req_managed_accts(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(r) = self.not_connected(-1) { return r; }
+        self.turn(py);
         self.wrapper.call_method1(py, "managed_accounts", (self.managed_accounts_text().as_str(),))?;
         Ok(())
     }
