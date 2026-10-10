@@ -1106,6 +1106,7 @@ impl HotLoop {
             self.send_farm_messages(msgs);
         }
         self.hmds.sweep_head_timestamps(&self.shared);
+        self.sweep_scanner_params();
         self.service_logon_updates(Instant::now());
     }
 
@@ -2063,7 +2064,7 @@ impl HotLoop {
                     self.shared.reference.notify_depth_exchanges();
                 }
                 ControlCommand::FetchScannerParams => {
-                    self.hmds.req_scanner_params(&mut self.hmds_conn, &mut self.hb, &self.shared);
+                    self.hmds.req_scanner_params(self.pace_now(), &mut self.hmds_conn, &mut self.hb, &self.shared);
                 }
                 ControlCommand::SubscribeScanner { req_id, client_id, subscription } => {
                     if let Some(text) = scanner_refusal(&self.hmds, req_id) {
@@ -2071,7 +2072,7 @@ impl HotLoop {
                     } else if self.hmds_conn.is_none() {
                         self.emit_hmds_unavailable(req_id, false);
                     } else {
-                        self.hmds.send_scanner_subscribe(req_id, client_id, subscription, &mut self.hmds_conn, &mut self.hb);
+                        self.hmds.send_scanner_subscribe(req_id, client_id, subscription, self.pace_now(), &mut self.hmds_conn, &mut self.hb);
                     }
                 }
                 ControlCommand::CancelScanner { req_id } => {
@@ -2988,9 +2989,19 @@ impl HotLoop {
         self.pacer = Some(Default::default());
         // With it, the market data messages leave in passes (ibx#560).
         self.md_pass.on = true;
+        // And the scanner parameters are asked after their delay (ibx#553).
+        self.hmds.scanner_params_delayed = true;
     }
 
-    /// The time of the pacing and of the market data passes.
+    /// Send the scanner parameters request when its delay has passed
+    /// (ibx#553).
+    pub(crate) fn sweep_scanner_params(&mut self) {
+        let now = self.pace_now();
+        self.hmds.sweep_scanner_params(now, &mut self.hmds_conn, &mut self.hb);
+    }
+
+    /// The time of the pacing, of the market data passes and of the
+    /// scanner parameters delay.
     #[inline]
     fn pace_now(&self) -> Instant {
         self.pace_clock.unwrap_or_else(Instant::now)
@@ -3011,16 +3022,13 @@ impl HotLoop {
     }
 
     /// The time at which something that waits now is due: the next step of
-    /// the pacing when requests wait, the next market data pass.
+    /// the pacing when requests wait, the next market data pass, the
+    /// scanner parameters request.
     #[cfg(any(test, feature = "test-support"))]
     pub fn next_pace_time(&self) -> Option<Instant> {
         let held = self.cmd_queue.iter().any(|q| crate::engine::pacer::is_request(&q.cmd));
         let step = self.pacer.as_ref().filter(|_| held).and_then(|p| p.next_step());
-        let pass = self.md_pass.due();
-        match (step, pass) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [step, self.md_pass.due(), self.hmds.scanner_params_due].into_iter().flatten().min()
     }
 
     /// Mutably access heartbeat state for testing (e.g., setting timestamps).
@@ -4743,6 +4751,53 @@ mod tests {
         engine.poll_control_commands();
         assert!(shared.reference.drain_scanner_params().is_empty());
         assert_eq!(plain_messages_sent(&mut server).len(), 1, "asked again");
+    }
+
+    // ibx#553: the scanner parameters request leaves 1 s after the first
+    // need, a parameters request or a subscription; a later need in that
+    // second does not move it, and one request serves them all.
+    #[test]
+    fn scanner_parameters_are_asked_a_second_after_the_first_need() {
+        let shared = Arc::new(SharedState::new());
+        let (mut engine, mut server, tx) = scanner_engine(&shared);
+        let start = Instant::now();
+        let ms = std::time::Duration::from_millis;
+        engine.pace_requests();
+        engine.set_pace_clock(start);
+        tx.send(scanner_cmd(1, 0, "TOP_PERC_GAIN")).unwrap();
+        engine.poll_control_commands();
+        engine.sweep_scanner_params();
+        assert!(plain_messages_sent(&mut server).is_empty(), "nothing at once");
+
+        engine.set_pace_clock(start + ms(600));
+        tx.send(ControlCommand::FetchScannerParams).unwrap();
+        engine.poll_control_commands();
+        engine.set_pace_clock(start + ms(999));
+        engine.sweep_scanner_params();
+        assert!(plain_messages_sent(&mut server).is_empty(), "nothing before 1 s");
+
+        engine.set_pace_clock(start + ms(1000));
+        engine.sweep_scanner_params();
+        let sent = plain_messages_sent(&mut server);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].contains("6040=10001|"), "{sent:?}");
+
+        // The second need did not start a delay of its own.
+        engine.set_pace_clock(start + ms(1700));
+        engine.sweep_scanner_params();
+        assert!(plain_messages_sent(&mut server).is_empty());
+
+        load_scanner_params_keep(&mut engine, "<ScanParameterResponse/>");
+        assert_eq!(shared.reference.drain_scanner_params().len(), 1);
+        assert_eq!(plain_messages_sent(&mut server).len(), 1, "the waiting subscription goes out");
+        // Known now: answered and sent at once.
+        tx.send(ControlCommand::FetchScannerParams).unwrap();
+        engine.poll_control_commands();
+        engine.set_pace_clock(start + ms(1900));
+        tx.send(scanner_cmd(2, 0, "MOST_ACTIVE")).unwrap();
+        engine.poll_control_commands();
+        assert_eq!(shared.reference.drain_scanner_params().len(), 1);
+        assert_eq!(plain_messages_sent(&mut server).len(), 1);
     }
 
     // ibx#456: the row count follows the scan type's limit in the
