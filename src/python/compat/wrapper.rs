@@ -31,6 +31,18 @@ impl EWrapper {
 
     fn current_time(&self, _time: i64) {}
 
+    fn current_time_in_millis(&self, _time_in_millis: i64) {}
+
+    // The verification callbacks of the official client library; a session
+    // opened without the intent to verify never gets them (ibx#516).
+    fn verify_message_api(&self, _api_data: &str) {}
+
+    fn verify_completed(&self, _is_successful: bool, _error_text: &str) {}
+
+    fn verify_and_auth_message_api(&self, _api_data: &str, _xyz_challange: &str) {}
+
+    fn verify_and_auth_completed(&self, _is_successful: bool, _error_text: &str) {}
+
     // ── Market Data ──
 
     fn tick_price(&self, _req_id: i64, _tick_type: i32, _price: f64, _attrib: Py<PyAny>) {}

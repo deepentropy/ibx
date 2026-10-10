@@ -64,6 +64,8 @@ _OFFICIAL = {
     "replace_fa_end": "replaceFAEnd",
     "update_mkt_depth_l2": "updateMktDepthL2",
     "real_time_bar": "realtimeBar",
+    "verify_message_api": "verifyMessageAPI",
+    "verify_and_auth_message_api": "verifyAndAuthMessageAPI",
 }
 
 # Official keyword arguments whose ibx name is not their snake case (an ibx
@@ -83,14 +85,10 @@ IBX_ONLY = {
 
 # Official requests and callbacks ibx does not have.
 NOT_IN_IBX = {
-    # requests
-    "cancelContractData", "cancelHistoricalTicks", "reqCurrentTimeInMillis", "verifyAndAuthMessage",
-    "verifyAndAuthRequest", "verifyMessage", "verifyRequest",
     # connection set-up of a socket client
     "setConnState", "setConnectOptions", "setOptionalCapabilities", "startApi",
     # callbacks
-    "currentTimeInMillis", "rerouteMktDataReq", "rerouteMktDepthReq", "tickEFP", "verifyAndAuthCompleted",
-    "verifyAndAuthMessageAPI", "verifyCompleted", "verifyMessageAPI", "winError",
+    "rerouteMktDataReq", "rerouteMktDepthReq", "tickEFP", "winError",
 }
 
 

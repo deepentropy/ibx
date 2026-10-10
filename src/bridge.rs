@@ -1764,6 +1764,11 @@ impl ReferenceState {
         self.clock.now_ms().div_euclid(1000)
     }
 
+    /// Current server time in milliseconds, from the same clock (ibx#516).
+    pub fn server_time_millis(&self) -> i64 {
+        self.clock.now_ms()
+    }
+
     /// Whether the logon feature list allows matching symbols requests
     /// (SECDEFTA, ibx#421).
     pub fn matching_symbols_allowed(&self) -> bool {

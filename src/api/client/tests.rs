@@ -6552,6 +6552,45 @@ fn req_current_time_adds_the_logon_clock_offset() {
     assert!((w.0[0] - local - 60).abs() <= 1, "{} vs local {}", w.0[0], local);
 }
 
+// ibx#516: the time in milliseconds comes from the clock of the time in
+// seconds.
+#[test]
+fn req_current_time_in_millis_adds_the_logon_clock_offset() {
+    #[derive(Default)]
+    struct Time(Vec<i64>);
+    impl Wrapper for Time {
+        fn current_time_in_millis(&mut self, time_in_millis: i64) { self.0.push(time_in_millis); }
+    }
+    let (client, _rx, shared) = test_client();
+    shared.reference.clock().set(60_000);
+    let mut w = Time::default();
+    client.req_current_time_in_millis(&mut w);
+    let local = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    assert_eq!(w.0.len(), 1);
+    assert!((w.0[0] - local - 60_000).abs() <= 1_000, "{} vs local {}", w.0[0], local);
+}
+
+// ibx#516: the requests a session of the reference does not have give the
+// answers of the reference run of 10/10/2026, and send nothing.
+#[test]
+fn requests_the_reference_session_does_not_have() {
+    let (client, rx, shared) = test_client();
+    client.cancel_contract_data(7001);
+    client.cancel_historical_ticks(7003);
+    client.verify_request("app", "1.0");
+    client.verify_message("data");
+    client.verify_and_auth_request("app", "1.0", "key");
+    client.verify_and_auth_message("data", "response");
+    assert!(rx.try_recv().is_err(), "nothing goes to the engine");
+    assert_eq!(shared.orders.drain_order_errors(), [
+        (7001, 503, "The TWS is out of date and must be upgraded.  It does not support contract data cancels.".to_string()),
+        (7003, 503, "The TWS is out of date and must be upgraded.  It does not support historical ticks cancels.".to_string()),
+        (-1, 544, "Verify Request Sending Error -   Intent to authenticate needs to be expressed during initial connect request.".to_string()),
+        (-1, 10095, "ApiVerify error:ApiVerifyMessage ignored. Message sequence error. State: verifyStatus=NONE, verifyInProgress=false".to_string()),
+        (-1, 551, "Verify And Auth Request Sending Error -   Intent to authenticate needs to be expressed during initial connect request.".to_string()),
+    ]);
+}
+
 // Without SECDEFTA in the logon feature list, a matching symbols request
 // is refused with 321 before the pattern checks, and nothing is sent.
 #[test]

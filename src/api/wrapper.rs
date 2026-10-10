@@ -19,6 +19,14 @@ pub trait Wrapper {
     fn managed_accounts(&mut self, accounts_list: &str) {}
     fn error(&mut self, req_id: i64, error_code: i64, error_string: &str, advanced_order_reject_json: &str) {}
     fn current_time(&mut self, time: i64) {}
+    fn current_time_in_millis(&mut self, time_in_millis: i64) {}
+    /// The verification callbacks of the official client library. A
+    /// session opened without the intent to verify never gets them
+    /// (ibx#516).
+    fn verify_message_api(&mut self, api_data: &str) {}
+    fn verify_completed(&mut self, is_successful: bool, error_text: &str) {}
+    fn verify_and_auth_message_api(&mut self, api_data: &str, xyz_challange: &str) {}
+    fn verify_and_auth_completed(&mut self, is_successful: bool, error_text: &str) {}
 
     // ── Market Data ──
 

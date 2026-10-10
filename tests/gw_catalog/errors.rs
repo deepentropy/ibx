@@ -18,6 +18,9 @@ use super::catalog::{self, matches_template};
 /// raises them itself.
 const CLIENT_CODES: &[(i64, &str)] = &[
     (504, "the API client's 'Not connected' (the client library's own code, not a gateway code)"),
+    (503, "the API client's refusal of a request the session's version does not have (ibx#516)"),
+    (544, "the API client's refusal of a verify request made without the intent to verify (ibx#516)"),
+    (551, "the API client's refusal of a verify and auth request made without the intent to verify (ibx#516)"),
 ];
 
 /// One place where ibx raises an error.

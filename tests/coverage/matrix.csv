@@ -2074,6 +2074,13 @@ eclient,req_historical_schedule,,src/api/client/tests.rs::historical_requests_wi
 eclient,req_smart_components,,live:tests/rust_api_gt.rs::api_gt_suite ; src/golden/l1.rs::aapl_and_spy_before_the_open
 eclient,req_news_providers,,live:tests/rust_api_gt.rs::api_gt_suite
 eclient,req_current_time,,src/api/client/tests.rs::req_current_time_adds_the_logon_clock_offset
+eclient,req_current_time_in_millis,,src/api/client/tests.rs::req_current_time_in_millis_adds_the_logon_clock_offset
+eclient,cancel_contract_data,,src/api/client/tests.rs::requests_the_reference_session_does_not_have
+eclient,cancel_historical_ticks,,src/api/client/tests.rs::requests_the_reference_session_does_not_have
+eclient,verify_request,,src/api/client/tests.rs::requests_the_reference_session_does_not_have
+eclient,verify_message,,src/api/client/tests.rs::requests_the_reference_session_does_not_have
+eclient,verify_and_auth_request,,src/api/client/tests.rs::requests_the_reference_session_does_not_have
+eclient,verify_and_auth_message,,src/api/client/tests.rs::requests_the_reference_session_does_not_have
 eclient,request_fa,,src/api/client/tests.rs::fa_requests_on_a_non_fa_session_are_refused
 eclient,replace_fa,,src/api/client/tests.rs::fa_requests_on_a_non_fa_session_are_refused
 eclient,query_display_groups,,src/api/client/tests.rs::display_group_requests_as_the_reference

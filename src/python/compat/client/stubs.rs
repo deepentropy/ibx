@@ -133,6 +133,72 @@ impl EClient {
         Ok(())
     }
 
+    fn req_current_time_in_millis(&self, py: Python<'_>) -> PyResult<()> {
+        if let Some(r) = self.not_connected(-1) { return r; }
+        // The clock of req_current_time, in milliseconds (ibx#516).
+        let now = self.shared_state()?.reference.server_time_millis();
+        self.wrapper.call_method1(py, "current_time_in_millis", (now,))?;
+        Ok(())
+    }
+
+    // ── Requests a session of the reference does not have (ibx#516) ──
+
+    /// Error 503 for the request, as the official client library answers
+    /// on such a session; a running contract details request goes on.
+    fn cancel_contract_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id) { return r; }
+        let (code, text) = crate::client_core::CANCEL_CONTRACT_DATA_UNSUPPORTED;
+        self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
+        Ok(())
+    }
+
+    /// Error 503 for the request; a running historical ticks request goes
+    /// on.
+    fn cancel_historical_ticks(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        if let Some(r) = self.not_connected(req_id) { return r; }
+        let (code, text) = crate::client_core::CANCEL_HISTORICAL_TICKS_UNSUPPORTED;
+        self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
+        Ok(())
+    }
+
+    /// A session opened without the intent to verify: error 544.
+    #[pyo3(signature = (api_name, api_version))]
+    fn verify_request(&self, py: Python<'_>, api_name: &str, api_version: &str) -> PyResult<()> {
+        let _ = (api_name, api_version);
+        if let Some(r) = self.not_connected(-1) { return r; }
+        let (id, code, text) = crate::client_core::VERIFY_REQUEST_NO_INTENT;
+        self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
+        Ok(())
+    }
+
+    /// No verification is in progress: error 10095 as the reference.
+    #[pyo3(signature = (api_data))]
+    fn verify_message(&self, py: Python<'_>, api_data: &str) -> PyResult<()> {
+        let _ = api_data;
+        if let Some(r) = self.not_connected(-1) { return r; }
+        let (id, code, text) = crate::client_core::VERIFY_MESSAGE_OUT_OF_SEQUENCE;
+        self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
+        Ok(())
+    }
+
+    /// A session opened without the intent to verify: error 551.
+    #[pyo3(signature = (api_name, api_version, opaque_isv_key))]
+    fn verify_and_auth_request(&self, py: Python<'_>, api_name: &str, api_version: &str, opaque_isv_key: &str) -> PyResult<()> {
+        let _ = (api_name, api_version, opaque_isv_key);
+        if let Some(r) = self.not_connected(-1) { return r; }
+        let (id, code, text) = crate::client_core::VERIFY_AND_AUTH_REQUEST_NO_INTENT;
+        self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
+        Ok(())
+    }
+
+    /// The reference gives no answer: nothing happens.
+    #[pyo3(signature = (api_data, xyz_response))]
+    fn verify_and_auth_message(&self, api_data: &str, xyz_response: &str) -> PyResult<()> {
+        let _ = (api_data, xyz_response);
+        if let Some(r) = self.not_connected(-1) { return r; }
+        Ok(())
+    }
+
     // ── FA (Financial Advisor) ──
 
     fn request_fa(&self, py: Python<'_>, _fa_data_type: i32) -> PyResult<()> {

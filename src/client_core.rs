@@ -1388,6 +1388,23 @@ pub(crate) fn wsh_event_data_error(reference: &crate::bridge::ReferenceState) ->
     wsh_refusal(&reference.news_sources(), &reference.news_sources_unsubscribed()).unwrap_or(WSH_META_NOT_REQUESTED)
 }
 
+/// The requests of the official client library that a session of the
+/// reference does not have (ibx#516): the client library refuses them
+/// itself, with these codes and texts (run of 10/10/2026). The two cancels
+/// carry the request's id, the two verify requests id -1.
+pub const CANCEL_CONTRACT_DATA_UNSUPPORTED: (i64, &str) =
+    (503, "The TWS is out of date and must be upgraded.  It does not support contract data cancels.");
+pub const CANCEL_HISTORICAL_TICKS_UNSUPPORTED: (i64, &str) =
+    (503, "The TWS is out of date and must be upgraded.  It does not support historical ticks cancels.");
+pub const VERIFY_REQUEST_NO_INTENT: (i64, i64, &str) =
+    (-1, 544, "Verify Request Sending Error -   Intent to authenticate needs to be expressed during initial connect request.");
+pub const VERIFY_AND_AUTH_REQUEST_NO_INTENT: (i64, i64, &str) =
+    (-1, 551, "Verify And Auth Request Sending Error -   Intent to authenticate needs to be expressed during initial connect request.");
+/// verifyMessage on a session with no verification started: the
+/// reference's answer (ibx#516, run of 10/10/2026).
+pub const VERIFY_MESSAGE_OUT_OF_SEQUENCE: (i64, i64, &str) =
+    (-1, 10095, "ApiVerify error:ApiVerifyMessage ignored. Message sequence error. State: verifyStatus=NONE, verifyInProgress=false");
+
 /// requestFA on a session that is not FA: the reference's error, with its
 /// request id for a request that has none (ibx#481).
 pub const REQUEST_FA_NOT_FA: (i64, i64, &str) =

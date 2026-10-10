@@ -47,6 +47,56 @@ impl EClient {
         wrapper.current_time(self.shared.reference.server_time_secs());
     }
 
+    /// Request current server time in milliseconds. Matches
+    /// `reqCurrentTimeInMillis` in C++. Answered locally from the clock of
+    /// `req_current_time` (ibx#516).
+    pub fn req_current_time_in_millis(&self, wrapper: &mut impl Wrapper) {
+        wrapper.current_time_in_millis(self.shared.reference.server_time_millis());
+    }
+
+    // ── Requests a session of the reference does not have (ibx#516) ──
+
+    /// Matches `cancelContractData` in C++. Not supported by a session of
+    /// the reference: error 503 for the request, and a running contract
+    /// details request goes on.
+    pub fn cancel_contract_data(&self, req_id: i64) {
+        let (code, text) = crate::client_core::CANCEL_CONTRACT_DATA_UNSUPPORTED;
+        self.shared.orders.push_order_error(req_id, code, text.to_string());
+    }
+
+    /// Matches `cancelHistoricalTicks` in C++. Not supported by a session
+    /// of the reference: error 503 for the request, and a running
+    /// historical ticks request goes on.
+    pub fn cancel_historical_ticks(&self, req_id: i64) {
+        let (code, text) = crate::client_core::CANCEL_HISTORICAL_TICKS_UNSUPPORTED;
+        self.shared.orders.push_order_error(req_id, code, text.to_string());
+    }
+
+    /// Matches `verifyRequest` in C++. A session opened without the intent
+    /// to verify: error 544, nothing sent.
+    pub fn verify_request(&self, _api_name: &str, _api_version: &str) {
+        let (id, code, text) = crate::client_core::VERIFY_REQUEST_NO_INTENT;
+        self.shared.orders.push_order_error(id, code, text.to_string());
+    }
+
+    /// Matches `verifyMessage` in C++. No verification is in progress:
+    /// error 10095 as the reference.
+    pub fn verify_message(&self, _api_data: &str) {
+        let (id, code, text) = crate::client_core::VERIFY_MESSAGE_OUT_OF_SEQUENCE;
+        self.shared.orders.push_order_error(id, code, text.to_string());
+    }
+
+    /// Matches `verifyAndAuthRequest` in C++. A session opened without the
+    /// intent to verify: error 551, nothing sent.
+    pub fn verify_and_auth_request(&self, _api_name: &str, _api_version: &str, _opaque_isv_key: &str) {
+        let (id, code, text) = crate::client_core::VERIFY_AND_AUTH_REQUEST_NO_INTENT;
+        self.shared.orders.push_order_error(id, code, text.to_string());
+    }
+
+    /// Matches `verifyAndAuthMessage` in C++. The reference gives no
+    /// answer: nothing happens.
+    pub fn verify_and_auth_message(&self, _api_data: &str, _xyz_response: &str) {}
+
     // ── FA (Financial Advisor) ──
 
     /// Request FA data. On a session that is not FA, error 321 as the
