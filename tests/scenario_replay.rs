@@ -313,12 +313,18 @@ fn two_scanner_subscriptions() {
     assert_eq!(o.frames_compared, 24);
 }
 
-// News ticks on a contract asked twice (02/10/2026, ibx#458): the
-// reference's subscription of tick 292 lists the news providers (6472).
+// News ticks on a contract asked twice, then on a second contract with
+// one provider (02/10/2026, ibx#458): the news subscription lists the
+// session's news providers, or the one asked (ibx#514). Stops before the
+// cancels, which the reference groups into one message per kind
+// (ibx#555). The order of marketDataType and tickReqParams on a contract
+// asked before is ibx#535: left out.
 #[test]
-#[ignore = "ibx#514: 292 subscription without the provider list 6472"]
 fn news_ticks_twice() {
-    check("20261002/b1_458_news_dup", Options::default().compare(&[MARKET_DATA, HISTORICAL]));
+    let o = check("20261002/b1_458_news_dup", Options::default().compare(&[MARKET_DATA, HISTORICAL])
+        .skip_frame(exchange_map).until(15737)
+        .keep(|l| !l.starts_with("marketDataType|") && !l.starts_with("tickReqParams|")));
+    assert_eq!(o.frames_compared, 4);
 }
 
 fn dump(name: &str, o: &Outcome) {

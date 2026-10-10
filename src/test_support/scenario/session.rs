@@ -94,6 +94,9 @@ impl Links {
             "GBP:58666494,HKD:61227072,INR:136000444,JPY:61227069,KRW:136000424,MXN:136000449,NOK:136000452,",
             "NZD:136000435,SEK:136000429,USD:28812380",
         ));
+        // Its subscribed news sources (ibx#514, ibx#460).
+        shared.reference.set_news_sources(
+            "BRFG,BRFUPDN,DJ-N,DJ-RTA,DJ-RTE,DJ-RTG,DJ-RTPRO,DJNL".split(',').map(String::from).collect());
         Self {
             engine, shared, control_tx, farm, ccp, hmds,
             farm_out: Vec::new(), ccp_out: Vec::new(), hmds_out: Vec::new(),
