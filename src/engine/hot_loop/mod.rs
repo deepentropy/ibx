@@ -69,6 +69,11 @@ pub struct HotLoop {
     hb: HeartbeatState,
     /// Reusable buffer for control commands (avoids per-iteration allocation).
     cmd_buf: Vec<ControlCommand>,
+    /// The commands received and not taken yet, in order (ibx#555).
+    cmd_queue: std::collections::VecDeque<ControlCommand>,
+    /// The pacing of API requests, as the reference's; `None` takes every
+    /// command at once (engines built by hand, tests).
+    pacer: Option<crate::engine::pacer::Pacer>,
     /// Connection states last reported to the clients; `None` until the
     /// first observation (ibx#399).
     links: Option<Links>,
@@ -158,6 +163,8 @@ impl HotLoop {
             account_id: String::new(),
             hb: HeartbeatState::new(),
             cmd_buf: Vec::with_capacity(16),
+            cmd_queue: std::collections::VecDeque::with_capacity(16),
+            pacer: None,
             farm: FarmState::new(),
             ccp: CcpState::new(),
             hmds: HmdsState::new(),
@@ -1548,19 +1555,49 @@ impl HotLoop {
             None => return,
         };
 
-        self.cmd_buf.clear();
-        self.cmd_buf.extend(rx.try_iter());
-        // Told once their answers are written (ibx#529).
-        let mut taken = self.cmd_buf.len() as u64;
+        self.cmd_queue.extend(rx.try_iter());
 
         // try_iter() stops on both Empty and Disconnected — do one extra
         // try_recv() to distinguish.  If a straggler command arrived between
         // try_iter() finishing and this call, push it into the batch.
         let sender_dropped = match rx.try_recv() {
-            Ok(cmd)  => { self.cmd_buf.push(cmd); taken += 1; false }
+            Ok(cmd)  => { self.cmd_queue.push_back(cmd); false }
             Err(crossbeam_channel::TryRecvError::Empty)        => false,
             Err(crossbeam_channel::TryRecvError::Disconnected) => true,
         };
+
+        // The commands taken in this pass, in order. API requests are
+        // paced as the reference paces them (ibx#555); a further command
+        // of a request passes in its turn; a command aside of the requests
+        // (a contract registration, housekeeping) is taken at once. A
+        // shutdown ends the pacing.
+        self.cmd_buf.clear();
+        let shutdown = self.cmd_queue.iter().any(|c| matches!(c, ControlCommand::Shutdown));
+        match self.pacer.as_mut().filter(|_| !shutdown) {
+            None => self.cmd_buf.extend(self.cmd_queue.drain(..)),
+            Some(pacer) => {
+                let now = Instant::now();
+                let mut waiting = self.cmd_queue.iter().filter(|c| crate::engine::pacer::is_request(c)).count();
+                while let Some(cmd) = self.cmd_queue.front() {
+                    if crate::engine::pacer::is_request(cmd) {
+                        if !pacer.admit(now, waiting) {
+                            break;
+                        }
+                        waiting -= 1;
+                    }
+                    self.cmd_buf.extend(self.cmd_queue.pop_front());
+                }
+                if waiting == 0 {
+                    pacer.nothing_waits(now);
+                } else if self.cmd_queue.iter().any(crate::engine::pacer::is_aside) {
+                    let (aside, held): (Vec<_>, Vec<_>) = self.cmd_queue.drain(..).partition(crate::engine::pacer::is_aside);
+                    self.cmd_buf.extend(aside);
+                    self.cmd_queue.extend(held);
+                }
+            }
+        }
+        // Told once their answers are written (ibx#529).
+        let taken = self.cmd_buf.len() as u64;
 
         // Drain the buffer so we can mutably borrow self in the loop body.
         // Requests whose contract was looked up (ibx#427) go first.
@@ -1569,7 +1606,12 @@ impl HotLoop {
             .collect();
         self.pass_active |= !cmds.is_empty();
         for cmd in cmds {
+            let cmd = match cmd {
+                ControlCommand::Unpaced(inner) => *inner,
+                cmd => cmd,
+            };
             match cmd {
+                ControlCommand::Unpaced(_) => {}
                 ControlCommand::Subscribe { con_id, symbol, exchange, sec_type, last_trade_date, strike, right, multiplier, mode_9887, snapshot, reply_tx } => {
                     // The top of book of the contract runs on another slot
                     // than the one its conId finds (a request made by
@@ -2757,6 +2799,13 @@ impl HotLoop {
                 req_id, result, &mut self.ccp_conn, &self.shared, &mut self.hb,
             );
         }
+    }
+
+    /// Pace the API requests as the reference does (ibx#555). On for a
+    /// session opened by a logon; an engine built by hand takes every
+    /// command at once unless this is called.
+    pub fn pace_requests(&mut self) {
+        self.pacer = Some(Default::default());
     }
 
     /// Mutably access heartbeat state for testing (e.g., setting timestamps).
@@ -4151,6 +4200,59 @@ mod tests {
                 scan_code: scan_code.into(), number_of_rows: 10, filters: Vec::new(),
             },
         }
+    }
+
+    // ibx#555: with the pacing on, of three requests made at once the
+    // first is taken at once and the others wait for the next steps; a
+    // command that is not a request passes when its turn comes; a
+    // shutdown is never held.
+    #[test]
+    fn requests_made_at_once_are_paced() {
+        let shared = Arc::new(SharedState::new());
+        let (mut engine, mut server, tx) = scanner_engine(&shared);
+        load_scanner_params(&mut engine, &mut server, "<ScanParameterResponse/>");
+        engine.pace_requests();
+        for req_id in [1, 2, 3] {
+            tx.send(scanner_cmd(req_id, 7, "TOP_PERC_GAIN")).unwrap();
+        }
+        tx.send(ControlCommand::Unpaced(Box::new(scanner_cmd(4, 7, "TOP_PERC_GAIN")))).unwrap();
+        // A command aside of the requests does not wait behind them.
+        tx.send(ControlCommand::Ping).unwrap();
+        // The queue is read at once after each pass: reading the peer
+        // would let time pass.
+        engine.poll_control_commands();
+        assert_eq!(engine.cmd_queue.len(), 3, "the first request only");
+        engine.poll_control_commands();
+        assert_eq!(engine.cmd_queue.len(), 3, "the others wait for the next step");
+
+        std::thread::sleep(std::time::Duration::from_millis(105));
+        engine.poll_control_commands();
+        assert_eq!(engine.cmd_queue.len(), 2, "one more in the second step");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        engine.poll_control_commands();
+        assert!(engine.cmd_queue.is_empty(), "the third, and the command behind it that is not a request");
+
+        // At rest again: a request alone is taken at once.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        engine.poll_control_commands();
+        tx.send(scanner_cmd(5, 7, "TOP_PERC_GAIN")).unwrap();
+        engine.poll_control_commands();
+        assert!(engine.cmd_queue.is_empty());
+        let sent = plain_messages_sent(&mut server);
+        let ids: Vec<&str> = sent.iter().map(|m| {
+            let a = m.find("<id>APISCAN7:").unwrap() + 13;
+            &m[a..a + 1]
+        }).collect();
+        // (The fifth is refused by the limit of scanners that run at once.)
+        assert_eq!(ids, ["1", "2", "3", "4"], "in the order of the requests");
+
+        // A shutdown takes everything that waits with it.
+        tx.send(scanner_cmd(6, 7, "TOP_PERC_GAIN")).unwrap();
+        tx.send(scanner_cmd(8, 7, "TOP_PERC_GAIN")).unwrap();
+        tx.send(ControlCommand::Shutdown).unwrap();
+        engine.poll_control_commands();
+        assert!(engine.cmd_queue.is_empty());
+        assert!(!engine.running);
     }
 
     fn load_scanner_params(engine: &mut HotLoop, server: &mut crate::protocol::connection::MemTransport, xml: &str) {

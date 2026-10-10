@@ -2282,6 +2282,10 @@ pub enum ControlCommand {
     FetchUserInfo { req_id: ReqId },
     /// Graceful shutdown.
     Shutdown,
+    /// A command that is not an API request of its own (ibx#555): a
+    /// further command of a request already counted, or the client's own
+    /// housekeeping. It is taken in its turn, without pacing.
+    Unpaced(Box<ControlCommand>),
 }
 
 /// Account-level state.

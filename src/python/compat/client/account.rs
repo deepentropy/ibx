@@ -67,6 +67,8 @@ impl EClient {
     /// Request account summary.
     #[pyo3(signature = (req_id, group_name, tags))]
     fn req_account_summary(&self, py: Python<'_>, req_id: i64, group_name: &str, tags: &str) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#555).
+        let _one = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_account_summary", &[req_id]) { return Ok(()); }
         // A server subscription: the rows come as the server sends them, each

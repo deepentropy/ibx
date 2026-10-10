@@ -1947,6 +1947,8 @@ impl ClientCore {
         generic_tick_list: &str,
         mode_9887: i32,
     ) -> Result<Option<InstrumentId>, String> {
+        // One API request for the pacing, whatever it sends (ibx#555).
+        let _one = crate::engine::park::one_request();
         let (last_trade_date, strike, right, multiplier) = (
             filters.last_trade_date_or_contract_month.as_str(), filters.strike,
             filters.right.as_str(), filters.multiplier.as_str(),
@@ -2112,6 +2114,8 @@ impl ClientCore {
     /// records it kept waiting once the count is under the limit
     /// (ibx#444). They get no second 101.
     pub fn promote_waiting_md(&self, shared: &SharedState, control_tx: &ControlSender) {
+        // Not an API request: not paced (ibx#555).
+        let _internal = crate::engine::park::not_a_request();
         loop {
             if self.md_waiting.lock().unwrap().is_empty()
                 || self.md_lines_in_use() >= shared.reference.snapshot_rate_limit() as usize
@@ -2341,6 +2345,8 @@ impl ClientCore {
     /// later call. Checked when positions or requests change, and every
     /// second.
     pub fn maintain_pnl_quotes(&self, shared: &SharedState, control_tx: &ControlSender) {
+        // Not an API request: not paced (ibx#555).
+        let _internal = crate::engine::park::not_a_request();
         let n_pnl = self.pnl_reqs.lock().unwrap().len();
         let singles: Vec<i64> = self.pnl_single_reqs.lock().unwrap().values().copied().collect();
         let mut q = self.pnl_quotes.lock().unwrap();

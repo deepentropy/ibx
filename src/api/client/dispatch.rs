@@ -301,8 +301,13 @@ impl EClient {
         // server rejected (ibx#444, ibx#447).
         let (notices, commands) = self.core.take_md_rejects(&self.shared);
         Self::md_notices(wrapper, notices);
-        for command in commands {
-            let _ = self.control_tx.send(command);
+        {
+            // The client's own follow-up of a refusal, not an API request:
+            // not paced (ibx#555).
+            let _internal = crate::engine::park::not_a_request();
+            for command in commands {
+                let _ = self.control_tx.send(command);
+            }
         }
         // Requests that waited for a market data line (101) take the lines
         // set free (ibx#444).

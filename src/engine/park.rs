@@ -97,6 +97,66 @@ impl Waker {
     }
 }
 
+/// How the commands a thread sends count for the pacing of API requests
+/// (ibx#555).
+#[derive(Clone, Copy, PartialEq)]
+enum Scope {
+    /// Each command that is a request counts as one.
+    Each,
+    /// The commands are one API request: the first counts.
+    OneRequest { counted: bool },
+    /// The commands are not API requests.
+    NotARequest,
+}
+
+thread_local! {
+    static SCOPE: std::cell::Cell<Scope> = const { std::cell::Cell::new(Scope::Each) };
+}
+
+/// Ends its scope when dropped.
+pub struct RequestScope {
+    before: Scope,
+}
+
+impl Drop for RequestScope {
+    fn drop(&mut self) {
+        SCOPE.with(|s| s.set(self.before));
+    }
+}
+
+/// Until the value is dropped, the commands this thread sends are one API
+/// request for the pacing (a market data request that also starts news
+/// and generic ticks, for example). Inside another scope, nothing changes.
+pub fn one_request() -> RequestScope {
+    let before = SCOPE.with(|s| s.get());
+    if before == Scope::Each {
+        SCOPE.with(|s| s.set(Scope::OneRequest { counted: false }));
+    }
+    RequestScope { before }
+}
+
+/// Until the value is dropped, the commands this thread sends are not API
+/// requests: they are not paced.
+pub fn not_a_request() -> RequestScope {
+    let before = SCOPE.with(|s| s.replace(Scope::NotARequest));
+    RequestScope { before }
+}
+
+/// The command as it is sent in the scope of this thread.
+#[inline]
+fn scoped(cmd: ControlCommand) -> ControlCommand {
+    match SCOPE.with(|s| s.get()) {
+        Scope::Each => cmd,
+        _ if !super::pacer::is_request(&cmd) => cmd,
+        Scope::NotARequest => ControlCommand::Unpaced(Box::new(cmd)),
+        Scope::OneRequest { counted: true } => ControlCommand::Unpaced(Box::new(cmd)),
+        Scope::OneRequest { counted: false } => {
+            SCOPE.with(|s| s.set(Scope::OneRequest { counted: true }));
+            cmd
+        }
+    }
+}
+
 /// The sender of the engine's command channel. A command sent while the
 /// engine waits wakes it (ibx#530).
 #[derive(Clone)]
@@ -105,17 +165,20 @@ pub struct ControlSender {
     waker: Option<Arc<Waker>>,
     /// Counts the commands sent, for the order of the answers (ibx#529).
     clock: Option<Arc<CommandClock>>,
+    /// The engine paces API requests: the commands that are not requests
+    /// of their own are marked (ibx#555).
+    marks: bool,
 }
 
 impl ControlSender {
     pub(crate) fn new(tx: Sender<ControlCommand>, waker: Option<Arc<Waker>>, clock: Option<Arc<CommandClock>>) -> Self {
-        Self { tx, waker, clock }
+        Self { tx, waker, clock, marks: true }
     }
 
     /// As `Sender::send`.
     #[inline]
     pub fn send(&self, cmd: ControlCommand) -> Result<(), SendError<ControlCommand>> {
-        let sent = self.tx.send(cmd);
+        let sent = self.tx.send(self.scoped(cmd));
         self.sent(sent.is_ok());
         sent
     }
@@ -123,9 +186,20 @@ impl ControlSender {
     /// As `Sender::try_send`.
     #[inline]
     pub fn try_send(&self, cmd: ControlCommand) -> Result<(), TrySendError<ControlCommand>> {
-        let sent = self.tx.try_send(cmd);
+        let before = SCOPE.with(|s| s.get());
+        let sent = self.tx.try_send(self.scoped(cmd));
+        if sent.is_err() {
+            // Not sent: the caller sends it again, and it counts then.
+            SCOPE.with(|s| s.set(before));
+        }
         self.sent(sent.is_ok());
         sent
+    }
+
+    /// The command as it is sent in the scope of this thread.
+    #[inline]
+    fn scoped(&self, cmd: ControlCommand) -> ControlCommand {
+        if self.marks { scoped(cmd) } else { cmd }
     }
 
     /// Count the command and end the engine's wait.
@@ -141,7 +215,7 @@ impl ControlSender {
     pub fn send_timeout(
         &self, cmd: ControlCommand, timeout: std::time::Duration,
     ) -> Result<(), crossbeam_channel::SendTimeoutError<ControlCommand>> {
-        let sent = self.tx.send_timeout(cmd, timeout);
+        let sent = self.tx.send_timeout(self.scoped(cmd), timeout);
         self.sent(sent.is_ok());
         sent
     }
@@ -155,10 +229,11 @@ impl ControlSender {
 }
 
 /// A sender with nothing to wake: for an engine that is not running its
-/// loop on a thread (tests), or a channel read by something else.
+/// loop on a thread (tests), or a channel read by something else. Its
+/// commands are sent as they are, with no mark for the pacing.
 impl From<Sender<ControlCommand>> for ControlSender {
     fn from(tx: Sender<ControlCommand>) -> Self {
-        Self { tx, waker: None, clock: None }
+        Self { tx, waker: None, clock: None, marks: false }
     }
 }
 
@@ -208,6 +283,56 @@ mod tests {
         let waker = Arc::new(Waker::new().unwrap());
         let (tx, rx) = crossbeam_channel::bounded(8);
         (Parker::new(Some(waker.clone())), ControlSender::new(tx, Some(waker), None), rx)
+    }
+
+    // ibx#555: what the commands of a thread count for in each scope.
+    #[test]
+    fn request_scopes_mark_the_commands_that_are_not_paced() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let plain = ControlSender::from(tx.clone());
+        let tx = ControlSender::new(tx, None, None);
+        let cancel = |req_id| ControlCommand::CancelScanner { req_id };
+        let unpaced = |c: &ControlCommand| matches!(c, ControlCommand::Unpaced(_));
+        tx.send(cancel(1)).unwrap();
+        tx.send(cancel(2)).unwrap();
+        {
+            let _one = one_request();
+            tx.send(ControlCommand::Ping).unwrap();
+            tx.send(cancel(3)).unwrap();
+            tx.send(cancel(4)).unwrap();
+            // Inside another scope nothing changes.
+            let _inner = one_request();
+            tx.try_send(cancel(5)).unwrap();
+        }
+        tx.send(cancel(6)).unwrap();
+        {
+            let _internal = not_a_request();
+            tx.send(cancel(7)).unwrap();
+            tx.send(ControlCommand::Ping).unwrap();
+        }
+        tx.send(cancel(8)).unwrap();
+        // A command a full channel gave back counts when it is sent again.
+        {
+            let (full_tx, full_rx) = crossbeam_channel::bounded(1);
+            let full = ControlSender::new(full_tx, None, None);
+            full.send(ControlCommand::Ping).unwrap();
+            let _one = one_request();
+            let back = match full.try_send(cancel(1)) {
+                Err(TrySendError::Full(cmd)) => cmd,
+                other => panic!("{other:?}"),
+            };
+            full_rx.recv().unwrap();
+            full.send(back).unwrap();
+            assert!(!unpaced(&full_rx.recv().unwrap()));
+        }
+        let got: Vec<bool> = rx.try_iter().map(|c| unpaced(&c)).collect();
+        //          1      2      ping   3      4     5     6      7     ping   8
+        assert_eq!(got, [false, false, false, false, true, true, false, true, false, false]);
+
+        // A sender made from a plain channel marks nothing.
+        let _internal = not_a_request();
+        plain.send(cancel(9)).unwrap();
+        assert!(!unpaced(&rx.try_recv().unwrap()));
     }
 
     #[test]

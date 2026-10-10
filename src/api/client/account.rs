@@ -97,6 +97,8 @@ impl EClient {
     /// A server subscription: the rows come as the server sends them, each
     /// batch ends with account_summary_end, until the cancel (ibx#479).
     pub fn req_account_summary(&self, req_id: i64, group: &str, tags: &str) {
+        // One API request for the pacing, whatever it sends (ibx#555).
+        let _one = crate::engine::park::one_request();
         if !crate::client_core::ClientCore::ids_fit("req_account_summary", &[req_id]) { return; }
         match self.core.subscribe_account_summary(req_id, group, tags) {
             Ok(plan) => {

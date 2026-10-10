@@ -2704,6 +2704,7 @@ impl Gateway {
             });
         }
         let mut hot_loop = HotLoop::new(shared, event_tx, core_id);
+        hot_loop.pace_requests();
         let tx = hot_loop.control_channel();
         hot_loop.set_account_id(self.account_id.clone());
         hot_loop.set_scale_us_lots(self.scale_us_lots);
