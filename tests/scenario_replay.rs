@@ -316,8 +316,9 @@ fn two_scanner_subscriptions() {
 // News ticks on a contract asked twice, then on a second contract with
 // one provider (02/10/2026, ibx#458): the news subscription lists the
 // session's news providers, or the one asked (ibx#514). Stops before the
-// cancels, which the reference groups into one message per kind
-// (ibx#555). The order of marketDataType and tickReqParams on a contract
+// cancels, which the reference groups into one message per kind: the
+// engine does it in its market data passes (ibx#560), which the replay
+// does not run yet (ibx#563). The order of marketDataType and tickReqParams on a contract
 // asked before is ibx#535: left out.
 #[test]
 fn news_ticks_twice() {

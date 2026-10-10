@@ -73,6 +73,8 @@ pub struct HotLoop {
     cmd_queue: std::collections::VecDeque<crate::engine::pacer::Queued>,
     /// Commands read from the channel so far.
     cmd_received: u64,
+    /// The market data messages that wait for the next pass (ibx#560).
+    md_pass: crate::engine::md_pass::MdPass,
     /// Slots told to market data requests whose turn has not come, by
     /// conId, oldest first (ibx#561). A slot here is not given back.
     md_slots_told: Vec<(i64, InstrumentId)>,
@@ -170,6 +172,7 @@ impl HotLoop {
             cmd_buf: Vec::with_capacity(16),
             cmd_queue: std::collections::VecDeque::with_capacity(16),
             cmd_received: 0,
+            md_pass: Default::default(),
             md_slots_told: Vec::new(),
             pacer: None,
             farm: FarmState::new(),
@@ -617,12 +620,17 @@ impl HotLoop {
             f.note_request(Instant::now());
         }
         if !news_contract {
-            let Some(sink) = farm_sink!(self, id) else { return };
-            self.farm.subscribe_top(sub, id, sink, &mut self.hb);
+            if self.md_pass.on {
+                let mut sink = crate::engine::md_pass::HoldSink { farm: id, pass: &mut self.md_pass };
+                self.farm.subscribe_top(sub, id, &mut sink, &mut self.hb);
+            } else {
+                let Some(sink) = farm_sink!(self, id) else { return };
+                self.farm.subscribe_top(sub, id, sink, &mut self.hb);
+            }
         }
         for (providers, _) in news {
             let msgs = self.farm.start_news(sub.instrument, sub.con_id, &sub.sec_type, &providers, id);
-            self.send_farm_messages(msgs);
+            self.send_md_messages(msgs);
         }
         // The generic ticks of its requests, after its top of book
         // (ibx#450).
@@ -661,7 +669,7 @@ impl HotLoop {
         let Some(id) = self.md_route(&sub) else { return };
         let primary = self.context.listing_exchanges.get(&con_id).cloned().unwrap_or_default();
         let msgs = self.farm.start_generic(instrument, con_id, &exchange, &sec_type, &primary, &codes, id);
-        self.send_farm_messages(msgs);
+        self.send_md_messages(msgs);
     }
 
     /// The news ticks waiting for the top of book of an instrument, in the
@@ -701,12 +709,26 @@ impl HotLoop {
             f.note_request(Instant::now());
         }
         let msgs = self.farm.start_news(instrument, con_id, &sub.sec_type, &providers, id);
-        self.send_farm_messages(msgs);
+        self.send_md_messages(msgs);
     }
 
     /// Cancel the top of book of an instrument on each farm it went to
     /// (#445).
     fn route_md_cancel(&mut self, instrument: InstrumentId) {
+        if self.md_pass.on {
+            // In the order of the reference's cancels: the top of book,
+            // the generic tick entries, the news entry, the market data
+            // status entry (ibx#450, ibx#458, ibx#447).
+            let msgs = self.farm.unsubscribe_top(instrument);
+            self.send_md_messages(msgs);
+            let msgs = self.farm.stop_generic(instrument);
+            self.send_md_messages(msgs);
+            let msgs = self.farm.stop_news(instrument);
+            self.send_md_messages(msgs);
+            let msgs = self.farm.stop_status(instrument);
+            self.send_md_messages(msgs);
+            return;
+        }
         let now = Instant::now();
         for (id, msg) in self.farm.unsubscribe_top(instrument) {
             let fields: Vec<(u32, &str)> = msg.iter().map(|(t, v)| (*t, v.as_str())).collect();
@@ -775,12 +797,41 @@ impl HotLoop {
     }
 
     /// Send market data messages, each to its farm.
+    /// Market data requests and cancels of the API requests: kept for the
+    /// next pass when the passes are on (ibx#560), else sent at once.
+    fn send_md_messages(&mut self, msgs: Vec<(pool::FarmId, Vec<(u32, String)>)>) {
+        if !self.md_pass.on {
+            return self.send_farm_messages(msgs);
+        }
+        let now = Instant::now();
+        for (id, msg) in msgs {
+            self.md_pass.hold(now, id, msg);
+        }
+    }
+
+    /// Send the market data pass that is due (ibx#560).
+    fn send_due_md_pass(&mut self) {
+        if !self.md_pass.on {
+            return;
+        }
+        let msgs = self.md_pass.take_due(Instant::now(), !self.running);
+        if !msgs.is_empty() {
+            self.send_farm_messages(msgs);
+        }
+    }
+
     fn send_farm_messages(&mut self, msgs: Vec<(pool::FarmId, Vec<(u32, String)>)>) {
         let now = Instant::now();
         for (id, msg) in msgs {
             let fields: Vec<(u32, &str)> = msg.iter().map(|(t, v)| (*t, v.as_str())).collect();
             if let Some(f) = self.pool.get_mut(id) {
                 f.note_request(now);
+            }
+            // What leaves, readable on a live session (ibx#558).
+            if log::log_enabled!(log::Level::Debug) {
+                let text: Vec<String> = fields.iter().filter(|(t, _)| *t != fix::TAG_SENDING_TIME)
+                    .map(|(t, v)| format!("{t}={v}")).collect();
+                log::debug!("To farm {}: {}", id, text.join("|"));
             }
             if let Some(sink) = farm_sink!(self, id) {
                 if sink.send_comp(&fields) && id == PRIMARY_MD {
@@ -1416,6 +1467,11 @@ impl HotLoop {
     /// or the timeout passed. Not while output waits for a slow peer, nor
     /// with a connection that waits in its own read (in-memory, tests).
     fn wait_for_work(&mut self) {
+        // A market data pass is due in less than 5 ms (ibx#560).
+        if self.md_pass.waits() {
+            std::thread::yield_now();
+            return;
+        }
         self.wait_handles.clear();
         let primary = [
             (&self.farm_conn, self.farm.disconnected),
@@ -1747,7 +1803,10 @@ impl HotLoop {
                             if let Some(f) = self.pool.get_mut(farm_id) {
                                 f.note_request(Instant::now());
                             }
-                            if let Some(sink) = farm_sink!(self, farm_id) {
+                            if self.md_pass.on {
+                                let mut sink = crate::engine::md_pass::HoldSink { farm: farm_id, pass: &mut self.md_pass };
+                                self.farm.subscribe_snapshot(&sub, farm_id, &mut sink, &mut self.hb);
+                            } else if let Some(sink) = farm_sink!(self, farm_id) {
                                 self.farm.subscribe_snapshot(&sub, farm_id, sink, &mut self.hb);
                             }
                         }
@@ -1824,14 +1883,14 @@ impl HotLoop {
                 }
                 ControlCommand::UnsubscribeNews { instrument, providers } => {
                     let msgs = self.farm.release_news(instrument, &providers);
-                    self.send_farm_messages(msgs);
+                    self.send_md_messages(msgs);
                 }
                 ControlCommand::SubscribeGeneric { instrument, con_id, exchange, sec_type, codes } => {
                     self.subscribe_generic(instrument, con_id, exchange, sec_type, codes);
                 }
                 ControlCommand::UnsubscribeGeneric { instrument, codes } => {
                     let msgs = self.farm.release_generic(instrument, &codes);
-                    self.send_farm_messages(msgs);
+                    self.send_md_messages(msgs);
                 }
                 ControlCommand::UpdateParam { key, value } => {
                     let _ = (key, value);
@@ -2159,6 +2218,7 @@ impl HotLoop {
             }
         }
         self.shared.command_clock().note_handled(taken);
+        self.send_due_md_pass();
 
         // All senders dropped — treat as implicit shutdown.
         if sender_dropped && self.running {
@@ -2893,6 +2953,8 @@ impl HotLoop {
     /// command at once unless this is called.
     pub fn pace_requests(&mut self) {
         self.pacer = Some(Default::default());
+        // With it, the market data messages leave in passes (ibx#560).
+        self.md_pass.on = true;
     }
 
     /// Mutably access heartbeat state for testing (e.g., setting timestamps).
