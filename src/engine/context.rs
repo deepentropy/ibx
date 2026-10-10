@@ -71,8 +71,13 @@ pub(crate) struct BookEntry {
 /// answers 161 for each (`trader.order.ay.a(pe, bs, bE, boolean)@176`):
 /// - a cancelled order stays [`CANCELLED_ORDER_KEPT`] after the report
 ///   that ended it, then a timer takes it out (`ay.a(pe, fq, long,
-///   boolean)`, `UISettings.ce()`; paper 09/10/2026: 161 at 6 and 7 s,
-///   none at 17 s and later);
+///   boolean)`, `UISettings.ce()`; paper 10/10/2026: 161 at 3, 6 and 9 s,
+///   none at 10.2 s and later), whether its own cancel, its parent's or a
+///   global cancel ended it;
+/// - an order the server refused (201) stays as long (paper 10/10/2026:
+///   161 at 9 s, none at 14 and 16 s, and its cancel at 19 s finds no
+///   order); the global cancel that answers for it takes it out
+///   (`ay.a(pe, bs, bE, boolean)@91`, read from the code, not seen);
 /// - an order that was never sent (refused before the send, or held and
 ///   cancelled) gets no report, so nothing takes it out: 161 at every
 ///   global cancel of the session (paper 09/10/2026, three runs).
@@ -84,6 +89,8 @@ pub(crate) struct EndedOrder {
     pub entry: BookEntry,
     /// When the reference takes it out of its book; None for never.
     pub until: Option<Instant>,
+    /// Taken out by the first global cancel that answers for it.
+    pub once: bool,
 }
 
 /// How long the reference keeps a cancelled order in its book.
@@ -1507,12 +1514,14 @@ impl Context {
     /// Remove an order that ended with `status`, and keep that status for a
     /// later cancel of the same id (ibx#464).
     pub fn finish_order(&mut self, order_id: OrderId, status: OrderStatus) {
-        let kept = (status == OrderStatus::Cancelled).then(|| self.book.get(&order_id).cloned()).flatten();
+        let kept = matches!(status, OrderStatus::Cancelled | OrderStatus::Rejected)
+            .then(|| self.book.get(&order_id).cloned()).flatten();
         if !self.forget_order(order_id) {
             return;
         }
         if let Some(entry) = kept {
             self.keep_ended(order_id, self.server_id(order_id), entry, Some(Instant::now() + CANCELLED_ORDER_KEPT));
+            if let Some(e) = self.ended.last_mut() { e.once = status == OrderStatus::Rejected; }
         }
         if self.finished_orders.insert(order_id, status).is_none() {
             self.finished_order_ids.push_back(order_id);
@@ -1543,15 +1552,18 @@ impl Context {
             entry.seq = self.next_book_seq;
             self.next_book_seq += 1;
         }
-        self.ended.push(EndedOrder { order_id, server_id, entry, until });
+        self.ended.push(EndedOrder { order_id, server_id, entry, until, once: false });
         self.book_peak = self.book_peak.max(self.open_orders.len() + self.ended.len());
     }
 
-    /// The ended orders the reference's book holds at `now`; those whose
-    /// time is over are dropped.
+    /// The ended orders the reference's book holds at `now`, for a global
+    /// cancel; those whose time is over are dropped, and those this
+    /// global cancel takes out.
     pub(crate) fn ended_orders(&mut self, now: Instant) -> Vec<EndedOrder> {
         self.ended.retain(|e| e.until.is_none_or(|until| now < until));
-        self.ended.clone()
+        let kept = self.ended.clone();
+        self.ended.retain(|e| !e.once);
+        kept
     }
 
     /// Remove an order and what is kept for it, without keeping a final

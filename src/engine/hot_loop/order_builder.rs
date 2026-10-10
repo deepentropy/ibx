@@ -5097,6 +5097,18 @@ mod tests {
         assert_eq!(notices, [(39086, 161), (39092, 161), (39094, 161)]);
     }
 
+    // ibx#549, paper 10/10/2026: an order the server refused is answered
+    // for in its 10 s too; that global cancel takes it out.
+    #[test]
+    fn global_cancel_answers_161_once_for_a_refused_order() {
+        let (notices, mut context) = global_cancel_notices(|ctx| {
+            ctx.insert_order(Order::new(81, 0, Side::Buy, 1, 100, b'2', b'0', 0));
+            ctx.finish_order(81, OrderStatus::Rejected);
+        });
+        assert_eq!(notices, [(81, 161)]);
+        assert!(context.ended_orders(Instant::now()).is_empty());
+    }
+
     // An ended order of another client gives nothing to this one.
     #[test]
     fn global_cancel_gives_no_161_for_an_ended_order_of_another_client() {
