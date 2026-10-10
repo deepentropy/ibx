@@ -2302,6 +2302,9 @@ pub enum ControlCommand {
         exchange: String,
         mode_9887: i32,
         snapshot: bool,
+        /// The slot of the conId itself, never the one of a running top of
+        /// book (a regulatory snapshot).
+        plain: bool,
         reply_tx: crossbeam_channel::Sender<Result<InstrumentId, String>>,
     },
     /// The answer to a request refused by the client itself, written to

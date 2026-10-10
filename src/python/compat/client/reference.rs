@@ -25,6 +25,8 @@ impl EClient {
         keep_up_to_date: bool,
         chart_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_historical_data", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -70,6 +72,8 @@ impl EClient {
 
     /// Cancel historical data.
     fn cancel_historical_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("cancel_historical_data", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -88,6 +92,8 @@ impl EClient {
         use_rth: i32,
         format_date: i32,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_head_time_stamp", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -109,6 +115,8 @@ impl EClient {
 
     /// Cancel head timestamp request.
     fn cancel_head_time_stamp(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("cancel_head_time_stamp", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -118,6 +126,8 @@ impl EClient {
 
     /// Request contract details.
     fn req_contract_details(&self, py: Python<'_>, req_id: i64, contract: &Contract) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_contract_details", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -151,6 +161,8 @@ impl EClient {
 
     /// Request available exchanges for market depth.
     fn req_mkt_depth_exchanges(&self, py: Python<'_>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::FetchMktDepthExchanges)?;
@@ -159,6 +171,8 @@ impl EClient {
 
     /// Search for matching symbols.
     fn req_matching_symbols(&self, py: Python<'_>, req_id: i64, pattern: &str) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_matching_symbols", &[req_id]) { return Ok(()); }
         // An empty or invalid pattern gives 321 and nothing is sent; the
@@ -193,6 +207,8 @@ impl EClient {
         underlying_sec_type: &str,
         underlying_con_id: i64,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !ClientCore::ids_fit("req_sec_def_opt_params", &[req_id, underlying_con_id]) { return Ok(()); }
         if let Some((code, text)) = crate::control::optparams::refusal(underlying_sec_type, fut_fop_exchange, underlying_con_id) {
@@ -221,6 +237,8 @@ impl EClient {
         scanner_subscription_options: Vec<Py<PyAny>>,
         scanner_subscription_filter_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_scanner_subscription", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -285,6 +303,8 @@ impl EClient {
 
     /// Cancel scanner subscription.
     fn cancel_scanner_subscription(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("cancel_scanner_subscription", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -294,6 +314,8 @@ impl EClient {
 
     /// Request scanner parameters XML.
     fn req_scanner_parameters(&self, py: Python<'_>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::FetchScannerParams)?;
@@ -310,6 +332,8 @@ impl EClient {
         article_id: &str,
         news_article_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_news_article", &[req_id]) { return Ok(()); }
         let _ = news_article_options;
@@ -340,6 +364,8 @@ impl EClient {
         total_results: i32,
         historical_news_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_historical_news", &[req_id, con_id]) { return Ok(()); }
         let _ = historical_news_options;
@@ -370,6 +396,8 @@ impl EClient {
         report_type: &str,
         fundamental_data_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_fundamental_data", &[req_id, contract.con_id]) { return Ok(()); }
         let _ = fundamental_data_options;
@@ -388,6 +416,8 @@ impl EClient {
 
     /// Cancel fundamental data.
     fn cancel_fundamental_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("cancel_fundamental_data", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -410,6 +440,8 @@ impl EClient {
         ignore_size: bool,
         misc_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_historical_ticks", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -443,8 +475,10 @@ impl EClient {
 
     /// Request market rule details.
     fn req_market_rule(&self, py: Python<'_>, market_rule_id: i32) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.req_market_rule(py, market_rule_id)) { return Ok(()); }
         let rule = self.shared.lock().unwrap().clone()
             .and_then(|shared| shared.reference.market_rule(market_rule_id));
         // An id not received, or a rule with no price increments: 322
@@ -466,6 +500,8 @@ impl EClient {
     /// Request histogram data.
     #[pyo3(signature = (req_id, contract, use_rth, time_period))]
     fn req_histogram_data(&self, py: Python<'_>, req_id: i64, contract: &Contract, use_rth: bool, time_period: &str) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_histogram_data", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -482,6 +518,8 @@ impl EClient {
 
     /// Cancel histogram data.
     fn cancel_histogram_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("cancel_histogram_data", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -495,6 +533,8 @@ impl EClient {
         &self, py: Python<'_>, req_id: i64, contract: &Contract,
         end_date_time: &str, duration_str: &str, use_rth: bool,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_historical_schedule", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;

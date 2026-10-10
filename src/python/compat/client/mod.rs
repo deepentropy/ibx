@@ -68,6 +68,17 @@ pub struct EClient {
     /// Connection time of the session; set by connect(), cleared by
     /// disconnect() (ibx#426).
     pub(crate) connection_time: Mutex<Option<String>>,
+    /// Requests the client answers itself, each waiting for its turn among
+    /// the paced requests; the event loop answers them (ibx#565).
+    pub(crate) local_calls: Mutex<std::collections::VecDeque<(crossbeam_channel::Receiver<()>, LocalCall)>>,
+}
+
+/// A request the client answers itself, to run when its turn has come.
+pub(crate) type LocalCall = Box<dyn for<'py> FnOnce(&EClient, Python<'py>) -> PyResult<()> + Send>;
+
+thread_local! {
+    /// The event loop is answering a request whose turn has come.
+    static ANSWERING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl Drop for EClient {
@@ -107,6 +118,7 @@ impl EClient {
             _test_control_rx: Mutex::new(None),
             core: ClientCore::new(),
             connection_time: Mutex::new(None),
+            local_calls: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -235,6 +247,8 @@ impl EClient {
 
     /// Disconnect from IB.
     fn disconnect(&self, py: Python<'_>) -> PyResult<()> {
+        // Requests still waiting for their turn get no answer.
+        self.local_calls.lock().unwrap().clear();
         let tx = self.control_tx.lock().unwrap().clone();
         let handle = self._thread.lock().unwrap().take();
         // Stop the engine with the interpreter lock released: a slow engine
@@ -339,11 +353,47 @@ impl EClient {
     }
 
     /// Clone the shared state Arc, or return "Not connected".
-    /// A request answered here waits for its turn among the requests made
-    /// before it (ibx#561); the interpreter runs meanwhile.
-    pub(crate) fn turn(&self, py: Python<'_>) {
-        if let Ok(shared) = self.shared_state() {
-            py.detach(|| shared.command_clock().take_turn());
+    /// A request the client answers itself (ibx#561, ibx#565): on a paced
+    /// session the call returns at once and `call` runs from the event
+    /// loop when the turn of the request has come, as the reference
+    /// answers from its reader thread. True when the answer was put off;
+    /// false when the caller answers now (no pacing, or this is the event
+    /// loop answering).
+    pub(crate) fn later(&self, call: impl for<'py> FnOnce(&EClient, Python<'py>) -> PyResult<()> + Send + 'static) -> bool {
+        if ANSWERING.with(|a| a.get()) {
+            return false;
+        }
+        let Ok(shared) = self.shared_state() else { return false };
+        match shared.command_clock().turn_ticket() {
+            Some(ticket) => {
+                self.local_calls.lock().unwrap().push_back((ticket, Box::new(call)));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Answer the requests whose turn has come, in the order they were
+    /// made. Called by the event loop.
+    pub(crate) fn answer_local_calls(&self, py: Python<'_>) -> PyResult<()> {
+        loop {
+            let call = {
+                let mut calls = self.local_calls.lock().unwrap();
+                match calls.front() {
+                    // The turn has come, or the engine stopped.
+                    Some((ticket, _)) if !matches!(ticket.try_recv(), Err(crossbeam_channel::TryRecvError::Empty)) => {
+                        calls.pop_front().map(|(_, call)| call)
+                    }
+                    _ => None,
+                }
+            };
+            let Some(call) = call else { return Ok(()) };
+            // Its turn has come: what it sends now is not paced again.
+            let _answering = crate::engine::park::not_a_request();
+            ANSWERING.with(|a| a.set(true));
+            let done = call(self, py);
+            ANSWERING.with(|a| a.set(false));
+            done?;
         }
     }
 

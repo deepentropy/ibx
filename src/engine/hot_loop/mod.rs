@@ -1286,6 +1286,13 @@ impl HotLoop {
     /// stay resident until released. As the reference keeps a contract's
     /// market data while any observer still needs it, dropping one consumer
     /// leaves the others' data running (ibx#291).
+    /// The oldest slot told for `con_id` to a request whose turn comes now
+    /// (ibx#561).
+    fn take_told_slot(&mut self, con_id: i64) -> Option<InstrumentId> {
+        let at = self.md_slots_told.iter().position(|(c, _)| *c == con_id)?;
+        Some(self.md_slots_told.remove(at).1)
+    }
+
     fn try_reclaim_instrument(&mut self, instrument: InstrumentId) {
         if !self.context.open_orders_for(instrument).is_empty() {
             return;
@@ -1722,19 +1729,19 @@ impl HotLoop {
                     crate::types::ErrorQueue::TickByTick => self.shared.market.push_tbt_error(req_id, code as i32, message),
                     crate::types::ErrorQueue::Connection => self.shared.push_connection_notice(code, message),
                 },
-                ControlCommand::MarketDataSlot { con_id, symbol, sec_type, exchange, mode_9887, snapshot, reply_tx } => {
-                    // As `Subscribe` decides it: the slot of the running
+                ControlCommand::MarketDataSlot { con_id, symbol, sec_type, exchange, mode_9887, snapshot, plain, reply_tx } => {
+                    // As the request decides it: the slot of the running
                     // top of book of the contract, else the slot of its
-                    // conId.
+                    // conId; a new slot for a contract with no conId.
                     let found = self.context.market.instrument_by_con_id(con_id);
-                    let joined = (mode_9887 == 0 && !found.is_some_and(|slot| self.joins_top(slot, snapshot)))
+                    let joined = (!plain && con_id != 0 && mode_9887 == 0 && !found.is_some_and(|slot| self.joins_top(slot, snapshot)))
                         .then(|| self.running_top_slot(con_id, found, snapshot)).flatten();
                     let slot = match joined {
                         Some(slot) => {
                             let _ = reply_tx.send(Ok(slot));
                             Some(slot)
                         }
-                        None => self.register_slot_or_reject(Some(con_id), symbol, &sec_type, &exchange, &Some(reply_tx)),
+                        None => self.register_slot_or_reject((con_id != 0).then_some(con_id), symbol, &sec_type, &exchange, &Some(reply_tx)),
                     };
                     if let Some(slot) = slot {
                         self.md_slots_told.push((con_id, slot));
@@ -1749,8 +1756,7 @@ impl HotLoop {
                     // symbol after an order on the contract): the request
                     // shares it there, nothing is sent (ibx#534).
                     // The slot told to the call when it was made (ibx#561).
-                    let told = self.md_slots_told.iter().position(|(c, _)| *c == con_id && con_id != 0)
-                        .map(|at| self.md_slots_told.remove(at).1);
+                    let told = if con_id != 0 { self.take_told_slot(con_id) } else { None };
                     let found = self.context.market.instrument_by_con_id(con_id);
                     if told.is_none() && con_id != 0 && mode_9887 == 0 && !found.is_some_and(|slot| self.joins_top(slot, snapshot))
                         && let Some(slot) = self.running_top_slot(con_id, found, snapshot)
@@ -1794,7 +1800,16 @@ impl HotLoop {
                     }
                 }
                 ControlCommand::SubscribeSnapshot { con_id, symbol, exchange, sec_type, reply_tx } => {
-                    if let Some(id) = self.register_slot_or_reject(Some(con_id), symbol.clone(), &sec_type, &exchange, &reply_tx) {
+                    let slot = match self.take_told_slot(con_id) {
+                        Some(slot) => {
+                            if let Some(tx) = &reply_tx {
+                                let _ = tx.send(Ok(slot));
+                            }
+                            Some(slot)
+                        }
+                        None => self.register_slot_or_reject(Some(con_id), symbol.clone(), &sec_type, &exchange, &reply_tx),
+                    };
+                    if let Some(id) = slot {
                         let sub = farm::MdSubscribe {
                             con_id, symbol, exchange, sec_type, last_trade_date: String::new(), strike: 0.0,
                             right: String::new(), multiplier: String::new(), instrument: id, mode_9887: 0, snapshot: false,
@@ -1817,7 +1832,19 @@ impl HotLoop {
                     self.try_reclaim_instrument(instrument);
                 }
                 ControlCommand::SubscribeBySymbol { symbol, sec_type, exchange, currency, filters, mode_9887, snapshot, reply_tx } => {
-                    if let Some(id) = self.register_slot_or_reject(None, symbol.clone(), &sec_type, &exchange, &reply_tx) {
+                    // The slot told to the call (ibx#565): those of
+                    // requests with no conId are kept under 0, oldest
+                    // first, the order of the requests.
+                    let slot = match self.take_told_slot(0) {
+                        Some(slot) => {
+                            if let Some(tx) = &reply_tx {
+                                let _ = tx.send(Ok(slot));
+                            }
+                            Some(slot)
+                        }
+                        None => self.register_slot_or_reject(None, symbol.clone(), &sec_type, &exchange, &reply_tx),
+                    };
+                    if let Some(id) = slot {
                         let sub = farm::MdSubscribe {
                             con_id: 0, symbol, exchange, sec_type,
                             last_trade_date: filters.last_trade_date_or_contract_month.clone(),
@@ -4414,7 +4441,7 @@ mod tests {
             let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
             (ControlCommand::MarketDataSlot {
                 con_id, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
-                mode_9887: 0, snapshot: false, reply_tx,
+                mode_9887: 0, snapshot: false, plain: false, reply_tx,
             }, reply_rx)
         };
         let (cmd, reply) = ask(265598);
@@ -4435,6 +4462,37 @@ mod tests {
         engine.poll_control_commands();
         assert_eq!(reply_rx.try_recv().unwrap(), Ok(slot), "the subscribe takes the slot told");
         assert!(engine.md_slots_told.is_empty());
+
+        // ibx#565: requests with no conId get a slot each, taken by their
+        // subscribes in the order of the requests; a regulatory snapshot
+        // takes the slot of its conId.
+        let by_symbol = |symbol: &str| {
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            (ControlCommand::MarketDataSlot {
+                con_id: 0, symbol: symbol.into(), sec_type: "STK".into(), exchange: "SMART".into(),
+                mode_9887: 0, snapshot: false, plain: false, reply_tx,
+            }, reply_rx)
+        };
+        let (first, first_reply) = by_symbol("MSFT");
+        let (second, second_reply) = by_symbol("NVDA");
+        tx.send(first).unwrap();
+        tx.send(second).unwrap();
+        engine.poll_control_commands();
+        let (a, b) = (first_reply.try_recv().unwrap().unwrap(), second_reply.try_recv().unwrap().unwrap());
+        assert_ne!(a, b);
+        assert_eq!(engine.md_slots_told, [(0, a), (0, b)]);
+        assert_eq!(engine.take_told_slot(0), Some(a));
+        assert_eq!(engine.take_told_slot(0), Some(b));
+        assert_eq!(engine.take_told_slot(0), None);
+
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        tx.send(ControlCommand::MarketDataSlot {
+            con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+            mode_9887: 0, snapshot: true, plain: true, reply_tx,
+        }).unwrap();
+        engine.poll_control_commands();
+        assert_eq!(reply_rx.try_recv().unwrap(), Ok(slot), "the slot of the conId");
+        assert_eq!(engine.take_told_slot(265598), Some(slot));
     }
 
     // ibx#561: an error the client writes itself and a request it answers
@@ -4485,6 +4543,33 @@ mod tests {
         shared.orders.push_order_error(10, 321, "refused".into());
         shared.command_clock().take_turn();
         assert_eq!(shared.orders.drain_order_errors().len(), 1);
+        assert!(shared.command_clock().turn_ticket().is_none(), "no ticket: the turn is now");
+
+        // ibx#565: a ticket tells when the turn has come, without a wait;
+        // the commands of one call count once.
+        std::thread::sleep(Duration::from_millis(5));
+        engine.poll_control_commands();
+        clock.set_running(true);
+        tx.send(scanner_cmd(3, 7, "TOP_PERC_GAIN")).unwrap();
+        let (ticket, late) = std::thread::spawn({
+            let shared = shared.clone();
+            move || {
+                let _request = crate::engine::park::one_request();
+                let ticket = shared.command_clock().turn_ticket().unwrap();
+                // Of the same call: not a second request.
+                shared.orders.push_order_error(11, 321, "refused".into());
+                (ticket, Instant::now())
+            }
+        }).join().unwrap();
+        assert!(late.elapsed() < Duration::from_millis(50));
+        engine.poll_control_commands();
+        assert!(ticket.try_recv().is_err(), "the request before it was taken; its turn is the next step");
+        std::thread::sleep(Duration::from_millis(105));
+        engine.poll_control_commands();
+        assert!(ticket.try_recv().is_ok());
+        assert_eq!(shared.orders.drain_order_errors(), [(11, 321, "refused".to_string())], "with its turn, not a step later");
+        assert!(engine.cmd_queue.is_empty());
+        clock.set_running(false);
     }
 
     fn load_scanner_params(engine: &mut HotLoop, server: &mut crate::protocol::connection::MemTransport, xml: &str) {

@@ -182,6 +182,8 @@ impl EClient {
 
     /// Single iteration of event dispatch: drain all shared queues and fire Python callbacks.
     pub(crate) fn dispatch_once(&self, py: Python<'_>, shared: &Arc<SharedState>) -> PyResult<()> {
+        // The requests the client answers itself, at their turn (ibx#565).
+        self.answer_local_calls(py)?;
         // Drain engine events. The lock is held only to drain, never across
         // a callback, so a callback may call disconnect() or connect()
         // (ibx#268). A stopped engine ends the session: run() exits and

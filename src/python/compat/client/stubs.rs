@@ -41,6 +41,8 @@ impl EClient {
         &self, py: Python<'_>, req_id: i64, contract: &Contract,
         kind: crate::control::optcalc::CalcKind, under_price: f64,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("calculate_option", &[req_id, contract.con_id]) { return Ok(()); }
         let shared = self.shared_state()?;
@@ -69,6 +71,8 @@ impl EClient {
         &self, py: Python<'_>, req_id: i64, contract: &Contract, option_price: f64,
         under_price: f64, implied_vol_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         let _ = implied_vol_options;
         self.calculate_option(py, req_id, contract, crate::control::optcalc::CalcKind::ImpliedVol { option_price }, under_price)
     }
@@ -80,17 +84,23 @@ impl EClient {
         &self, py: Python<'_>, req_id: i64, contract: &Contract, volatility: f64,
         under_price: f64, opt_prc_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         let _ = opt_prc_options;
         self.calculate_option(py, req_id, contract, crate::control::optcalc::CalcKind::Price { volatility }, under_price)
     }
 
     fn cancel_calculate_implied_volatility(&self, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         let _ = req_id;
         Ok(())
     }
 
     fn cancel_calculate_option_price(&self, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         let _ = req_id;
         Ok(())
@@ -101,6 +111,8 @@ impl EClient {
         &self, req_id: i64, contract: &Contract, exercise_action: i32,
         exercise_quantity: i32, account: &str, _override: i32,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         let _ = (req_id, contract, exercise_action, exercise_quantity, account, _override);
         log::warn!("exercise_options: not yet implemented in engine");
         Ok(())
@@ -111,12 +123,16 @@ impl EClient {
 
     #[pyo3(signature = (all_msgs=true))]
     fn req_news_bulletins(&self, all_msgs: bool) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         self.core.subscribe_bulletins(all_msgs);
         Ok(())
     }
 
     fn cancel_news_bulletins(&self) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         self.core.unsubscribe_bulletins();
         Ok(())
@@ -125,11 +141,13 @@ impl EClient {
     // ── Server Time ──
 
     fn req_current_time(&self, py: Python<'_>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         // Paced like every request: on the reference a current time
         // request made in a burst was answered at its turn (run of
         // 10/10/2026, ibx#561).
-        self.turn(py);
+        if self.later(move |this, py| this.req_current_time(py)) { return Ok(()); }
         // The local clock plus the offset to the server clock of the
         // logon, as the reference (ibx#421).
         let now = self.shared_state()?.reference.server_time_secs();
@@ -138,8 +156,10 @@ impl EClient {
     }
 
     fn req_current_time_in_millis(&self, py: Python<'_>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.req_current_time_in_millis(py)) { return Ok(()); }
         // The clock of req_current_time, in milliseconds (ibx#516).
         let now = self.shared_state()?.reference.server_time_millis();
         self.wrapper.call_method1(py, "current_time_in_millis", (now,))?;
@@ -151,8 +171,10 @@ impl EClient {
     /// Error 503 for the request, as the official client library answers
     /// on such a session; a running contract details request goes on.
     fn cancel_contract_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.cancel_contract_data(py, req_id)) { return Ok(()); }
         let (code, text) = crate::client_core::CANCEL_CONTRACT_DATA_UNSUPPORTED;
         self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
         Ok(())
@@ -161,8 +183,10 @@ impl EClient {
     /// Error 503 for the request; a running historical ticks request goes
     /// on.
     fn cancel_historical_ticks(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.cancel_historical_ticks(py, req_id)) { return Ok(()); }
         let (code, text) = crate::client_core::CANCEL_HISTORICAL_TICKS_UNSUPPORTED;
         self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
         Ok(())
@@ -171,9 +195,12 @@ impl EClient {
     /// A session opened without the intent to verify: error 544.
     #[pyo3(signature = (api_name, api_version))]
     fn verify_request(&self, py: Python<'_>, api_name: &str, api_version: &str) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         let _ = (api_name, api_version);
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        let (name, version) = (api_name.to_string(), api_version.to_string());
+        if self.later(move |this, py| this.verify_request(py, &name, &version)) { return Ok(()); }
         let (id, code, text) = crate::client_core::VERIFY_REQUEST_NO_INTENT;
         self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
         Ok(())
@@ -182,9 +209,12 @@ impl EClient {
     /// No verification is in progress: error 10095 as the reference.
     #[pyo3(signature = (api_data))]
     fn verify_message(&self, py: Python<'_>, api_data: &str) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         let _ = api_data;
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        let data = api_data.to_string();
+        if self.later(move |this, py| this.verify_message(py, &data)) { return Ok(()); }
         let (id, code, text) = crate::client_core::VERIFY_MESSAGE_OUT_OF_SEQUENCE;
         self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
         Ok(())
@@ -193,9 +223,12 @@ impl EClient {
     /// A session opened without the intent to verify: error 551.
     #[pyo3(signature = (api_name, api_version, opaque_isv_key))]
     fn verify_and_auth_request(&self, py: Python<'_>, api_name: &str, api_version: &str, opaque_isv_key: &str) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         let _ = (api_name, api_version, opaque_isv_key);
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        let (name, version, key) = (api_name.to_string(), api_version.to_string(), opaque_isv_key.to_string());
+        if self.later(move |this, py| this.verify_and_auth_request(py, &name, &version, &key)) { return Ok(()); }
         let (id, code, text) = crate::client_core::VERIFY_AND_AUTH_REQUEST_NO_INTENT;
         self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
         Ok(())
@@ -204,6 +237,8 @@ impl EClient {
     /// The reference gives no answer: nothing happens.
     #[pyo3(signature = (api_data, xyz_response))]
     fn verify_and_auth_message(&self, api_data: &str, xyz_response: &str) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         let _ = (api_data, xyz_response);
         if let Some(r) = self.not_connected(-1) { return r; }
         Ok(())
@@ -212,8 +247,10 @@ impl EClient {
     // ── FA (Financial Advisor) ──
 
     fn request_fa(&self, py: Python<'_>, _fa_data_type: i32) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.request_fa(py, _fa_data_type)) { return Ok(()); }
         // Not an FA session: error 321 as the reference (ibx#481).
         if !self.shared_state()?.reference.fa_session() {
             let (id, code, text) = crate::client_core::REQUEST_FA_NOT_FA;
@@ -226,8 +263,11 @@ impl EClient {
 
     #[pyo3(signature = (req_id, fa_data_type, cxml))]
     fn replace_fa(&self, py: Python<'_>, req_id: i64, fa_data_type: i32, cxml: &str) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
-        self.turn(py);
+        let xml = cxml.to_string();
+        if self.later(move |this, py| this.replace_fa(py, req_id, fa_data_type, &xml)) { return Ok(()); }
         if !crate::client_core::ClientCore::ids_fit("replace_fa", &[req_id]) { return Ok(()); }
         // Not an FA session: error 321 for the request as the reference
         // (ibx#481).
@@ -244,8 +284,10 @@ impl EClient {
     // ── Display Groups ──
 
     fn query_display_groups(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.query_display_groups(py, req_id)) { return Ok(()); }
         if !crate::client_core::ClientCore::ids_fit("query_display_groups", &[req_id]) { return Ok(()); }
         // The fixed list of groups, as the reference (ibx#424).
         match crate::client_core::ClientCore::query_display_groups(req_id) {
@@ -259,8 +301,10 @@ impl EClient {
     /// `none` since no group has one; error 321 for a group outside 1 to 7
     /// or a request id already subscribed.
     fn subscribe_to_group_events(&self, py: Python<'_>, req_id: i64, group_id: i32) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.subscribe_to_group_events(py, req_id, group_id)) { return Ok(()); }
         if !crate::client_core::ClientCore::ids_fit("subscribe_to_group_events", &[req_id]) { return Ok(()); }
         match self.core.subscribe_to_group_events(req_id, group_id) {
             Ok(contract_info) => { self.wrapper.call_method1(py, "display_group_updated", (req_id, contract_info))?; }
@@ -272,6 +316,8 @@ impl EClient {
     /// No answer, but error 321 for a request id that is not subscribed,
     /// as the reference (ibx#424).
     fn unsubscribe_from_group_events(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("unsubscribe_from_group_events", &[req_id]) { return Ok(()); }
         if let Some(text) = self.core.unsubscribe_from_group_events(req_id) {
@@ -284,6 +330,8 @@ impl EClient {
     /// that is not subscribed, error 473 for a conId that is not a
     /// contract, and no answer for a valid update, which changes no group.
     fn update_display_group(&self, py: Python<'_>, req_id: i64, contract_info: &str) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         use crate::client_core::DisplayGroupUpdate;
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("update_display_group", &[req_id]) { return Ok(()); }
@@ -306,8 +354,11 @@ impl EClient {
     /// market data made known; an unknown one gives error 321; a map not
     /// come yet is answered by the message loop, within 2 s.
     fn req_smart_components(&self, py: Python<'_>, req_id: i64, bbo_exchange: &str) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        let exchange = bbo_exchange.to_string();
+        if self.later(move |this, py| this.req_smart_components(py, req_id, &exchange)) { return Ok(()); }
         if !crate::client_core::ClientCore::ids_fit("req_smart_components", &[req_id]) { return Ok(()); }
         let shared = self.shared_state()?;
         match self.core.req_smart_components(req_id, bbo_exchange, &shared) {
@@ -319,8 +370,10 @@ impl EClient {
     // ── News Providers ──
 
     fn req_news_providers(&self, py: Python<'_>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.req_news_providers(py)) { return Ok(()); }
         let shared = self.shared_state()?;
         let np = shared.reference.news_providers();
         let mut providers: Vec<Py<NewsProviderPy>> = Vec::with_capacity(np.len());
@@ -336,8 +389,10 @@ impl EClient {
     // ── Soft Dollar Tiers ──
 
     fn req_soft_dollar_tiers(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.req_soft_dollar_tiers(py, req_id)) { return Ok(()); }
         if !crate::client_core::ClientCore::ids_fit("req_soft_dollar_tiers", &[req_id]) { return Ok(()); }
         let shared = self.shared_state()?;
         let tiers = shared.reference.soft_dollar_tiers();
@@ -358,8 +413,10 @@ impl EClient {
     // ── Family Codes ──
 
     fn req_family_codes(&self, py: Python<'_>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.req_family_codes(py)) { return Ok(()); }
         let shared = self.shared_state()?;
         let codes = shared.reference.family_codes();
         let py_list = pyo3::types::PyList::new(py, codes.iter().map(|fc| {
@@ -376,6 +433,8 @@ impl EClient {
 
     #[pyo3(signature = (log_level=2))]
     fn set_server_log_level(&self, log_level: i32) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         let level = match log_level {
             1 => "error",
@@ -392,8 +451,10 @@ impl EClient {
     // ── User Info ──
 
     fn req_user_info(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.req_user_info(py, req_id)) { return Ok(()); }
         if !crate::client_core::ClientCore::ids_fit("req_user_info", &[req_id]) { return Ok(()); }
         let shared = self.shared_state()?;
         let id = shared.reference.white_branding_id();
@@ -408,8 +469,10 @@ impl EClient {
     /// subscribed. The data request itself is not implemented: with the
     /// permission, error 10279.
     fn req_wsh_meta_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.req_wsh_meta_data(py, req_id)) { return Ok(()); }
         if !crate::client_core::ClientCore::ids_fit("req_wsh_meta_data", &[req_id]) { return Ok(()); }
         let (code, text) = crate::client_core::wsh_meta_data_error(&self.shared_state()?.reference);
         self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
@@ -418,6 +481,8 @@ impl EClient {
 
     /// No answer, as the reference (ibx#443).
     fn cancel_wsh_meta_data(&self, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         let _ = req_id;
         if let Some(r) = self.not_connected(-1) { return r; }
         Ok(())
@@ -428,8 +493,11 @@ impl EClient {
     /// with the permission, error 10282, since no meta data is held.
     #[pyo3(signature = (req_id, wsh_event_data=None))]
     fn req_wsh_event_data(&self, py: Python<'_>, req_id: i64, wsh_event_data: Option<WshEventDataPy>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        let data_later = wsh_event_data.clone();
+        if self.later(move |this, py| this.req_wsh_event_data(py, req_id, data_later)) { return Ok(()); }
         if !crate::client_core::ClientCore::ids_fit("req_wsh_event_data", &[req_id]) { return Ok(()); }
         let _ = wsh_event_data;
         let (code, text) = crate::client_core::wsh_event_data_error(&self.shared_state()?.reference);
@@ -439,6 +507,8 @@ impl EClient {
 
     /// No answer, as the reference (ibx#443).
     fn cancel_wsh_event_data(&self, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         let _ = req_id;
         if let Some(r) = self.not_connected(-1) { return r; }
         Ok(())

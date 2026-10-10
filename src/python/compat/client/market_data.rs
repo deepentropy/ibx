@@ -21,6 +21,8 @@ impl EClient {
         regulatory_snapshot: bool,
         mkt_data_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_mkt_data", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -141,6 +143,8 @@ impl EClient {
         number_of_ticks: i32,
         ignore_size: bool,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_tick_by_tick_data", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -181,6 +185,8 @@ impl EClient {
 
     /// Cancel tick-by-tick data.
     fn cancel_tick_by_tick_data(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("cancel_tick_by_tick_data", &[req_id]) { return Ok(()); }
         if self.core.unregister_tbt(req_id).is_some() {
@@ -195,6 +201,8 @@ impl EClient {
     /// contract caches, or pacing budgets. Poll `last_rtt_ms()` after a
     /// moment for the result.
     fn req_ping(&self, py: Python<'_>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         let tx = self.tx()?;
         send_cmd(py, &tx, ControlCommand::Ping)?;
         Ok(())
@@ -219,6 +227,8 @@ impl EClient {
     /// contract whose data is frozen gets the frozen top of book (type 2).
     /// A value outside 1..=4 gives error 321 with id -1.
     fn req_market_data_type(&self, py: Python<'_>, market_data_type: i32) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         if let Some((code, text)) = py.detach(|| self.core.set_market_data_type(&tx, market_data_type)) {
@@ -238,6 +248,8 @@ impl EClient {
         is_smart_depth: bool,
         mkt_depth_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_mkt_depth", &[req_id, contract.con_id]) { return Ok(()); }
         let _ = mkt_depth_options;
@@ -260,6 +272,8 @@ impl EClient {
     /// Cancel market depth.
     #[pyo3(signature = (req_id, is_smart_depth=false))]
     fn cancel_mkt_depth(&self, py: Python<'_>, req_id: i64, is_smart_depth: bool) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if !crate::client_core::ClientCore::ids_fit("cancel_mkt_depth", &[req_id]) { return Ok(()); }
         let _ = is_smart_depth;
@@ -280,6 +294,8 @@ impl EClient {
         use_rth: i32,
         real_time_bars_options: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("req_real_time_bars", &[req_id, contract.con_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -300,6 +316,8 @@ impl EClient {
 
     /// Cancel real-time bars.
     fn cancel_real_time_bars(&self, py: Python<'_>, req_id: i64) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(req_id) { return r; }
         if !crate::client_core::ClientCore::ids_fit("cancel_real_time_bars", &[req_id]) { return Ok(()); }
         let tx = self.tx()?;

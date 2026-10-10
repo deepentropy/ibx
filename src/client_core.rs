@@ -2015,17 +2015,30 @@ impl ClientCore {
         // contract it finds is subscribed already, the request joins that
         // subscription (`take_md_rejects`).
         if con_id == 0 {
-            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
-            control_tx.send(ControlCommand::SubscribeBySymbol {
+            let by_symbol = |reply_tx| ControlCommand::SubscribeBySymbol {
                 symbol: symbol.to_string(),
                 sec_type: sec_type.to_string(),
                 exchange: exchange.to_string(),
                 currency: currency.to_string(),
                 filters: filters.clone(),
                 mode_9887, snapshot,
-                reply_tx: Some(reply_tx),
-            }).map_err(|e| format!("Engine stopped: {}", e))?;
+                reply_tx,
+            };
+            let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+            if control_tx.paced() {
+                // Its slot is told at once, and the call does not wait for
+                // the turn of the request (ibx#565).
+                control_tx.send(ControlCommand::MarketDataSlot {
+                    con_id: 0, symbol: symbol.to_string(), sec_type: sec_type.to_string(),
+                    exchange: exchange.to_string(), mode_9887, snapshot, plain: false, reply_tx,
+                }).map_err(|e| format!("Engine stopped: {}", e))?;
+            } else {
+                control_tx.send(by_symbol(Some(reply_tx))).map_err(|e| format!("Engine stopped: {}", e))?;
+            }
             let instrument_id = Self::recv_registration(reply_rx)?;
+            if control_tx.paced() {
+                control_tx.send(by_symbol(None)).map_err(|e| format!("Engine stopped: {}", e))?;
+            }
             return attach(instrument_id, false);
         }
 
@@ -2092,7 +2105,7 @@ impl ClientCore {
             control_tx.send(ControlCommand::MarketDataSlot {
                 con_id, symbol: symbol.to_string(),
                 sec_type: sec_type.to_string(), exchange: exchange.to_string(),
-                mode_9887, snapshot, reply_tx,
+                mode_9887, snapshot, plain: false, reply_tx,
             }).map_err(|e| format!("Engine stopped: {}", e))?;
         } else {
             control_tx.send(ControlCommand::RegisterInstrument {
@@ -2268,15 +2281,28 @@ impl ClientCore {
                 format!("Regulatory snapshot for {} is already being fetched in ticker id={}", symbol, other));
             return Ok(());
         }
-        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
-        control_tx.send(ControlCommand::RegisterInstrument {
-            con_id, symbol: symbol.to_string(), sec_type: sec_type.to_string(), exchange: exchange.to_string(), reply_tx: None,
-        }).map_err(|e| format!("Engine stopped: {}", e))?;
-        control_tx.send(ControlCommand::SubscribeSnapshot {
+        let snapshot = |reply_tx| ControlCommand::SubscribeSnapshot {
             con_id, symbol: symbol.to_string(), exchange: exchange.to_string(), sec_type: sec_type.to_string(),
-            reply_tx: Some(reply_tx),
-        }).map_err(|e| format!("Engine stopped: {}", e))?;
+            reply_tx,
+        };
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        if control_tx.paced() {
+            // Its slot is told at once, and the call does not wait for the
+            // turn of the request (ibx#565).
+            control_tx.send(ControlCommand::MarketDataSlot {
+                con_id, symbol: symbol.to_string(), sec_type: sec_type.to_string(), exchange: exchange.to_string(),
+                mode_9887: 0, snapshot: true, plain: true, reply_tx,
+            }).map_err(|e| format!("Engine stopped: {}", e))?;
+        } else {
+            control_tx.send(ControlCommand::RegisterInstrument {
+                con_id, symbol: symbol.to_string(), sec_type: sec_type.to_string(), exchange: exchange.to_string(), reply_tx: None,
+            }).map_err(|e| format!("Engine stopped: {}", e))?;
+            control_tx.send(snapshot(Some(reply_tx))).map_err(|e| format!("Engine stopped: {}", e))?;
+        }
         let instrument = Self::recv_registration(reply_rx)?;
+        if control_tx.paced() {
+            control_tx.send(snapshot(None)).map_err(|e| format!("Engine stopped: {}", e))?;
+        }
         self.reg_snapshots.lock().unwrap().push(crate::control::regsnapshot::Fetch::new(
             req_id, con_id, instrument, symbol.to_string(), std::time::Instant::now(),
         ));

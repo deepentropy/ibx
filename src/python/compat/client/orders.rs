@@ -18,6 +18,8 @@ impl EClient {
     /// A working order placed again with transmit off stays as it is
     /// (paper 09/10/2026).
     fn hold_order(&self, py: Python<'_>, oid: i64, contract: &ApiContract, order: &ApiOrder) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         let tx = self.tx()?;
         let shared = self.shared_state()?;
         if self.core.working_order(&shared, oid).is_some() {
@@ -170,6 +172,8 @@ impl EClient {
 impl EClient {
     /// Place an order.
     fn place_order(&self, py: Python<'_>, order_id: i64, contract: &Contract, order: &Order) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         // Convert and validate order params first (fail fast, no connection needed)
         let mut api_order = order.to_api();
         // A condition that is not understood ends the request here (ibx#541).
@@ -228,6 +232,8 @@ impl EClient {
     /// Cancel an order.
     #[pyo3(signature = (order_id, manual_order_cancel_time=""))]
     fn cancel_order(&self, py: Python<'_>, order_id: i64, manual_order_cancel_time: &str) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if !ClientCore::ids_fit("cancel_order", &[order_id]) { return Ok(()); }
         let tx = self.tx()?;
@@ -241,6 +247,8 @@ impl EClient {
     /// knows, those of other clients and of earlier sessions too, as the
     /// reference cancels them.
     fn req_global_cancel(&self, py: Python<'_>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         let tx = self.tx()?;
         self.core.drop_held_orders();
@@ -255,8 +263,10 @@ impl EClient {
     /// is reserved.
     #[pyo3(signature = (num_ids=1))]
     fn req_ids(&self, py: Python<'_>, num_ids: i32) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.req_ids(py, num_ids)) { return Ok(()); }
         let shared = self.shared_state()?;
         let next_id = py.detach(|| {
             ClientCore::wait_order_replay(&shared);
@@ -284,6 +294,8 @@ impl EClient {
     /// link is lost, the request is answered only after the order replay,
     /// from the dispatch loop (ibx#251).
     fn req_open_orders(&self, py: Python<'_>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::Open, &shared) {
@@ -295,6 +307,8 @@ impl EClient {
     /// Request all open orders across all clients. Held like
     /// `req_open_orders` until the order replay (ibx#251).
     fn req_all_open_orders(&self, py: Python<'_>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         let shared = self.shared_state()?;
         if self.core.hold_open_orders(crate::client_core::OpenOrdersRequest::All, &shared) {
@@ -306,6 +320,8 @@ impl EClient {
     /// Automatically bind future orders to this client.
     #[pyo3(signature = (b_auto_bind))]
     fn req_auto_open_orders(&self, b_auto_bind: bool) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         let _ = b_auto_bind;
         Ok(())
@@ -314,8 +330,11 @@ impl EClient {
     /// Request execution reports.
     #[pyo3(signature = (req_id, exec_filter=None))]
     fn req_executions(&self, py: Python<'_>, req_id: i64, exec_filter: Option<Py<PyAny>>) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        let filter_later = exec_filter.as_ref().map(|f| f.clone_ref(py));
+        if self.later(move |this, py| this.req_executions(py, req_id, filter_later)) { return Ok(()); }
         if !crate::client_core::ClientCore::ids_fit("req_executions", &[req_id]) { return Ok(()); }
         let filter = if let Some(ref fobj) = exec_filter {
             let get = |attr: &str| -> String {
@@ -394,8 +413,10 @@ impl EClient {
     /// Request completed orders.
     #[pyo3(signature = (api_only=false))]
     fn req_completed_orders(&self, py: Python<'_>, api_only: bool) -> PyResult<()> {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
-        self.turn(py);
+        if self.later(move |this, py| this.req_completed_orders(py, api_only)) { return Ok(()); }
         let _ = api_only;
         // The lock is let go before the callbacks: held across one that
         // releases the interpreter lock (a file write, a lock, a sleep), it
@@ -449,7 +470,7 @@ impl EClient {
     /// The open orders, each as open_order then order_status, then the end
     /// of the list.
     pub(crate) fn answer_open_orders(&self, py: Python<'_>, shared: &SharedState, request: crate::client_core::OpenOrdersRequest) -> PyResult<()> {
-        self.turn(py);
+        if self.later(move |this, py| { let shared = this.shared_state()?; this.answer_open_orders(py, &shared, request) }) { return Ok(()); }
         // In the book's order, with the order id and client id the
         // reference shows; OPEN_ORDER then ORDER_STATUS for each.
         let orders = self.core.open_orders_listing(shared, request);

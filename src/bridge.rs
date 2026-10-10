@@ -272,6 +272,17 @@ impl CommandClock {
         let _ = reply_rx.recv_timeout(Self::TURN_LIMIT);
     }
 
+    /// As `take_turn`, without waiting: the receiver tells when the turn
+    /// has come. `None` when the requests are not paced: the turn is now.
+    pub fn turn_ticket(&self) -> Option<crossbeam_channel::Receiver<()>> {
+        if !self.takes_turns() {
+            return None;
+        }
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        self.defer(ControlCommand::Turn { reply_tx });
+        Some(reply_rx)
+    }
+
     /// Wait until the engine has handled the commands sent so far. At once
     /// on the thread of the engine, with no engine running, and with
     /// nothing waiting, which is the usual case.
