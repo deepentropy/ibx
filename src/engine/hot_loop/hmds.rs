@@ -1825,6 +1825,9 @@ impl HmdsState {
             return;
         }
         self.scanner_params_waiting += 1;
+        // It has its place among the scanner sessions until it is
+        // answered (ibx#552).
+        self.scanner_table.insert(crate::control::scanner::ScannerTable::PARAMS_REQUEST);
         self.need_scanner_params(now, hmds_conn, hb);
     }
 
@@ -1836,6 +1839,7 @@ impl HmdsState {
         self.scan_size_limits = crate::control::scanner::scan_size_limits(xml);
         self.scanner_params = Some(xml.to_string());
         self.send_waiting_scanners(hmds_conn, hb);
+        self.scanner_table.remove(crate::control::scanner::ScannerTable::PARAMS_REQUEST);
     }
 
     /// Send the subscriptions that are not on the wire yet. A subscription

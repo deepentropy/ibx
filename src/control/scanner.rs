@@ -144,6 +144,11 @@ pub fn scanner_subscription_id(client_id: i64, req_id: crate::types::ReqId) -> S
 /// quarters full, walked from the last slot to the first, the newest id of
 /// a slot first. Six requests 9001 to 9006 of client 198 went out as 9002,
 /// 9001, 9006, 9005, 9004, 9003 (reference run of 10/10/2026).
+///
+/// A client's parameters request that waits for its answer has a place in
+/// the table too (`PARAMS_REQUEST`, ibx#552): it counts for the growth, so
+/// with it eight subscriptions already go out in the order of a grown
+/// table (9008 down to 9001, reference run of 10/10/2026).
 #[derive(Debug, Clone)]
 pub struct ScannerTable {
     /// The ids of each slot, newest first.
@@ -158,6 +163,11 @@ impl Default for ScannerTable {
 }
 
 impl ScannerTable {
+    /// The place of a waiting parameters request. Its key only has to
+    /// differ from every subscription id: the order of the others does
+    /// not depend on the slot it falls in.
+    pub const PARAMS_REQUEST: &'static str = "APISCANPARAMS";
+
     fn slot(id: &str, slots: usize) -> usize {
         let h = id.encode_utf16().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32));
         (h & 0x7FFF_FFFF) as usize % slots
@@ -419,6 +429,29 @@ mod tests {
         };
         assert_eq!(order(198, &[9001, 9002, 9003, 9004, 9005, 9006]), [9002, 9001, 9006, 9005, 9004, 9003]);
         assert_eq!(order(198, &[9005, 9006]), [9006, 9005]);
+    }
+
+    // ibx#552: a parameters request made first has its place in the table.
+    // The orders of the reference runs of 10/10/2026 with seven, eight and
+    // nine subscriptions behind it: the table grows one subscription sooner.
+    #[test]
+    fn scanner_table_counts_a_waiting_parameters_request() {
+        let order = |subs: i64, with_request: bool| {
+            let mut t = ScannerTable::default();
+            if with_request {
+                t.insert(ScannerTable::PARAMS_REQUEST);
+            }
+            for r in 9001..9001 + subs {
+                t.insert(&scanner_subscription_id(198, r));
+            }
+            t.ids().filter(|id| *id != ScannerTable::PARAMS_REQUEST)
+                .map(|id| id.rsplit(':').next().unwrap().parse::<i64>().unwrap()).collect::<Vec<_>>()
+        };
+        assert_eq!(order(7, true), [9002, 9001, 9007, 9006, 9005, 9004, 9003]);
+        assert_eq!(order(8, true), [9008, 9007, 9006, 9005, 9004, 9003, 9002, 9001]);
+        assert_eq!(order(9, true), [9009, 9008, 9007, 9006, 9005, 9004, 9003, 9002, 9001]);
+        // Without it, eight subscriptions are not yet in a grown table.
+        assert_eq!(order(8, false), [9002, 9001, 9008, 9007, 9006, 9005, 9004, 9003]);
     }
 
     // ibx#513: ids of one slot come newest first; a removed id leaves; the

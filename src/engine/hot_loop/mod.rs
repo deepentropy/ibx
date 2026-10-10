@@ -4753,6 +4753,35 @@ mod tests {
         assert_eq!(plain_messages_sent(&mut server).len(), 1, "asked again");
     }
 
+    // ibx#552: a parameters request that waits counts among the scanner
+    // sessions that order the waiting subscriptions: eight subscriptions
+    // behind it go out 9008 down to 9001 (reference run of 10/10/2026),
+    // and without it 9002, 9001, then 9008 down to 9003.
+    #[test]
+    fn a_waiting_parameters_request_counts_for_the_order_of_the_subscriptions() {
+        let order = |with_request: bool| {
+            let shared = Arc::new(SharedState::new());
+            let (mut engine, mut server, tx) = scanner_engine(&shared);
+            engine.hmds.max_real_time_requests = 100;
+            if with_request {
+                tx.send(ControlCommand::FetchScannerParams).unwrap();
+            }
+            for req_id in 9001..=9008 {
+                tx.send(scanner_cmd(req_id, 198, "TOP_PERC_GAIN")).unwrap();
+            }
+            engine.poll_control_commands();
+            assert_eq!(plain_messages_sent(&mut server).len(), 1, "the parameters request");
+            load_scanner_params_keep(&mut engine, "<ScanParameterResponse/>");
+            // Answered: the request has left the table.
+            assert!(engine.hmds.scanner_table.ids().all(|id| id.starts_with("APISCAN198:")));
+            plain_messages_sent(&mut server).iter()
+                .filter_map(|m| m.split("APISCAN198:").nth(1).map(|t| t[..4].to_string()))
+                .collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(order(true), "9008 9007 9006 9005 9004 9003 9002 9001");
+        assert_eq!(order(false), "9002 9001 9008 9007 9006 9005 9004 9003");
+    }
+
     // ibx#553: the scanner parameters request leaves 1 s after the first
     // need, a parameters request or a subscription; a later need in that
     // second does not move it, and one request serves them all.
