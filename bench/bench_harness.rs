@@ -64,6 +64,9 @@ impl BenchConfig {
 
 // ─── Connection ───
 
+/// The client id the benchmarks place their orders with.
+const BENCH_CLIENT_ID: i64 = 0;
+
 pub struct BenchSession {
     pub shared: Arc<SharedState>,
     pub event_rx: Receiver<Event>,
@@ -159,6 +162,25 @@ impl BenchSession {
 
     pub fn send_order(&self, req: OrderRequest) {
         let _ = self.control_tx.send(ControlCommand::Order(req));
+    }
+
+    /// The first order id of a run: above the ids the earlier runs kept
+    /// and above the orders of this client the server showed at the
+    /// logon. An id that is still working, or that the server has seen,
+    /// is refused as a duplicate.
+    pub fn first_order_id(&self) -> i64 {
+        let kept = ibx::order_ids::default_path()
+            .map_or(0, |path| ibx::order_ids::load(&path, &self.account_id, BENCH_CLIENT_ID));
+        kept.max(self.shared.orders.reported_order_id(BENCH_CLIENT_ID)) + 1
+    }
+
+    /// Keep the highest order id of this run for the next one.
+    pub fn keep_order_id(&self, highest: i64) {
+        if let Some(path) = ibx::order_ids::default_path() {
+            if let Err(e) = ibx::order_ids::save(&path, &self.account_id, BENCH_CLIENT_ID, highest) {
+                println!("  Order ids not kept for the next run: {e}");
+            }
+        }
     }
 
     pub fn shutdown(self) {
