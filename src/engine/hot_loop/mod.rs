@@ -1321,11 +1321,7 @@ impl HotLoop {
             // 1c. Hand off any scanner results with cache-miss con_ids to CCP for
             //     contract-detail fan-out (ibx#156). Mirrors what the gateway does
             //     internally for binary-API scanner clients — see ib-agent#142.
-            for (req_id, result) in self.hmds.cold_scanner_results.drain(..).collect::<Vec<_>>() {
-                self.ccp.start_scanner_enrichment(
-                    req_id, result, &mut self.ccp_conn, &self.shared, &mut self.hb,
-                );
-            }
+            self.look_up_scanner_rows();
 
             // 2. Drain pending orders → build → sign → send to auth
             //    Skip if CCP is disconnected — orders stay in buffer for retry after reconnect.
@@ -2753,6 +2749,16 @@ impl HotLoop {
         self.poll_farm_reconnect();
     }
 
+    /// Scanner results with rows whose contract is not known yet go to the
+    /// contract lookups (ibx#156).
+    fn look_up_scanner_rows(&mut self) {
+        for (req_id, result) in self.hmds.cold_scanner_results.drain(..).collect::<Vec<_>>() {
+            self.ccp.start_scanner_enrichment(
+                req_id, result, &mut self.ccp_conn, &self.shared, &mut self.hb,
+            );
+        }
+    }
+
     /// Mutably access heartbeat state for testing (e.g., setting timestamps).
     pub fn heartbeat_state_mut(&mut self) -> &mut HeartbeatState {
         &mut self.hb
@@ -2766,6 +2772,7 @@ impl HotLoop {
     pub fn step_for_test(&mut self) {
         self.farm.poll_market_data(&mut self.farm_conn, &mut self.context, &self.shared, &self.event_tx, &mut self.hb);
         self.hmds.poll(&mut self.hmds_conn, &self.shared, &self.event_tx, &mut self.hb);
+        self.look_up_scanner_rows();
         order_builder::drain_and_send_orders(
             &mut self.ccp_conn, &mut self.context, &self.account_id, &mut self.hb,
             self.ccp.disconnected, &self.shared,
@@ -4163,7 +4170,8 @@ mod tests {
 
     // ibx#457 / ibx#456 (reference scenario scanner_two, 26/09/2026): two
     // scanners open at once; the subscriptions wait for the scanner
-    // parameters, then go out with the asked rows; each result goes to
+    // parameters, then go out in the reference's order (ibx#513) with the
+    // asked rows and an XML declaration; each result goes to
     // the subscription its id names, the ids are client id and request
     // id; each cancel gives the local 162 then its desubscribe; an
     // unknown cancel gives 365 only.
@@ -4183,7 +4191,7 @@ mod tests {
         }
         let sent = plain_messages_sent(&mut server);
         assert_eq!(sent.len(), 2, "{sent:?}");
-        for (m, id, code) in [(&sent[0], "APISCAN198:9005", "TOP_PERC_GAIN"), (&sent[1], "APISCAN198:9006", "MOST_ACTIVE")] {
+        for (m, id, code) in [(&sent[0], "APISCAN198:9006", "MOST_ACTIVE"), (&sent[1], "APISCAN198:9005", "TOP_PERC_GAIN")] {
             assert!(m.contains(&format!("<id>{id}</id>")) && m.contains(&format!("<scanCode>{code}</scanCode>")), "{m}");
             assert!(m.contains("<maxItems>10</maxItems><suspend>no</suspend>"), "as the reference: {m}");
         }
@@ -4307,11 +4315,17 @@ mod tests {
             <scanCode>HIGH_DIVIDEND_YIELD_IB</scanCode><respSizeLimit>750</respSizeLimit></ScanType>\
             </ScanTypeList></ScanParameterResponse>");
         let sent = plain_messages_sent(&mut server);
-        let items: Vec<&str> = sent.iter().map(|m| {
-            let a = m.find("<maxItems>").unwrap() + 10;
-            &m[a..a + m[a..].find('<').unwrap()]
-        }).collect();
-        assert_eq!(items, ["100", "50", "50", "3"]);
+        // By request id: the waiting subscriptions go out in the
+        // reference's order (ibx#513).
+        let text = |m: &'_ str, tag: &str| {
+            let a = m.find(tag).unwrap() + tag.len();
+            m[a..a + m[a..].find('<').unwrap()].to_string()
+        };
+        let mut items: Vec<(String, String)> = sent.iter()
+            .map(|m| (text(m, "<id>APISCAN5:"), text(m, "<maxItems>"))).collect();
+        items.sort();
+        let items: Vec<(&str, &str)> = items.iter().map(|(i, n)| (i.as_str(), n.as_str())).collect();
+        assert_eq!(items, [("1", "100"), ("2", "50"), ("3", "50"), ("4", "3")]);
 
         let rows: String = (1..=5).map(|c| format!("<Contract><contractID>{c}</contractID></Contract>")).collect();
         let xml = format!("<ScanResponse><id>APISCAN5:4</id><Contracts>{rows}</Contracts></ScanResponse>");

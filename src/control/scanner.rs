@@ -138,6 +138,64 @@ pub fn scanner_subscription_id(client_id: i64, req_id: crate::types::ReqId) -> S
     format!("APISCAN{}:{}", client_id, req_id)
 }
 
+/// The live scanner subscriptions in the order the reference walks them
+/// when the scanner parameters arrive (ibx#513): a hash table keyed by the
+/// subscription id, 11 slots to start, grown to twice plus one when three
+/// quarters full, walked from the last slot to the first, the newest id of
+/// a slot first. Six requests 9001 to 9006 of client 198 went out as 9002,
+/// 9001, 9006, 9005, 9004, 9003 (reference run of 10/10/2026).
+#[derive(Debug, Clone)]
+pub struct ScannerTable {
+    /// The ids of each slot, newest first.
+    slots: Vec<Vec<String>>,
+    count: usize,
+}
+
+impl Default for ScannerTable {
+    fn default() -> Self {
+        Self { slots: vec![Vec::new(); 11], count: 0 }
+    }
+}
+
+impl ScannerTable {
+    fn slot(id: &str, slots: usize) -> usize {
+        let h = id.encode_utf16().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32));
+        (h & 0x7FFF_FFFF) as usize % slots
+    }
+
+    pub fn insert(&mut self, id: &str) {
+        if self.slots[Self::slot(id, self.slots.len())].iter().any(|e| e == id) {
+            return;
+        }
+        if self.count >= self.slots.len() * 3 / 4 {
+            let size = self.slots.len() * 2 + 1;
+            let mut grown: Vec<Vec<String>> = vec![Vec::new(); size];
+            for chain in std::mem::take(&mut self.slots).into_iter().rev() {
+                for e in chain {
+                    grown[Self::slot(&e, size)].insert(0, e);
+                }
+            }
+            self.slots = grown;
+        }
+        let at = Self::slot(id, self.slots.len());
+        self.slots[at].insert(0, id.to_string());
+        self.count += 1;
+    }
+
+    pub fn remove(&mut self, id: &str) {
+        let at = Self::slot(id, self.slots.len());
+        if let Some(pos) = self.slots[at].iter().position(|e| e == id) {
+            self.slots[at].remove(pos);
+            self.count -= 1;
+        }
+    }
+
+    /// The ids in the reference's order.
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.slots.iter().rev().flatten().map(String::as_str)
+    }
+}
+
 /// Build a scanner parameters request (no XML payload).
 pub fn build_scanner_params_request(seq: u32) -> Vec<u8> {
     fix::fix_build(
@@ -162,7 +220,8 @@ pub fn build_scanner_subscribe_xml(sub: &ScannerSubscription, scan_id: &str, max
         filter.push_str("</Filter>");
     }
     format!(
-        "<ScanSubscription>\
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ScanSubscription>\
          <id>{id}</id>\
          <instrument>{instrument}</instrument>\
          <locations>{locations}</locations>\
@@ -187,7 +246,8 @@ pub fn build_scanner_subscribe_xml(sub: &ScannerSubscription, scan_id: &str, max
 /// Build the XML payload for cancelling a scanner subscription.
 pub fn build_scanner_cancel_xml(scan_id: &str) -> String {
     format!(
-        "<ScanDesubscription>\
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ScanDesubscription>\
          <id>{id}</id>\
          </ScanDesubscription>",
         id = scan_id,
@@ -283,6 +343,7 @@ mod tests {
             filters: Vec::new(),
         };
         let xml = build_scanner_subscribe_xml(&sub, "APISCAN1:1", 50);
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?><ScanSubscription>"), "{xml}");
         assert!(!xml.contains("<Filter"), "no filter block without a filter");
         assert!(xml.contains("<id>APISCAN1:1</id>"));
         assert!(xml.contains("<instrument>STK</instrument>"));
@@ -345,9 +406,54 @@ mod tests {
         assert_eq!(java_double_text(0.0), "0.0");
     }
 
+    // ibx#513: the order of the reference run of 10/10/2026 (six requests
+    // before the scanner parameters) and of the recording of 26/09/2026.
+    #[test]
+    fn scanner_table_order_as_the_reference() {
+        let order = |client: i64, reqs: &[i64]| {
+            let mut t = ScannerTable::default();
+            for r in reqs {
+                t.insert(&scanner_subscription_id(client, *r));
+            }
+            t.ids().map(|id| id.rsplit(':').next().unwrap().parse::<i64>().unwrap()).collect::<Vec<_>>()
+        };
+        assert_eq!(order(198, &[9001, 9002, 9003, 9004, 9005, 9006]), [9002, 9001, 9006, 9005, 9004, 9003]);
+        assert_eq!(order(198, &[9005, 9006]), [9006, 9005]);
+    }
+
+    // ibx#513: ids of one slot come newest first; a removed id leaves; the
+    // table grows at the ninth id and keeps every id once.
+    #[test]
+    fn scanner_table_slots_removal_and_growth() {
+        let mut t = ScannerTable::default();
+        // "a" and "l" are 11 apart: the same slot of 11.
+        for id in ["a", "l", "b"] {
+            t.insert(id);
+        }
+        t.insert("a");
+        assert_eq!(t.ids().collect::<Vec<_>>(), ["b", "l", "a"]);
+        t.remove("l");
+        t.remove("zz");
+        assert_eq!(t.ids().collect::<Vec<_>>(), ["b", "a"]);
+
+        let mut t = ScannerTable::default();
+        let ids: Vec<String> = (1..=10).map(|r| scanner_subscription_id(7, r)).collect();
+        for id in &ids {
+            t.insert(id);
+        }
+        assert_eq!(t.slots.len(), 23);
+        let mut listed: Vec<&str> = t.ids().collect();
+        assert_eq!(listed.len(), 10);
+        listed.sort_unstable();
+        let mut want: Vec<&str> = ids.iter().map(String::as_str).collect();
+        want.sort_unstable();
+        assert_eq!(listed, want);
+    }
+
     #[test]
     fn scanner_cancel_xml_structure() {
         let xml = build_scanner_cancel_xml("APISCAN31:3");
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?><ScanDesubscription>"), "{xml}");
         assert!(xml.contains("<ScanDesubscription>"));
         assert!(xml.contains("<id>APISCAN31:3</id>"));
     }

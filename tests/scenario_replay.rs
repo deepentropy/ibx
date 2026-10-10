@@ -301,13 +301,16 @@ fn historical_ticks() {
 }
 
 // Two scanner subscriptions, then their cancels (26/09/2026, ibx#457):
-// the reference sends the subscriptions that waited for the scanner
-// parameters in the reverse order of the requests, each with an XML
-// declaration; ibx sends them in request order with none.
+// the subscriptions that waited for the scanner parameters go out in the
+// reference's order, the second request first here, each with an XML
+// declaration (ibx#513); the lookups of the rows' contracts in row order.
+// The recording ends before the answer to the last cancel, which the
+// reference gives (run of 10/10/2026): left out on both sides.
 #[test]
-#[ignore = "ibx#513: scanner subscriptions in reverse order, XML declaration"]
 fn two_scanner_subscriptions() {
-    check("20260926b/scanner_two", Options::default().compare(&[SCANNER, LOOKUP]));
+    let o = check("20260926b/scanner_two", Options::default().compare(&[SCANNER, LOOKUP])
+        .keep(|l| !l.starts_with("error|9006|162|")));
+    assert_eq!(o.frames_compared, 24);
 }
 
 // News ticks on a contract asked twice (02/10/2026, ibx#458): the

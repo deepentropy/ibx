@@ -64,6 +64,9 @@ pub(crate) struct HmdsState {
     pub(crate) scan_size_limits: std::collections::HashMap<String, u32>,
     /// Live scanner subscriptions, matched to results by their id (ibx#457).
     pub(crate) pending_scanner: Vec<ScannerSub>,
+    /// The ids of `pending_scanner` in the order the waiting subscriptions
+    /// go out when the scanner parameters arrive (ibx#513).
+    pub(crate) scanner_table: crate::control::scanner::ScannerTable,
     /// News queries in flight, matched to replies by query id (ibx#459).
     pub(crate) pending_news: Vec<NewsQuery>,
     pub(crate) pending_articles: Vec<NewsQuery>,
@@ -467,6 +470,7 @@ impl HmdsState {
             scanner_params_waiting: 0,
             scan_size_limits: std::collections::HashMap::new(),
             pending_scanner: Vec::new(),
+            scanner_table: Default::default(),
             pending_news: Vec::new(),
             pending_articles: Vec::new(),
             next_news_query: 0,
@@ -858,7 +862,7 @@ impl HmdsState {
                                 let req_id = self.rtbar_subs.remove(pos).req_id;
                                 released = Some((req_id, 420, crate::control::historical::join_error_text(INVALID_REAL_TIME_QUERY, &error_msg)));
                             } else if let Some(pos) = self.pending_scanner.iter().position(|s| s.scan_id == *qid) {
-                                let req_id = self.pending_scanner.remove(pos).req_id;
+                                let req_id = self.drop_scanner(pos).req_id;
                                 released = Some((req_id, 162, error_msg.clone()));
                             } else if let Some(pos) = self.tbt_subscriptions.iter().position(|s| s.window_id == wid && s.query_pending) {
                                 // A refused tick-by-tick query ends its
@@ -1805,10 +1809,12 @@ impl HmdsState {
         if self.scanner_params.is_none() {
             return;
         }
-        for i in 0..self.pending_scanner.len() {
-            if self.pending_scanner[i].sent {
-                continue;
-            }
+        // Several wait only for the parameters: they go out in the
+        // reference's order, not the order of the requests (ibx#513).
+        let waiting: Vec<usize> = self.scanner_table.ids()
+            .filter_map(|id| self.pending_scanner.iter().position(|s| !s.sent && s.scan_id == id))
+            .collect();
+        for i in waiting {
             let sub = &mut self.pending_scanner[i];
             let xml = sub.xml.get_or_insert_with(|| {
                 let limit = self.scan_size_limits.get(&sub.request.scan_code).copied();
@@ -1837,7 +1843,7 @@ impl HmdsState {
         };
         let req_id = self.pending_scanner[pos].req_id;
         if !result.error_text.is_empty() {
-            self.pending_scanner.remove(pos);
+            self.drop_scanner(pos);
             shared.reference.push_historical_error(req_id, 162, historical_service_error(&result.error_text));
             return;
         }
@@ -1885,12 +1891,20 @@ impl HmdsState {
     /// scanner parameters are known, else after they arrive.
     pub(crate) fn send_scanner_subscribe(&mut self, req_id: ReqId, client_id: i64, request: crate::control::scanner::ScannerSubscription, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let scan_id = crate::control::scanner::scanner_subscription_id(client_id, req_id);
+        self.scanner_table.insert(&scan_id);
         self.pending_scanner.push(ScannerSub { scan_id, req_id, request, xml: None, sent: false });
         if self.scanner_params.is_some() {
             self.send_waiting_scanners(hmds_conn, hb);
         } else if !self.pending_scanner_params {
             self.send_scanner_params_request(hmds_conn, hb);
         }
+    }
+
+    /// End the subscription at `pos`.
+    fn drop_scanner(&mut self, pos: usize) -> ScannerSub {
+        let sub = self.pending_scanner.remove(pos);
+        self.scanner_table.remove(&sub.scan_id);
+        sub
     }
 
     pub(crate) fn send_scanner_cancel(&mut self, scan_id: &str, hmds_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
@@ -1918,7 +1932,7 @@ impl HmdsState {
                 format!("No scanner subscription found for ticker id:{}", req_id));
             return false;
         };
-        let sub = self.pending_scanner.remove(pos);
+        let sub = self.drop_scanner(pos);
         shared.reference.push_historical_error(req_id, 162,
             historical_service_error(&format!("API scanner subscription cancelled: {}", req_id)));
         if sub.sent {

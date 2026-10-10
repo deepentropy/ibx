@@ -2653,6 +2653,32 @@ impl CcpState {
         self.pending_secdef.push((req_id, true, Instant::now() + SECDEF_TIMEOUT));
     }
 
+    /// The lookup of a scanner row's contract (ibx#513), in the reference's
+    /// form: the preferred contract of the conId, asked for the scanner
+    /// (recording of 26/09/2026).
+    pub(crate) fn send_scanner_row_lookup(&mut self, req_id: ReqId, con_id: i64, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        if let Some(conn) = ccp_conn.as_mut() {
+            let con_id_str = con_id.to_string();
+            let name = format!("{}{}", crate::control::contracts::SECDEF_PREFERRED_NAME, req_id);
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "c"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (crate::control::contracts::TAG_SECURITY_REQ_ID, &name),
+                (crate::control::contracts::TAG_SECURITY_REQ_TYPE, "2"),
+                (crate::control::contracts::TAG_IB_SOURCE, "Scanner"),
+                (146, "1"),
+                (crate::control::contracts::TAG_IB_CON_ID, &con_id_str),
+                (6004, "ANYEXCH"),
+            ]);
+            log::info!("Sent scanner row lookup: req_id={} con_id={}", req_id, con_id);
+            hb.last_ccp_sent = Instant::now();
+        } else {
+            log::warn!("scanner row lookup req_id={} queued with no CCP socket", req_id);
+        }
+        self.pending_secdef.push((req_id, true, Instant::now() + SECDEF_TIMEOUT));
+    }
+
     /// The API lookup by conId (ibx#438), in the reference's by-conId
     /// forms: with an exchange (`SMART` written `BEST`)
     /// `320=socket-reqContractDetailsReqByConid{id}|321=2|6088=Socket|6320=1|146=1|6008={conId}|6004={exchange}`,
@@ -3925,11 +3951,16 @@ impl CcpState {
         hb: &mut HeartbeatState,
     ) {
         let mut awaiting: HashSet<i64> = HashSet::new();
+        // The cold conIds in the order of the rows: the lookups go out in
+        // that order, as the reference's (ibx#513).
+        let mut cold: Vec<i64> = Vec::new();
         for entry in &result.entries {
             let con_id = entry.con_id;
             if con_id == 0 { continue; }
             if shared.reference.get_contract(con_id).is_some() { continue; }
-            awaiting.insert(con_id);
+            if awaiting.insert(con_id) {
+                cold.push(con_id);
+            }
         }
         if awaiting.is_empty() {
             shared.reference.push_scanner_data(api_req_id, result);
@@ -3939,12 +3970,12 @@ impl CcpState {
         // requested the same con_id (auto_fetched_conids contains it) we skip
         // the send but still wait — its reply will populate the cache and
         // release this entry via try_release_scanner_enrichments.
-        for &con_id in &awaiting {
+        for con_id in cold {
             if !self.auto_fetched_conids.contains(&con_id) {
                 let req_id = self.next_internal_secdef_id;
                 self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1);
                 self.auto_fetched_conids.insert(con_id);
-                self.send_secdef_request(ReqId::from(req_id), con_id, ccp_conn, hb);
+                self.send_scanner_row_lookup(ReqId::from(req_id), con_id, ccp_conn, hb);
             }
         }
         self.pending_scanner_enrichment.push(PendingScannerEnrichment {
