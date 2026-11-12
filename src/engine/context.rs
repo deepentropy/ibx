@@ -447,6 +447,9 @@ pub struct Context {
     pub(crate) order_presets: HashMap<String, Option<String>>,
     /// The limit price of each order preset that names one (ibx#673).
     pub(crate) preset_limits: HashMap<String, crate::engine::hot_loop::order_builder::PresetLimit>,
+    /// The default order size of each order preset that gives one as an
+    /// amount of money (ibx#748).
+    pub(crate) preset_amounts: HashMap<String, f64>,
     pub(crate) presets_asked: std::collections::HashSet<String>,
     pub(crate) next_preset_request: u32,
     /// The order preset kinds the account has stored on the server, from
@@ -691,6 +694,7 @@ impl Context {
             algo_providers: Vec::new(),
             order_presets: HashMap::new(),
             preset_limits: HashMap::new(),
+            preset_amounts: HashMap::new(),
             presets_asked: std::collections::HashSet::new(),
             next_preset_request: 3,
             presets_stored: None,

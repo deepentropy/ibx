@@ -196,8 +196,29 @@ fn send_orders(
         }
         // A selling beta hedge without its max size, once its contract is
         // known (ibx#614).
-        if hedge_max_size_refusal(&order_req, context, shared) {
-            continue;
+        match hedge_max_size_refusal(&order_req, context, conn, hb, shared) {
+            Some(true) => continue,
+            // Its quantity waits for the order preset (ibx#748).
+            Some(false) => { context.rth_parked.push(rewrap(order_req)); continue; }
+            None => {}
+        }
+        // A beta hedge that is sent carries that quantity too, when it has one
+        // (ibx#748; the reference 10.51, paper: 379 in the order of a MSFT
+        // hedge with MSFT held short, 19/10/2026; 9 in an AAPL hedge with 9
+        // held, 12/11/2026); with none, its parent's, as before.
+        if let Some((side, Some(attrs))) = order_req.new_order_side()
+            && attrs.hedge.as_ref().is_some_and(|h| h.kind == 4) && attrs.parent_id != 0
+            && let Some(instrument) = order_req.instrument()
+        {
+            match hedge_default_size(context, conn, hb, shared, instrument, side) {
+                None => { context.rth_parked.push(rewrap(order_req)); continue; }
+                Some(size) if size > 0 => {
+                    if let OrderRequest::SubmitEx { qty, .. } = &mut order_req {
+                        *qty = (size / crate::types::QTY_SCALE) as u32;
+                    }
+                }
+                Some(_) => {}
+            }
         }
         // A refusal the client decided, once the contract is known: the
         // order kept for its cancel (ibx#688).
@@ -3023,26 +3044,67 @@ pub(crate) fn reference_rank(tag: u32) -> u16 {
 /// The hedge of a parent the hedge-size precaution discards (ibx#602) is
 /// kept the same way, without a message.
 ///
-/// Such a hedge is kept with its own quantity, 0, not the parent's it is
-/// sent with: its cancel gives Cancelled with 0 remaining (the reference
-/// 10.51, paper: 17/10/2026 market closed after 10364, 16/10/2026 regular
-/// hours after 2185, a hedge of its parent's contract both times).
-fn hedge_max_size_refusal(req: &OrderRequest, context: &mut Context, shared: &Arc<SharedState>) -> bool {
-    let Some((_, Some(attrs))) = req.new_order_side() else { return false };
-    if attrs.hedge_precaution == Some(false)
-        && let Some(instrument) = req.instrument()
-    {
-        log::warn!("Hedge order {} kept unsent: its parent is discarded (hedge-size precaution)", req.order_id());
-        context.keep_unsent(req.order_id(), (instrument, 0, attrs.parent_id));
-        return true;
+/// Such a hedge is kept with the quantity the reference gives an order
+/// placed with none (`hedge_default_size`), not the parent's it is sent
+/// with: its cancel gives Cancelled with that quantity remaining.
+/// Some(true): kept; Some(false): its quantity waits for the order preset.
+fn hedge_max_size_refusal(
+    req: &OrderRequest, context: &mut Context, conn: &mut Connection, hb: &mut HeartbeatState, shared: &Arc<SharedState>,
+) -> Option<bool> {
+    let (side, Some(attrs)) = req.new_order_side()? else { return None };
+    let discarded = attrs.hedge_precaution == Some(false);
+    if !discarded && !attrs.hedge.as_ref().is_some_and(|h| h.max_size_missing) {
+        return None;
     }
-    if !attrs.hedge.as_ref().is_some_and(|h| h.max_size_missing) { return false; }
-    let Some(instrument) = req.instrument() else { return false };
+    let instrument = req.instrument()?;
+    let parent = attrs.parent_id;
     let oid = req.order_id();
-    log::warn!("Hedge order {} refused: no max size", oid);
-    shared.orders.push_order_error(oid, 10364, "Max Hedging Size value must be defined for the hedge order.".into());
-    context.keep_unsent(oid, (instrument, 0, attrs.parent_id));
-    true
+    let Some(qty) = hedge_default_size(context, conn, hb, shared, instrument, side) else { return Some(false) };
+    if discarded {
+        log::warn!("Hedge order {} kept unsent: its parent is discarded (hedge-size precaution)", oid);
+    } else {
+        log::warn!("Hedge order {} refused: no max size", oid);
+        shared.orders.push_order_error(oid, 10364, "Max Hedging Size value must be defined for the hedge order.".into());
+    }
+    context.keep_unsent(oid, (instrument, qty, parent));
+    Some(true)
+}
+
+/// The quantity the reference gives a hedge placed with none, from the
+/// account's position in the hedge's contract (ibx#748; the reference
+/// 10.51, paper, 18/10, 19/10 and 12/11/2026, held parents with a beta
+/// hedge kept unsent, whatever the parent's contract, size, price and side
+/// and the beta): an order that closes the position has its size (a sell
+/// with 74 SPY held: 74; with 8 then 14 AAPL: 8 then 14); one that adds to
+/// it has the default size of the order preset of the contract's type, an
+/// amount of money, over the position's price in the portfolio, to the
+/// nearest share (200000 over MSFT at 521.92: 383; over IWM at 278.64:
+/// 718), also for a position closed that day, whose row stays in the
+/// portfolio with its price (AAPL at 354.6: 564); a contract that is not
+/// in the portfolio, 0. None: the preset is asked, the order waits.
+fn hedge_default_size(
+    context: &mut Context, conn: &mut Connection, hb: &mut HeartbeatState, shared: &Arc<SharedState>,
+    instrument: crate::types::InstrumentId, side: Side,
+) -> Option<crate::types::Qty> {
+    let Some(position) = context.market.con_id(instrument).filter(|c| *c > 0).and_then(|c| shared.portfolio.position_info(c)) else {
+        return Some(0);
+    };
+    let held = position.position_fixed;
+    let sell = !matches!(side, Side::Buy);
+    if held != 0 && (held > 0) == sell {
+        return Some(held.abs());
+    }
+    let sec_type = if position.sec_type.is_empty() { "STK" } else { position.sec_type.as_str() };
+    let kinds = preset_kinds(sec_type, context.market.symbol(instrument));
+    if !ask_order_presets(context, conn, hb, &kinds) {
+        return None;
+    }
+    let price = position.market_price as f64 / crate::types::PRICE_SCALE as f64;
+    let amount = kinds.iter().find_map(|k| context.preset_amounts.get(k).copied());
+    Some(match amount {
+        Some(amount) if price > 0.0 => (amount / price).round() as crate::types::Qty * crate::types::QTY_SCALE,
+        _ => 0,
+    })
 }
 
 /// The parent of a beta hedge whose max size is below the hedge's size
@@ -4085,6 +4147,7 @@ pub(crate) fn preset_limit_reply(context: &mut Context, parsed: &fix::FieldMap<'
     let Some(kind) = parsed.get(&8168).and_then(|k| k.strip_prefix("s=")) else { return };
     let mut limit = PresetLimit::default();
     let mut in_limit = false;
+    let (mut size, mut size_unit) = (None::<f64>, String::new());
     for part in msg.split(|&c| c == 1) {
         let text = String::from_utf8_lossy(part);
         let Some((tag, value)) = text.split_once('=') else { continue };
@@ -4094,10 +4157,17 @@ pub(crate) fn preset_limit_reply(context: &mut Context, parsed: &fix::FieldMap<'
             "4085" if in_limit => limit.offset = value.parse().unwrap_or(0.0),
             "4086" if in_limit => limit.percent = value == "%",
             "4050" => limit.reverse = !value.eq_ignore_ascii_case("false"),
+            "4020" => size = value.parse().ok(),
+            "4041" => size_unit = value.to_string(),
             _ => {}
         }
     }
     context.preset_limits.insert(kind.to_string(), limit);
+    // The default order size, when it is an amount of money (ibx#748).
+    match size.filter(|a| size_unit == "Amount" && *a > 0.0) {
+        Some(amount) => { context.preset_amounts.insert(kind.to_string(), amount); }
+        None => { context.preset_amounts.remove(kind); }
+    }
 }
 
 /// A volatility order (VOL, or a type pegged to volatility) on a contract
@@ -9235,6 +9305,45 @@ mod tests {
         assert_eq!(context.unsent.get(&57732).map(|h| h.1), Some(0), "kept for its cancel, with its own quantity (#602)");
     }
 
+    // ibx#748 (the reference 10.51, paper, 12/11/2026 regular hours: SPY
+    // 74 held, a selling hedge kept with 74; MSFT -11 held at 521.92 in
+    // the portfolio and a stock preset whose default size is an amount of
+    // 200000: 383; no position: 0): the quantity of a hedge kept unsent.
+    #[test]
+    fn a_hedge_kept_unsent_has_the_presets_default_size() {
+        let kept = |position: i64, price: f64, amount: Option<f64>| -> Option<i64> {
+            let mut context = order_context();
+            context.market.register(272093);
+            // The stock preset is known to the session.
+            context.order_presets.insert("STK".into(), None);
+            if let Some(a) = amount {
+                context.preset_amounts.insert("STK".into(), a);
+            }
+            let shared = Arc::new(SharedState::new());
+            if position != 0 {
+                shared.portfolio.set_position_info(crate::types::PositionInfo {
+                    con_id: 272093, position_fixed: position * crate::types::QTY_SCALE, symbol: "MSFT".into(), sec_type: "STK".into(),
+                    currency: "USD".into(), ..Default::default() });
+                shared.portfolio.set_position_marks(272093, px(price), 0, 0, 0);
+            }
+            let attrs = crate::types::OrderAttrs {
+                parent_id: 9, hedge: Some(crate::types::Hedge { kind: 4, beta: Some(1.0), max_size_missing: true, ..Default::default() }),
+                ..Default::default() };
+            context.pending_orders.push(OrderRequest::SubmitEx { order_id: 58200, instrument: 0, side: Side::Sell, qty: 10,
+                kind: crate::types::OrderKind::Market, tif: b'0', attrs });
+            let (conn, mut peer) = crate::test_support::Peer::pair();
+            let mut conn = Some(conn);
+            drain_and_send_orders(&mut conn, &mut context, "DU1", &mut HeartbeatState::new(), false, &shared);
+            assert!(peer.messages().is_empty(), "nothing sent");
+            context.unsent.get(&58200).map(|h| h.1 / crate::types::QTY_SCALE)
+        };
+        assert_eq!(kept(0, 0.0, Some(200000.0)), Some(0), "not in the portfolio");
+        assert_eq!(kept(74, 756.93, Some(200000.0)), Some(74), "a sell that closes the position");
+        assert_eq!(kept(-11, 521.9246826, Some(200000.0)), Some(383), "a sell that adds to a short position");
+        assert_eq!(kept(-20, 278.63601685, Some(200000.0)), Some(718));
+        assert_eq!(kept(-11, 521.9246826, None), Some(0), "a preset without an amount");
+    }
+
     // ibx#602 (the reference 10.51, paper, regular hours 16/10/2026: a
     // parent of 10 AAPL and its beta hedge with a max size of 2): the
     // parent gets 2185, Cancelled with nothing filled, then 201; the hedge
@@ -10754,12 +10863,13 @@ mod tests {
     #[test]
     fn the_limit_price_of_a_preset_answer() {
         let mut context = order_context();
-        let msg = fix::fix_build(&[(35, "U"), (8166, "G"), (8168, "s=STK"), (4033, "MIDPX"), (4084, "4058"), (4088, "12"),
+        let msg = fix::fix_build(&[(35, "U"), (8166, "G"), (8168, "s=STK"), (4020, "200000.0"), (4041, "Amount"), (4033, "MIDPX"), (4084, "4058"), (4088, "12"),
             (4074, "1"), (4084, "4077"), (4085, "20.0"), (4086, "%")], 1);
         let fields = fix::fix_parse(&msg);
         let view: std::collections::HashMap<u32, &str> = fields.iter().map(|(t, v)| (*t, v.as_str())).collect();
         preset_limit_reply(&mut context, &view, &msg);
         assert_eq!(context.preset_limits.get("STK"), Some(&PresetLimit { price_type: PRICE_MIDPOINT, offset: 0.0, percent: false, reverse: true }));
+        assert_eq!(context.preset_amounts.get("STK"), Some(&200000.0), "the default size, an amount (ibx#748)");
     }
 
     // ibx#666 (the reference 10.51, paper, regular hours 16/10/2026,
