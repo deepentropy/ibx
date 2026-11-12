@@ -166,8 +166,15 @@ impl Fetch {
                 }
                 Stage::Fields { since } => {
                     self.fields = fields.clone();
+                    // The reference 10.51 does not end its field wait on the
+                    // fields of the real-time data: with every one of them
+                    // read it still waits its full time and ends in the
+                    // internal error (paper, regular hours 12/11/2026: three
+                    // snapshots of NVDA and AMZN with their quotes coming,
+                    // each ended 7.2 s after the request; ibx#645).
                     let done = match self.permission {
                         PERM_SNAPSHOT => self.fields.last_snapshot_time.is_some(),
+                        _ if !self.deliver_partial => false,
                         _ => self.fields.all_read(),
                     };
                     if !done {
@@ -254,6 +261,20 @@ mod tests {
         let some = SnapshotFields { close: Some(217.23), ..Default::default() };
         assert_eq!(f.poll(t0, Some((1, "9c")), &some, true), Step::Wait);
         assert_eq!(f.poll(t0 + FIELDS_TIMEOUT, Some((1, "9c")), &some, true), Step::Fail(INTERNAL_ERROR.0, INTERNAL_ERROR.1.into()));
+    }
+
+    // ibx#645 (the reference 10.51, paper, regular hours 12/11/2026: NVDA
+    // twice and AMZN, their quotes coming, each ended 7.2 s after its
+    // request): with the real-time permission and every field read, the
+    // wait still runs its full time and ends with the internal error.
+    #[test]
+    fn on_10_51_the_real_time_fields_do_not_end_the_wait() {
+        let t0 = Instant::now();
+        let mut f = Fetch::new(1, 1, 1, "NVDA".into(), t0);
+        f.deliver_partial = false;
+        assert_eq!(f.poll(t0, Some((3, "9c")), &full(), true), Step::Wait);
+        assert_eq!(f.poll(t0 + FIELDS_TIMEOUT - Duration::from_millis(1), Some((3, "9c")), &full(), true), Step::Wait);
+        assert_eq!(f.poll(t0 + FIELDS_TIMEOUT, Some((3, "9c")), &full(), true), Step::Fail(INTERNAL_ERROR.0, INTERNAL_ERROR.1.into()));
     }
 
     #[test]

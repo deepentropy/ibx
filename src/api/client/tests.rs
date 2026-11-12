@@ -6698,6 +6698,9 @@ fn set_exchange_map(shared: &SharedState, instrument: u32, map: Vec<crate::types
 #[test]
 fn regulatory_snapshot_delivers_one_batch_then_the_end() {
     let (client, rx, shared) = test_client();
+    // The 10.40 form: on 10.51 the wait does not end on the real-time
+    // fields (ibx#645, `on_10_51_the_real_time_fields_do_not_end_the_wait`).
+    shared.reference.set_form_10_40(true);
     let engine = snapshot_engine(rx);
     // The last trade's exchange is one exchange by its bit number (ibx#604).
     set_exchange_map(&shared, 5, vec![
