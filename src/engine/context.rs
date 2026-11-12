@@ -254,6 +254,10 @@ pub struct Context {
     pub(crate) trail_limit_reported: HashMap<OrderId, TrailLimitReported>,
     /// The scale orders whose auto-reset a report gave (ibx#751).
     pub(crate) scale_reset_reported: std::collections::HashSet<OrderId>,
+    /// What a scale order that started again has to fill in all, when more
+    /// than its quantity: filled plus left, as its last report gave them
+    /// (ibx#751).
+    pub(crate) scale_totals: HashMap<OrderId, crate::types::Qty>,
     /// Orders sent with the price management flag: a report that leaves
     /// it out before any other (a refusal) shows the order as sent
     /// (ibx#605).
@@ -441,6 +445,8 @@ pub struct Context {
     /// they set, None when they set none (ibx#660). A type asked and not
     /// answered yet is in `presets_asked`.
     pub(crate) order_presets: HashMap<String, Option<String>>,
+    /// The limit price of each order preset that names one (ibx#673).
+    pub(crate) preset_limits: HashMap<String, crate::engine::hot_loop::order_builder::PresetLimit>,
     pub(crate) presets_asked: std::collections::HashSet<String>,
     pub(crate) next_preset_request: u32,
     /// The order preset kinds the account has stored on the server, from
@@ -618,6 +624,7 @@ impl Context {
             status_queries: std::collections::HashSet::new(),
             trail_limit_reported: HashMap::new(),
             scale_reset_reported: std::collections::HashSet::new(),
+            scale_totals: HashMap::new(),
             price_mgmt_sent: std::collections::HashSet::new(),
             compete_cleared: std::collections::HashSet::new(),
             reported_stop: HashMap::new(),
@@ -683,6 +690,7 @@ impl Context {
             delayed_contracts: std::collections::HashSet::new(),
             algo_providers: Vec::new(),
             order_presets: HashMap::new(),
+            preset_limits: HashMap::new(),
             presets_asked: std::collections::HashSet::new(),
             next_preset_request: 3,
             presets_stored: None,

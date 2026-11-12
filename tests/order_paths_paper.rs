@@ -842,6 +842,67 @@ fn refusals_of_10_51(paper: &mut Paper, id: i64) {
         &format!("PEG STK on a stock: kept, its cancel gives Cancelled, 202, 161 ({seq:?})"));
 }
 
+/// ibx#673 (the reference 10.51, paper, regular hours 12/11/2026): a
+/// volatility order on a stock goes out as a limit order priced from the
+/// quote the session holds; with no quote held, without a price, and the
+/// server refuses it: Inactive, 201 naming the missing price, shown as a
+/// limit order.
+fn volatility_on_a_stock(paper: &mut Paper, id: i64) {
+    println!("  volatility order on a stock with no quote held (order {})", id);
+    let order = Order {
+        action: "BUY".into(), order_type: "VOL".into(), total_quantity: 1.0, tif: "DAY".into(),
+        volatility: 30.0, volatility_type: 2, ..Default::default()
+    };
+    let msft = Contract { con_id: 272093, exchange: "SMART".into(), ..Default::default() };
+    paper.placed.push(id);
+    if let Err(e) = paper.client.place_order(id, &msft, &order) {
+        paper.fail(&format!("order {}: place_order returned {}", id, e));
+    }
+    let error_key = format!("error:{}:201", id);
+    let done = paper.pump(20, |s| last_status(s, id).as_deref() == Some("Inactive") && s.sequence.iter().any(|e| *e == error_key));
+    let reason_ok = paper.state.lock().unwrap().errors.iter()
+        .any(|(r, c, m)| *r == id && *c == 201 && m == "Order rejected - reason:Message must contain field # 44");
+    let sent = new_orders(id);
+    paper.check(done, "volatility order on a stock: Inactive and error 201");
+    paper.check(reason_ok, "volatility order on a stock: the server names the missing price");
+    paper.check(sent.len() == 1 && field(&sent[0], 40) == Some("2") && field(&sent[0], 44).is_none(),
+        "volatility order on a stock: sent as a limit order without a price");
+}
+
+/// ibx#751 (the reference 10.51, paper, 18/10/2026 market closed and
+/// 12/11/2026 regular hours): a scale order with a profit offset goes out
+/// with its profit taker in one write; the profit taker is a child under a
+/// negative order id, PreSubmitted, and the order's cancel ends the order.
+fn scale_with_profit_taker(paper: &mut Paper, id: i64) {
+    println!("  scale order with a profit taker (order {})", id);
+    let order = Order {
+        action: "BUY".into(), order_type: "LMT".into(), total_quantity: 2.0, lmt_price: 50.0, tif: "DAY".into(),
+        scale_init_level_size: 1, scale_subs_level_size: 1, scale_price_increment: 0.5, scale_profit_offset: 0.5,
+        ..Default::default()
+    };
+    let start = wire().lines.lock().unwrap().len();
+    paper.place(id, &order);
+    let up = paper.pump(20, |s| working(s, id) && s.statuses.iter().any(|(i, st)| *i < 0 && st == "PreSubmitted"));
+    paper.check(up, "scale order: working, its profit taker PreSubmitted under a negative id");
+    let child = paper.state.lock().unwrap().statuses.iter().rev().find(|(i, _)| *i < 0).map(|(i, _)| *i);
+    let pair: Vec<Frame> = wire().lines.lock().unwrap()[start..].iter().filter(|l| l.starts_with("WIRE>")).map(|l| parse_frame(l))
+        .filter(|f| field(f, 35) == Some("D")).collect();
+    paper.check(pair.len() == 2 && field(&pair[1], 6121) == child.map(|c| c.to_string()).as_deref(),
+        &format!("scale order: the order then its profit taker {child:?} sent"));
+    let _ = paper.client.cancel_order(id, "");
+    let ended = paper.pump(20, |s| last_status(s, id).as_deref() == Some("Cancelled"));
+    paper.check(ended, "scale order: cancelled");
+    if let Some(child) = child {
+        // The profit taker of an order that never traded ends with it.
+        paper.placed.push(child);
+        let gone = paper.pump(10, |s| last_status(s, child).as_deref() == Some("Cancelled"));
+        if !gone {
+            let _ = paper.client.cancel_order(child, "");
+            paper.pump(10, |s| last_status(s, child).as_deref() == Some("Cancelled"));
+        }
+    }
+}
+
 #[test]
 #[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
 fn order_paths_paper() {
@@ -874,6 +935,8 @@ fn order_paths_paper() {
     attached_from_preset(&mut paper, base + 900);
     refused_at_lookup(&mut paper, base + 1000);
     refusals_of_10_51(&mut paper, base + 1100);
+    volatility_on_a_stock(&mut paper, base + 1200);
+    scale_with_profit_taker(&mut paper, base + 1300);
 
     println!("  cleanup: cancelling every order still working");
     // A modified order is placed twice under one id: cancel it once.

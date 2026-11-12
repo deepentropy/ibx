@@ -1590,17 +1590,17 @@ local_rule,494-1,494 check: exempt code on an order that is not SSHORTX,tests/gw
 local_rule,353-1,353 check: slot 1 with a location,tests/gw_catalog/refusals.rs::short_sale_slot_1_with_a_location
 local_rule,352-1,352 check: slot 2 without a location,tests/gw_catalog/refusals.rs::short_sale_slot_2_without_a_location
 local_rule,495-1,495 check: exempt code not valid,tests/gw_catalog/refusals.rs::exempt_code_not_valid
-local_rule,10052-5,10052 check: VOL order with time in force GTC,open #673
-local_rule,411-1,411 check: VOL order with outsideRth set,open #673
-local_rule,371-1,"371 check: VOL: volatility missing or negative, or set on a non-VOL order",open #673
+local_rule,10052-5,10052 check: VOL order with time in force GTC,src/client_core.rs::volatility_order_reading
+local_rule,411-1,411 check: VOL order with outsideRth set,src/client_core.rs::volatility_order_reading
+local_rule,371-1,"371 check: VOL: volatility missing or negative, or set on a non-VOL order",src/client_core.rs::volatility_order_reading
 local_rule,367-1,367 check: VOL: volatility type not 1 or 2,tests/gw_catalog/refusals.rs::volatility_order_without_its_type
-local_rule,368-1,368 check: VOL: reference price type not 1 or 2,open #673
-local_rule,380-1,380 check: delta hedge order type not allowed,open #673
-local_rule,379-1,379 check: delta hedge order type with an aux price,open #673
-local_rule,372-1,372 check: VOL attribute on a non-VOL order,open #673
-local_rule,373-1,373 check: stock range on an order that is not VOL or relative to stock,open #673
-local_rule,375-1,375 check: negative stock range,open #673
-local_rule,374-1,374 check: low stock range not below the high one,open #673
+local_rule,368-1,368 check: VOL: reference price type not 1 or 2,src/client_core.rs::volatility_order_reading
+local_rule,380-1,380 check: delta hedge order type not allowed,src/client_core.rs::volatility_order_reading
+local_rule,379-1,379 check: delta hedge order type with an aux price,src/client_core.rs::volatility_order_reading
+local_rule,372-1,372 check: VOL attribute on a non-VOL order,src/client_core.rs::volatility_order_reading
+local_rule,373-1,373 check: stock range on an order that is not VOL or relative to stock,src/client_core.rs::volatility_order_reading
+local_rule,375-1,375 check: negative stock range,src/client_core.rs::volatility_order_reading
+local_rule,374-1,374 check: low stock range not below the high one,src/client_core.rs::volatility_order_reading
 local_rule,10352-1,10352 check: whatIf false and whatIfType above 0,tests/gw_catalog/refusals.rs::what_if_type_without_what_if
 local_rule,10351-1,10351 check: whatIfType below 0 or above the highest known type,tests/gw_catalog/refusals.rs::what_if_type_out_of_range
 local_rule,10351-2,"10351 check: whatIf true, whatIfType above 1, and the account does not allow what-if types (a settings flag and a server feature)",tests/gw_catalog/refusals.rs::what_if_type_above_a_preview
@@ -1649,7 +1649,7 @@ local_rule,321-7,"321 check: such a session, a short side (SSHORT or SSHORTX) an
 local_rule,321-8,"321 check: deltaNeutralOrderType given (the client sends the delta-neutral open or close only then) and deltaNeutralOpenClose given with a first character (case ignored) not O or C (empty, a leading space or ? is the default)",tests/gw_catalog/refusals.rs::delta_neutral_open_close_not_open_or_close
 local_rule,378-1,"378 check: a delta-neutral order type allowed as one (REL, RPI, LMT, MKT, PASSV REL) that needs an aux price, and deltaNeutralAuxPrice unset; none of the allowed types needs one, so the rule does not fire",open #739
 local_rule,10115-1,"10115 check: auxPrice 0 on an order type that is not trailing, takes an aux price and does not take 0: STP, STP LMT, STP PRT, MIT, LIT, PEG MKT, PEG BENCH, PEG STK, RPI, PEG MKT VOL",tests/gw_catalog/refusals.rs::zero_offset_on_a_type_without_one
-local_rule,10115-2,10115 check: auxPrice below 0 on PEG PRM VOL or PEG MKT VOL (PEG MID VOL and PEG SURF VOL take it),open #673
+local_rule,10115-2,10115 check: auxPrice below 0 on PEG PRM VOL or PEG MKT VOL (PEG MID VOL and PEG SURF VOL take it),src/client_core.rs::volatility_order_reading
 local_rule,321-9,"321 check: order type QUOTE (a request for quote) and already 2 of them in the same second on the client's connection; text = 2, then 1",tests/gw_catalog/refusals.rs::requests_for_quote_beyond_two_a_second
 local_rule,10136-2,10136 check: FA session: the order is allocated to one account whose application is not approved (after 'Invalid account specified' for an account not known and 10132 for a read-only one),open #507
 local_rule,10226-2,"10226 check: FA session with the allocation checks on: an FA method, and a group that exists whose own method is set and is another; an exemption of some orders not identified",open #507
@@ -1724,7 +1724,7 @@ local_rule,461-1,461 rules: size not a multiple of the lot,open #634
 local_rule,10098-1,10098 rules: SNAP order with a negative offset,tests/gw_catalog/refusals.rs::snap_order_with_a_negative_offset
 local_rule,2137-1,"2137 rules: closing order larger than the position: warning code, order refused",tests/gw_catalog/refusals.rs::closing_order_larger_than_the_position
 local_rule,10132-2,10132 rules: read-only account,open #634
-local_rule,10361-1,10361 rules: VOL order whose volatility is below the minimum of its volatility type,open #673
+local_rule,10361-1,10361 rules: VOL order whose volatility is below the minimum of its volatility type,open #634
 local_rule,10364-1,10364 rules: an attached hedge child of the kind that takes a maximum hedge size has none,tests/gw_catalog/refusals.rs::selling_beta_hedge_without_a_max_size
 local_rule,10365-1,10365 rules: the maximum hedge size of such a hedge child is below its filled quantity,src/client_core.rs::the_hedge_size_precaution_of_a_transmitted_tree
 local_rule,10355-1,10355 rules: new request form: attachedOrders asks for a profit taker and the order preset has none; order dropped,tests/gw_catalog/refusals.rs::attached_from_a_preset_without_them

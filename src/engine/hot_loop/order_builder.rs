@@ -379,10 +379,6 @@ fn send_orders(
                 let qty = (attrs.cash_qty as f64 / crate::types::PRICE_SCALE as f64 * crate::types::QTY_SCALE as f64).round() as i64;
                 context.cash_orders.insert(order_req.order_id(), qty);
             }
-            // A volatility order on a contract that is no option: the
-            // reference prices it from the market (an AAPL stock order went
-            // out as a limit order at the ask, paper 16/10/2026); not
-            // modelled yet (ibx#673).
             // A pegged-to-stock order, as the reference 10.51 (ibx#745;
             // paper, 17/10 and 18/10/2026, market closed): on a stock,
             // whose order types do not include it, refused with 387 at
@@ -462,12 +458,12 @@ fn send_orders(
                     format!("RFQ is not applicable for the contract. Order ID:{}", oid));
                 continue;
             }
-            if is_volatility(&order_req) && !matches!(sec_type.as_str(), "OPT" | "FOP") {
-                let oid = order_req.order_id();
-                log::warn!("Order {} refused: VOL order on {}", oid, sec_type);
-                shared.orders.push_order_error(oid, 321, format!(
-                    "Error validating request.-'PlaceOrder(3)' : cause - VOL orders on {sec_type} are not written by ibx yet (ibx#673)"));
-                continue;
+            // A volatility order on a contract that is no option: a limit
+            // order priced by the account's preset (ibx#673).
+            match volatility_as_limit(&mut order_req, &sec_type, context, conn, hb) {
+                Some(false) => { context.rth_parked.push(rewrap(order_req)); continue; }
+                Some(true) => continue,
+                None => {}
             }
             // A crypto order's permission comes first too: without it the
             // order stays pending with no error (ibx#666).
@@ -2415,7 +2411,7 @@ pub(crate) fn clearing_away(intent: &str, account_id: &str, super_user: bool) ->
 /// the side is refused unless the logon is a super user or omnibus logon,
 /// or the order clears away; then the short-sale slot rules. Ok with the
 /// short-sale instructions the order carries, or the rule text.
-fn short_sale_check(
+pub(crate) fn short_sale_check(
     attrs: &crate::types::OrderAttrs,
     account_id: &str,
     super_user: bool,
@@ -2718,14 +2714,27 @@ fn send_new_order(
     let mut owned: Vec<(u32, String)> = out.iter().map(|(t, v)| (*t, v.to_string())).collect();
     let child = scale_fields(&mut owned, &scale, scale_keys.as_ref().map(|k| k.0.as_str()));
     let refs: Vec<(u32, &str)> = owned.iter().map(|(t, v)| (*t, v.as_str())).collect();
-    let result = conn.send_fix(&refs);
+    // The order and its profit taker leave in one write, as the reference
+    // writes them: written apart, an order that trades at once had filled
+    // before the server read its profit taker, which it then refused
+    // ("Parent order is partially or fully filled"; paper, regular hours
+    // 12/11/2026, ibx#751).
+    let pair = child.is_some() && !conn.holding();
+    if pair {
+        conn.hold();
+    }
+    let mut result = conn.send_fix(&refs);
     log::debug!("New scale order sent: order {}", order_id.as_deref().unwrap_or("-"));
     if let (Some(mut child), Some((_, child_key, child_clord)), Some(child_id)) = (child, scale_keys, scale.profit_child_id) {
         let parent_clord = field(&refs, 11).unwrap_or("").to_string();
         profit_child_fields(&mut child, &scale, &child_key, &child_clord, child_id, &parent_clord);
         let refs: Vec<(u32, &str)> = child.iter().map(|(t, v)| (*t, v.as_str())).collect();
-        conn.send_fix(&refs)?;
+        let sent = conn.send_fix(&refs);
         log::debug!("Profit taker sent: order {}", child_id);
+        result = result.and(sent);
+    }
+    if pair {
+        result = result.and(conn.release());
     }
     result
 }
@@ -4042,6 +4051,158 @@ pub(crate) const PEG_STK_DELTA_INVALID: &str = "The delta is invalid. Valid valu
 /// A new volatility order (ibx#673).
 fn is_volatility(req: &OrderRequest) -> bool {
     matches!(req, OrderRequest::SubmitEx { kind: crate::types::OrderKind::Volatility { .. }, .. })
+}
+
+/// The limit price an order preset names (ibx#673): its kind of price,
+/// its offset (a percent of the price when `percent`), and whether a sell
+/// takes the other side of the book.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PresetLimit {
+    pub(crate) price_type: u32,
+    pub(crate) offset: f64,
+    pub(crate) percent: bool,
+    pub(crate) reverse: bool,
+}
+
+/// The kinds of price of a preset's limit price.
+const PRICE_BID: u32 = 0;
+const PRICE_ASK: u32 = 1;
+const PRICE_LAST: u32 = 2;
+const PRICE_DEFAULT: u32 = 5;
+const PRICE_MIDPOINT: u32 = 12;
+
+impl Default for PresetLimit {
+    /// The reference's own preset: the ask, no offset, a sell on the bid.
+    fn default() -> Self {
+        Self { price_type: PRICE_ASK, offset: 0.0, percent: false, reverse: true }
+    }
+}
+
+/// The limit price of an order preset's answer (ibx#673): the group of the
+/// limit price field, its kind of price, offset and unit, in the order the
+/// answer gives them; the side reversal flag.
+pub(crate) fn preset_limit_reply(context: &mut Context, parsed: &fix::FieldMap<'_>, msg: &[u8]) {
+    let Some(kind) = parsed.get(&8168).and_then(|k| k.strip_prefix("s=")) else { return };
+    let mut limit = PresetLimit::default();
+    let mut in_limit = false;
+    for part in msg.split(|&c| c == 1) {
+        let text = String::from_utf8_lossy(part);
+        let Some((tag, value)) = text.split_once('=') else { continue };
+        match tag {
+            "4084" => in_limit = value == "4058",
+            "4088" if in_limit => limit.price_type = value.parse().unwrap_or(PRICE_ASK),
+            "4085" if in_limit => limit.offset = value.parse().unwrap_or(0.0),
+            "4086" if in_limit => limit.percent = value == "%",
+            "4050" => limit.reverse = !value.eq_ignore_ascii_case("false"),
+            _ => {}
+        }
+    }
+    context.preset_limits.insert(kind.to_string(), limit);
+}
+
+/// A volatility order (VOL, or a type pegged to volatility) on a contract
+/// that is no option, as the reference 10.51 takes it (ibx#673): a limit
+/// order, with no volatility field; a fund's a market order. The limit is
+/// the client's for a pegged type that gives one, else the price of the
+/// account's preset of the contract's type (bid, ask, last or the midpoint
+/// of the book), from the quote the session holds, on the tick: a buy's
+/// midpoint rounded down, a sell's up (observed: an AAPL stock order went
+/// out as a limit order at the midpoint, paper, regular hours 16/10/2026).
+/// With no quote to price it, the limit order goes without a price, and the
+/// server refuses it for the missing price (observed: a MSFT order with no
+/// quote held, paper, regular hours 12/11/2026). Some(false): it waits for
+/// the preset.
+fn volatility_as_limit(
+    req: &mut OrderRequest, sec_type: &str, context: &mut Context, conn: &mut Connection, hb: &mut HeartbeatState,
+) -> Option<bool> {
+    let OrderRequest::SubmitEx { order_id, instrument, side, kind: crate::types::OrderKind::Volatility { price: given, .. }, .. } = req else {
+        return None;
+    };
+    if matches!(sec_type, "OPT" | "FOP") {
+        return None;
+    }
+    let (oid, slot, side, given) = (*order_id, *instrument, *side, *given);
+    if sec_type == "FUND" {
+        set_kind(req, crate::types::OrderKind::Market);
+        return None;
+    }
+    let price = if given > 0 {
+        Some(given)
+    } else {
+        let kinds = preset_kinds(sec_type, context.market.symbol(slot));
+        if !ask_order_presets(context, conn, hb, &kinds) {
+            return Some(false);
+        }
+        let limit = kinds.iter().find_map(|k| context.preset_limits.get(k).copied()).unwrap_or_default();
+        preset_price(context, slot, side, limit)
+    };
+    match price {
+        Some(price) => {
+            log::info!("Order {}: volatility order on {} sent as a limit order at {}", oid, sec_type, price);
+            set_kind(req, crate::types::OrderKind::Limit { price });
+            None
+        }
+        None => {
+            log::info!("Order {}: no quote to price the volatility order on {}: sent as a limit order without a price", oid, sec_type);
+            set_kind(req, crate::types::OrderKind::Limit { price: 0 });
+            None
+        }
+    }
+}
+
+fn set_kind(req: &mut OrderRequest, new: crate::types::OrderKind) {
+    if let OrderRequest::SubmitEx { kind, .. } = req {
+        *kind = new;
+    }
+}
+
+/// The price a preset's limit price gives from the quote the session holds
+/// for the order's contract (ibx#673), on the contract's tick; None with no
+/// such quote.
+fn preset_price(context: &Context, slot: crate::types::InstrumentId, side: Side, limit: PresetLimit) -> Option<crate::types::Price> {
+    let con_id = context.market.con_id(slot).filter(|c| *c > 0)?;
+    let quote = context.market.active_instruments()
+        .filter(|&(_, c)| c == con_id)
+        .map(|(s, _)| (s, context.market.quote(s)))
+        .find(|(_, q)| q.bid > 0 || q.ask > 0 || q.last > 0)?;
+    let (quote_slot, q) = quote;
+    let tick = [context.market.min_tick_scaled(quote_slot), context.market.min_tick_scaled(slot)].into_iter().find(|t| *t > 0).unwrap_or(0);
+    let down = |p: i64| if tick > 0 { p.div_euclid(tick) * tick } else { p };
+    let up = |p: i64| if tick > 0 { -(-p).div_euclid(tick) * tick } else { p };
+    let buy = matches!(side, Side::Buy);
+    let valid = |p: i64| (p > 0).then_some(p);
+    let mut price_type = limit.price_type;
+    if !buy && limit.reverse {
+        price_type = match price_type {
+            PRICE_BID => PRICE_ASK,
+            PRICE_ASK => PRICE_BID,
+            other => other,
+        };
+    }
+    let base = match price_type {
+        PRICE_BID => valid(q.bid)?,
+        PRICE_ASK => valid(q.ask)?,
+        PRICE_LAST => valid(q.last)?,
+        PRICE_DEFAULT => if buy { valid(q.ask)? } else { valid(q.bid)? },
+        PRICE_MIDPOINT => {
+            let (bid, ask) = (down(valid(q.bid)?), up(valid(q.ask)?));
+            let mid = (bid + ask) / 2;
+            return Some(if buy { down(mid) } else { up(mid) });
+        }
+        _ => return None,
+    };
+    if limit.offset == 0.0 {
+        return Some(base);
+    }
+    let mut offset = if limit.percent {
+        (base as f64 * limit.offset / 100.0).round() as i64
+    } else {
+        crate::api::types::price_from_f64(limit.offset)
+    };
+    if !buy && limit.reverse {
+        offset = -offset;
+    }
+    Some(if buy { up(base + offset) } else { down(base + offset) })
 }
 
 /// The answer of a trading permission request (ibx#666): whether the
@@ -10515,7 +10676,7 @@ mod tests {
     #[test]
     fn volatility_orders_as_far_as_written() {
         let vol = |id| OrderRequest::SubmitEx { order_id: id, instrument: 0, side: Side::Buy, qty: 1,
-            kind: crate::types::OrderKind::Volatility { volatility: px(30.0), vol_type: 2 }, tif: b'0',
+            kind: crate::types::OrderKind::Volatility { volatility: px(30.0), vol_type: 2, peg: 0, price: 0 }, tif: b'0',
             attrs: crate::types::OrderAttrs::default() };
         for (allowed, code) in [("0", 460), ("1", 321)] {
             let (frames, shared, mut context, mut conn, mut server) = order_by_con_id("515974959", "CME", vol(91), &ES_PUT);
@@ -10525,11 +10686,80 @@ mod tests {
             let errors = shared.orders.drain_order_errors();
             assert_eq!(errors.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(91, code)], "{errors:?}");
         }
+        // On a stock with no quote held: a limit order without a price,
+        // which the server refuses (ibx#673; the reference 10.51, paper,
+        // regular hours 12/11/2026).
         let stock = [(55, "AAPL"), (167, "STK"), (15, "USD"), (207, "SMART"), (6431, "DAY/3,LMT/3")];
-        let (frames, shared, ..) = order_by_con_id("265598", "SMART", vol(92), &stock);
-        assert!(frames.iter().all(|f| tag(f, 35) != Some("D")), "nothing sent: {frames:?}");
-        let errors = shared.orders.drain_order_errors();
-        assert_eq!(errors.iter().map(|e| (e.0, e.1)).collect::<Vec<_>>(), [(92, 321)], "{errors:?}");
+        let (frames, shared, mut context, mut conn, mut server) = order_by_con_id("265598", "SMART", vol(92), &stock);
+        let mut frames = frames;
+        for _ in 0..3 {
+            frames.extend(drain_frames(&mut context, &shared, &mut conn, &mut server));
+        }
+        let order = frames.iter().find(|f| tag(f, 35) == Some("D")).unwrap_or_else(|| panic!("sent: {frames:?}"));
+        assert_eq!((tag(order, 40), tag(order, 44)), (Some("2"), None), "a limit order without its price");
+        assert!(shared.orders.drain_order_errors().is_empty());
+    }
+
+    // ibx#673 (the reference 10.51, paper, regular hours 16/10/2026: an
+    // AAPL stock VOL order went out as a limit order at the midpoint, the
+    // stock preset's limit price): a volatility order on a contract that is
+    // no option is a limit order at the preset's price from the quote held,
+    // a buy's midpoint rounded down and a sell's up; the reference's own
+    // preset is the ask (the bid for a sell); a pegged type's own limit
+    // price is taken; a fund's is a market order.
+    #[test]
+    fn a_volatility_order_on_a_stock_is_a_limit_order_at_the_presets_price() {
+        let stock = [(55, "AAPL"), (167, "STK"), (15, "USD"), (207, "SMART"), (6431, "DAY/3,LMT/3")];
+        let sent = |side: Side, peg: u8, price: f64, preset: Option<PresetLimit>| -> (Option<String>, Option<String>) {
+            let (client, mut server) = crate::protocol::connection::mem_pair();
+            let mut conn = Some(Connection::new_mem(client));
+            let shared = Arc::new(SharedState::new());
+            let mut context = order_context();
+            if let Some(p) = preset {
+                context.preset_limits.insert("STK".into(), p);
+            }
+            context.market.register(265598);
+            context.market.set_symbol(0, String::new());
+            context.market.set_routing(0, "", "SMART");
+            context.market.set_min_tick(0, 0.01);
+            context.market.quote_mut(0).bid = px(345.90);
+            context.market.quote_mut(0).ask = px(346.01);
+            context.market.quote_mut(0).last = px(345.97);
+            context.pending_orders.push(OrderRequest::SubmitEx { order_id: 7, instrument: 0, side, qty: 1,
+                kind: crate::types::OrderKind::Volatility { volatility: px(30.0), vol_type: 2, peg, price: px(price) },
+                tif: b'0', attrs: crate::types::OrderAttrs::default() });
+            let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+            let id = tag(&frames[0], 320).unwrap().to_string();
+            let mut fields = vec![(35, "d"), (320, id.as_str()), (6008, "265598")];
+            fields.extend_from_slice(&stock);
+            assert!(rth_definition_reply(&mut context, &id, &fix::fix_build(&fields, 1)));
+            let mut frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+            for _ in 0..3 {
+                frames.extend(drain_frames(&mut context, &shared, &mut conn, &mut server));
+            }
+            assert!(shared.orders.drain_order_errors().is_empty());
+            let order = frames.iter().find(|f| tag(f, 35) == Some("D")).unwrap_or_else(|| panic!("sent: {frames:?}"));
+            assert!(tag(order, 9816).is_none() && tag(order, 6280).is_none(), "no volatility field");
+            (tag(order, 40).map(str::to_string), tag(order, 44).map(str::to_string))
+        };
+        let mid = Some(PresetLimit { price_type: PRICE_MIDPOINT, ..Default::default() });
+        let lmt = |p: &str| (Some("2".to_string()), Some(p.to_string()));
+        assert_eq!(sent(Side::Buy, 0, 0.0, mid), lmt("345.95"));
+        assert_eq!(sent(Side::Sell, 0, 0.0, mid), lmt("345.96"));
+        assert_eq!(sent(Side::Buy, 0, 0.0, None), lmt("346.01"), "the ask");
+        assert_eq!(sent(Side::Sell, 0, 0.0, None), lmt("345.90"), "the bid");
+        assert_eq!(sent(Side::Buy, b'P', 340.0, mid), lmt("340.00"), "a pegged type's own price");
+    }
+
+    #[test]
+    fn the_limit_price_of_a_preset_answer() {
+        let mut context = order_context();
+        let msg = fix::fix_build(&[(35, "U"), (8166, "G"), (8168, "s=STK"), (4033, "MIDPX"), (4084, "4058"), (4088, "12"),
+            (4074, "1"), (4084, "4077"), (4085, "20.0"), (4086, "%")], 1);
+        let fields = fix::fix_parse(&msg);
+        let view: std::collections::HashMap<u32, &str> = fields.iter().map(|(t, v)| (*t, v.as_str())).collect();
+        preset_limit_reply(&mut context, &view, &msg);
+        assert_eq!(context.preset_limits.get("STK"), Some(&PresetLimit { price_type: PRICE_MIDPOINT, offset: 0.0, percent: false, reverse: true }));
     }
 
     // ibx#666 (the reference 10.51, paper, regular hours 16/10/2026,
@@ -12992,7 +13222,7 @@ mod tests {
     #[test]
     fn a_refused_volatility_option_order_checks_the_underlyings_cfd() {
         let vol = |id| OrderRequest::SubmitEx { order_id: id, instrument: 0, side: Side::Buy, qty: 1,
-            kind: crate::types::OrderKind::Volatility { volatility: px(30.0), vol_type: 2 }, tif: b'0',
+            kind: crate::types::OrderKind::Volatility { volatility: px(30.0), vol_type: 2, peg: 0, price: 0 }, tif: b'0',
             attrs: crate::types::OrderAttrs::default() };
         let (frames, shared, mut context, mut conn, mut server) = order_by_con_id("692808239", "SMART", vol(91), &AAPL_CALL);
         assert_eq!(asked_kinds(&frames), ["permission 2/OPT/R"]);

@@ -1324,6 +1324,10 @@ pub struct OrderState {
     /// listings.
     book_seqs: Mutex<HashMap<OrderId, u64>>,
     book_peak: std::sync::atomic::AtomicUsize,
+    /// The lowest negative API order id a report of the session gave (0:
+    /// none): the profit taker of a scale order is numbered below it
+    /// (ibx#751).
+    lowest_child_id: std::sync::atomic::AtomicI64,
     /// The highest API order id the server's reports gave for each
     /// API client: the ids a client used in earlier sessions, as far
     /// as the server's replays show them.
@@ -1354,6 +1358,7 @@ impl OrderState {
             api_order_ids: Mutex::new(HashMap::new()),
             book_seqs: Mutex::new(HashMap::new()),
             book_peak: std::sync::atomic::AtomicUsize::new(0),
+            lowest_child_id: std::sync::atomic::AtomicI64::new(0),
             reported_order_ids: Mutex::new(HashMap::new()),
         }
     }
@@ -1407,6 +1412,17 @@ impl OrderState {
     #[doc(hidden)] pub fn note_book(&self, order_id: OrderId, seq: u64, peak: usize) {
         self.book_seqs.lock().unwrap().insert(order_id, seq);
         self.book_peak.store(peak, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A negative API order id a report gave (engine side, ibx#751).
+    #[doc(hidden)] pub fn note_child_id(&self, id: i64) {
+        self.lowest_child_id.fetch_min(id, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The lowest negative API order id the session's reports gave, 0 for
+    /// none.
+    pub fn lowest_child_id(&self) -> i64 {
+        self.lowest_child_id.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The book place of an order, and the most orders the book held.
@@ -1748,6 +1764,10 @@ pub struct ReferenceState {
     depth_exchanges_pending: Mutex<bool>,
     /// Contract cache from CCP exec reports (con_id -> api::Contract).
     contract_cache: Mutex<HashMap<i64, api::Contract>>,
+    /// The primary exchange and trading class the portfolio's batch lookup
+    /// gave for a contract already known from a trade report of the day:
+    /// what a position row shows (the contract cache keeps the report's).
+    position_venues: Mutex<HashMap<i64, (String, String)>>,
     /// Market names from contract details, by conId.
     market_names: Mutex<HashMap<i64, String>>,
     /// Zone of the trading hours from contract details, by conId (ibx#335).
@@ -1887,6 +1907,7 @@ impl ReferenceState {
             depth_exchanges_cache: Mutex::new(Vec::new()),
             depth_exchanges_pending: Mutex::new(false),
             contract_cache: Mutex::new(HashMap::new()),
+            position_venues: Mutex::new(HashMap::new()),
             market_names: Mutex::new(HashMap::new()),
             time_zone_ids: Mutex::new(HashMap::new()),
             exchange_maps: Mutex::new(Vec::new()),
@@ -2230,6 +2251,18 @@ impl ReferenceState {
     #[doc(hidden)] pub fn notify_depth_exchanges(&self) {
         *self.depth_exchanges_pending.lock().unwrap() = true;
         self.state.note();
+    }
+
+    /// The primary exchange and trading class of a position's contract as
+    /// the portfolio's batch lookup gave them (engine side).
+    #[doc(hidden)] pub fn note_position_venue(&self, con_id: i64, primary_exchange: &str, trading_class: &str) {
+        self.position_venues.lock().unwrap().insert(con_id, (primary_exchange.to_string(), trading_class.to_string()));
+    }
+
+    /// The primary exchange and trading class the portfolio's batch lookup
+    /// gave for `con_id`, when the contract cache holds another view of it.
+    pub fn position_venue(&self, con_id: i64) -> Option<(String, String)> {
+        self.position_venues.lock().unwrap().get(&con_id).cloned()
     }
 
     #[doc(hidden)] pub fn cache_contract(&self, con_id: i64, contract: api::Contract) {

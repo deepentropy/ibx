@@ -183,7 +183,7 @@ impl EClient {
         };
         // A scale order's profit taker (ibx#751).
         if !api_order.what_if {
-            self.core.scale_profit_child(&mut cmd, &child_contract, api_order, oid, instrument);
+            self.core.scale_profit_child(&mut cmd, &child_contract, api_order, oid, instrument, shared.orders.lowest_child_id());
         }
         built.push(cmd);
 

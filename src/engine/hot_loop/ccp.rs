@@ -1618,6 +1618,7 @@ impl CcpState {
                         // ibx#729); not the logon's list.
                         "194" if parsed.get(&8166).is_some_and(|k| *k == "G") => {
                             super::order_builder::preset_reply(context, &parsed);
+                            super::order_builder::preset_limit_reply(context, &parsed, msg);
                         }
                         // The logon's list of the order presets the account
                         // has stored (ibx#729).
@@ -1974,6 +1975,11 @@ impl CcpState {
             base.parse::<OrderId>().ok()
         }).unwrap_or(0);
         let mut clord_id = context.key_of(server_id);
+        // A negative API order id, a scale order's profit taker: the next
+        // one of this session is numbered below it (ibx#751).
+        if let Some(id) = parsed.get(&6121).and_then(|s| s.strip_prefix('-')).and_then(|s| s.parse::<i64>().ok()) {
+            shared.orders.note_child_id(-id);
+        }
 
         // An order this session does not hold, reported working: an order
         // of another session or client, put in the book so it can be
@@ -1997,8 +2003,17 @@ impl CcpState {
             Some("6" | "D") => Some(crate::types::OrderStatus::PendingCancel),
             _ => None,
         };
+        // Not from an execution of the day given again at the logon: it
+        // tells what traded, not that the order still works. An order
+        // partly filled then cancelled was shown working by every later
+        // session of the day, and each execution of the day made order
+        // callbacks at the connection, where the reference gives none
+        // (paper, regular hours 12/11/2026: a fresh process of the reference
+        // 10.51 after 30 fills gave no order at the connection). A working
+        // order comes with its status report.
         let replayed_status = replayed_status
-            .filter(|_| context.order(clord_id).is_none() && context.finished_status(clord_id).is_none());
+            .filter(|_| context.order(clord_id).is_none() && context.finished_status(clord_id).is_none()
+                && parsed.get(&97).copied() != Some("Y"));
         if let Some(replayed_status) = replayed_status {
             // The API order id only names the order to the caller (ibx#466):
             // taken when no order of this session has it.
@@ -2214,7 +2229,16 @@ impl CcpState {
             }
         };
         let is_status_report = parsed.get(&20).copied() == Some("3");
+        // A status report of a partly filled order that no venue holds: a
+        // scale order between two of its levels shows PreSubmitted until the
+        // next level is working (ibx#751; the reference 10.51, paper,
+        // regular hours 12/11/2026: after each level's fill, then Submitted
+        // again with the next level).
+        let unrouted_partial = ord_status == "1" && is_status_report
+            && parsed.get(&198).copied() == Some("NONE")
+            && !parsed.get(&100).is_some_and(|s| !s.is_empty());
         let status = match ord_status {
+            "1" if unrouted_partial => crate::types::OrderStatus::PreSubmitted,
             "0" => working(),
             // Replaced: back to working, by the same routing rule. The
             // reference reports no status change across a replace
@@ -2249,6 +2273,11 @@ impl CcpState {
                 None => crate::types::OrderStatus::PendingReplace,
             },
             "6" => crate::types::OrderStatus::PendingCancel,
+            // A fill of an order no venue held yet leaves it PreSubmitted (a
+            // scale order whose first level trades at once, ibx#751; the
+            // reference 10.51, paper, regular hours 12/11/2026).
+            "1" if context.order(clord_id).is_some_and(|o| o.status == crate::types::OrderStatus::PreSubmitted) =>
+                crate::types::OrderStatus::PreSubmitted,
             "1" => crate::types::OrderStatus::PartiallyFilled,
             "2" => crate::types::OrderStatus::Filled,
             "4" | "C" => crate::types::OrderStatus::Cancelled,
@@ -2285,7 +2314,7 @@ impl CcpState {
         // status, which the guard would take as stale (ibx#626).
         let replace_pending = ord_status == "6" && !is_cancel_request
             && status == crate::types::OrderStatus::PreSubmitted;
-        let change = if queried || replace_pending {
+        let change = if queried || replace_pending || unrouted_partial {
             context.apply_queried_status(clord_id, status)
         } else {
             context.apply_order_status(clord_id, status)
@@ -2494,12 +2523,22 @@ impl CcpState {
                     (None, 0) => context.cash_orders.get(&clord_id).copied().unwrap_or(0),
                     (None, q) => q,
                 };
+                // A scale order that starts again after its profit taker
+                // filled has more to fill than its quantity: what it filled
+                // plus what is left, kept for its cancel (ibx#751; the
+                // reference 10.51, paper, regular hours 12/11/2026: an
+                // order of 2 with 3 filled and 2 left, Cancelled with 2
+                // remaining).
+                let restarted = filled + leaves_qty;
+                if leaves_qty > 0 && restarted > ordered {
+                    context.scale_totals.insert(clord_id, restarted);
+                }
                 let remaining = match order.status {
                     // Not bounded at 0: a scale order sent with a quantity
                     // below 0 shows it (ibx#751; the reference 10.51,
                     // paper, 18/10/2026: Inactive with -1 remaining).
                     crate::types::OrderStatus::Cancelled | crate::types::OrderStatus::Rejected =>
-                        ordered - filled,
+                        context.scale_totals.remove(&clord_id).map_or(ordered, |total| total.max(ordered)) - filled,
                     _ => leaves_qty,
                 };
                 let update = crate::types::OrderUpdate {
@@ -2570,6 +2609,11 @@ impl CcpState {
             let transact_time = parsed.get(&60).map(|s| s.to_string()).unwrap_or_default();
             let avg_px: f64 = parsed.get(&6).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let cum_qty: f64 = parsed.get(&14).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            // The order's quantity as openOrder shows it: what it filled plus
+            // what is left, when that is more than its quantity (a scale
+            // order that starts again, ibx#751; the reference 10.51, paper,
+            // regular hours 12/11/2026: an order of 2 shown with 4, 3 and 5).
+            let total_qty = total_qty.max(cum_qty + leaves_qty as f64 / crate::types::QTY_SCALE as f64);
             let last_liq: i32 = parsed.get(&851).and_then(|s| s.parse().ok()).unwrap_or(0);
 
             let sec_type_str = match sec_type.as_str() {
@@ -2608,6 +2652,13 @@ impl CcpState {
             };
 
             let status_str = crate::client_core::order_status_str(status);
+            // An execution of the day given again at the logon, of an order
+            // this session does not hold, is no open order: an open-orders
+            // request does not list it (the reference 10.51, paper, regular
+            // hours 12/11/2026: none listed by a fresh process after orders
+            // partly filled then cancelled).
+            let status_str = if parsed.get(&97).copied() == Some("Y") && context.order(clord_id).is_none()
+                && crate::client_core::is_open_status(status_str) { "" } else { status_str };
 
             let resolved_con_id = if con_id != 0 {
                 con_id
@@ -3877,9 +3928,16 @@ impl CcpState {
         let batch = response_req_id.as_deref()
             .is_some_and(|r| r.starts_with(crate::control::contracts::SECDEF_SMALL_BATCH_NAME));
         for (i, def) in records.iter().enumerate() {
-            if !records[..i].iter().any(|d| d.con_id == def.con_id)
-                && !(batch && shared.reference.get_contract(def.con_id).is_some())
-            {
+            if records[..i].iter().any(|d| d.con_id == def.con_id) {
+                continue;
+            }
+            if batch && shared.reference.get_contract(def.con_id).is_some() {
+                // Its position row still shows the definition's primary
+                // exchange and trading class (the reference 10.51, paper,
+                // regular hours 12/11/2026: SPY, sold on another venue
+                // earlier that day, in a position row of a later process).
+                shared.reference.note_position_venue(def.con_id, &def.primary_exchange, &def.trading_class);
+            } else {
                 self.cache_definition(def, shared);
             }
         }
@@ -6205,6 +6263,80 @@ mod tests {
         let updates = shared.orders.drain_order_updates();
         let last = updates.iter().rev().find(|u| u.order_id == 44).expect("a status");
         assert_eq!((last.status, last.remaining_qty_fixed), (crate::types::OrderStatus::Cancelled, 2 * crate::types::QTY_SCALE));
+    }
+
+    // ibx#751 (the reference 10.51, paper, regular hours 12/11/2026, a scale
+    // order of 2 with a profit taker and auto-reset): a status report of a
+    // partly filled order that no venue holds shows PreSubmitted until its
+    // next level works; the order's quantity grows with what it has filled
+    // and has left; cancelled, its remaining is what was left.
+    #[test]
+    fn a_scale_order_between_its_levels() {
+        use crate::types::{OrderStatus, QTY_SCALE};
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        let instrument = context.market.try_register(265598).unwrap();
+        context.insert_order(crate::types::Order::new(45, instrument, Side::Buy, 2, 355 * PRICE_SCALE, b'2', b'0', 0));
+        let mut report = |pairs: &[(u32, &str)], context: &mut Context| {
+            let mut frame = exec_report_frame(pairs);
+            frame.insert(11, "45.0".to_string());
+            frame.entry(38).or_insert_with(|| "2".to_string());
+            ccp.handle_exec_report(&fix::field_view(&frame), context, &shared, &None, "");
+            (context.order(45).map(|o| o.status), shared.orders.drain_order_updates().last().map(|u| (u.status, u.filled_qty_fixed / QTY_SCALE, u.remaining_qty_fixed / QTY_SCALE)))
+        };
+        let fill = |id: &'static str, cum: &'static str, leaves: &'static str| vec![(39, "1"), (150, "1"), (20, "0"), (17, id), (32, "1"), (31, "355.57"),
+            (14, cum), (151, leaves), (100, "NASDAQ"), (198, "NASDAQ")];
+        assert_eq!(report(&[(39, "6"), (150, "6"), (20, "3"), (198, "NONE"), (14, "0"), (151, "2")], &mut context).0, Some(OrderStatus::PreSubmitted));
+        assert_eq!(report(&[(39, "0"), (150, "0"), (20, "0"), (198, "IBKRATS"), (14, "0"), (151, "2")], &mut context).0,
+            Some(OrderStatus::Submitted));
+        // A level fills: the order stays as it was, then no venue holds it.
+        assert_eq!(report(&fill("e1", "1", "1"), &mut context).0, Some(OrderStatus::PartiallyFilled));
+        assert_eq!(report(&[(39, "1"), (150, "1"), (20, "3"), (198, "NONE"), (14, "1"), (151, "1")], &mut context),
+            (Some(OrderStatus::PreSubmitted), Some((OrderStatus::PreSubmitted, 1, 1))));
+        // The next level works, fills, and the order starts again: 2 filled
+        // and 2 left of an order of 2.
+        assert_eq!(report(&[(39, "5"), (150, "5"), (20, "0"), (198, "NASDAQ"), (14, "1"), (151, "1")], &mut context).0,
+            Some(OrderStatus::Submitted));
+        report(&fill("e2", "2", "2"), &mut context);
+        assert_eq!(report(&[(39, "1"), (150, "1"), (20, "3"), (198, "NONE"), (14, "2"), (151, "2")], &mut context),
+            (Some(OrderStatus::PreSubmitted), Some((OrderStatus::PreSubmitted, 2, 2))));
+        assert_eq!(shared.orders.get_order_info(45).unwrap().order.total_quantity, 4.0);
+        // A fill of an order no venue holds leaves it PreSubmitted.
+        assert_eq!(report(&fill("e3", "3", "2"), &mut context).0, Some(OrderStatus::PreSubmitted));
+        report(&[(39, "1"), (150, "1"), (20, "3"), (198, "NONE"), (38, "3"), (14, "3"), (151, "2")], &mut context);
+        assert_eq!(shared.orders.get_order_info(45).unwrap().order.total_quantity, 5.0);
+        // Cancelled: 2 remaining, though the report gives none left.
+        let (_, last) = report(&[(11, "45.1"), (41, "45.0"), (39, "4"), (150, "4"), (20, "0"), (198, "NONE"), (38, "3"), (14, "3"), (151, "0")], &mut context);
+        assert_eq!(last, Some((OrderStatus::Cancelled, 3, 2)));
+    }
+
+    // The reference 10.51, paper, regular hours 12/11/2026 (a fresh process
+    // after 30 fills of the day, three of them of orders cancelled since,
+    // gave no order at the connection and none to reqAllOpenOrders): an
+    // execution of the day given again at the logon makes no order of an
+    // order this session does not hold, and no open order of its entry; the
+    // execution itself is kept for reqExecutions. A negative API order id
+    // of a report is noted for the next profit taker (ibx#751).
+    #[test]
+    fn an_execution_given_again_at_the_logon_makes_no_order() {
+        let (mut ccp, mut context, shared) = ord_status_test_state();
+        context.market.try_register(265598).unwrap();
+        let replayed: std::collections::HashMap<u32, String> = [(11u32, "539615664.0"), (97, "Y"), (17, "0000e0d5.01"), (150, "1"), (20, "0"), (39, "1"),
+            (55, "AAPL"), (54, "2"), (38, "3"), (40, "2"), (44, "355.63"), (32, "1"), (31, "355.63"), (14, "2"), (6, "355.63"), (151, "1"),
+            (6008, "265598"), (6121, "-7"), (6119, "198"), (100, "NASDAQ"), (198, "NASDAQ")]
+            .into_iter().map(|(t, v)| (t, v.to_string())).collect();
+        ccp.handle_exec_report(&fix::field_view(&replayed), &mut context, &shared, &None, "");
+        assert!(context.order(539615664).is_none() && context.order(-7).is_none(), "no order of the session");
+        assert!(shared.orders.drain_order_updates().is_empty(), "no order callback");
+        assert!(shared.orders.drain_open_orders().is_empty(), "no open order");
+        assert_eq!(shared.orders.drain_untracked_executions().len(), 1, "the execution is kept");
+        assert_eq!(shared.orders.lowest_child_id(), -7);
+        // The same report without the mark is a live one: the order of
+        // another session, working.
+        let mut live = replayed.clone();
+        live.remove(&97);
+        live.insert(17, "0000e0d5.02".to_string());
+        ccp.handle_exec_report(&fix::field_view(&live), &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_open_orders().len(), 1);
     }
 
     // ibx#329: the parent id came from the OCA group, so every order of an

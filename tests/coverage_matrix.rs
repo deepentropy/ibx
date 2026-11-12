@@ -232,7 +232,7 @@ const NOT_DECODERS: &[&str] = &[
     "connection::new", "connection::new_raw", "connection::new_mem", "connection::set_mem_read_timeout",
     "connection::set_keys", "connection::seed_buffer", "connection::has_buffered_data", "connection::try_recv",
     "connection::shutdown", "connection::set_queued_writes", "connection::has_queued_output",
-    "connection::hold", "connection::release",
+    "connection::hold", "connection::holding", "connection::release",
     "connection::write_error", "connection::flush_queued", "connection::send_fix", "connection::send_fix_unsequenced",
     "connection::send_fixcomp", "connection::send_raw", "connection::buffered", "connection::inject_buf",
     "connection::mem_pair", "connection::set_read_timeout", "connection::set_nonblocking",

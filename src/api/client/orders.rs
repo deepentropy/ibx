@@ -193,7 +193,7 @@ impl EClient {
         self.core.carry_kept_refusal(&mut cmd, order);
         // A scale order's profit taker (ibx#751).
         if !order.what_if {
-            self.core.scale_profit_child(&mut cmd, contract, order, oid, instrument);
+            self.core.scale_profit_child(&mut cmd, contract, order, oid, instrument, self.shared.orders.lowest_child_id());
         }
         built.push(cmd);
         self.core.cache_contract(contract.con_id, contract.clone());

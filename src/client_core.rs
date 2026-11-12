@@ -1651,7 +1651,12 @@ pub struct ClientCore {
     /// Account updates were asked in this session (ibx#752).
     account_updates_asked: AtomicBool,
     /// The API order id of the next profit taker of a scale order, the
-    /// reference's own child order: negative, from -2 down (ibx#751).
+    /// reference's own child order: negative, from -2 down (ibx#751). The
+    /// reference goes on from its last one across its processes and days
+    /// (paper: -2 to -6 on 18/10/2026, -7 then -8 in two processes on
+    /// 12/11/2026); ibx, which keeps nothing between sessions, goes below
+    /// the lowest one the server's reports of the session gave, since the
+    /// server refuses an id whose order of the day traded ("Duplicate ID").
     next_scale_child: std::sync::atomic::AtomicI64,
     /// The exchange each conId's slot was registered with, and the slots
     /// of orders by conId on another exchange (ibx#743).
@@ -2314,7 +2319,16 @@ fn display_group_refusal(class: &str, cause: String) -> String {
 
 /// The reference's other names for order types ibx supports, and the name
 /// ibx uses (ibx#469, from the reference's order-type map).
-const ORDER_TYPE_ALIASES: [(&str, &str); 15] = [
+const ORDER_TYPE_ALIASES: [(&str, &str); 24] = [
+    ("VOLAT", "VOL"),
+    ("VOLATILITY", "VOL"),
+    ("PPV", "PEG PRM VOL"),
+    ("PEGPRIMVOL", "PEG PRM VOL"),
+    ("PDV", "PEG MID VOL"),
+    ("PEGMIDVOL", "PEG MID VOL"),
+    ("PMV", "PEG MKT VOL"),
+    ("PEGMKTVOL", "PEG MKT VOL"),
+    ("PEGSURFVOL", "PEG SURF VOL"),
     ("LIMIT", "LMT"),
     ("MARKET", "MKT"),
     ("STOP", "STP"),
@@ -2333,19 +2347,20 @@ const ORDER_TYPE_ALIASES: [(&str, &str); 15] = [
 ];
 
 /// The order types ibx sends, under the names ibx uses.
-const ORDER_TYPES_SENT: [&str; 33] = [
+const ORDER_TYPES_SENT: [&str; 37] = [
     "MKT", "LMT", "STP", "STP LMT", "TRAIL", "TRAIL LIMIT", "MOC", "LOC", "MIT", "LIT", "MTL", "MKT PRT", "STP PRT",
     "REL", "PEG MKT", "PEG MID", "PEG MIDPT", "MIDPX", "MIDPRICE", "SNAP MKT", "SNAP MID", "SNAP MIDPT",
     "SNAP PRIM", "BOX TOP", "PEG BENCH", "TRAIL MIT", "TRAIL LIT", "PEG BEST", "RPI", "PASSV REL", "VOL", "PEG STK",
-    "QUOTE",
+    "QUOTE", "PEG PRM VOL", "PEG MID VOL", "PEG MKT VOL", "PEG SURF VOL",
 ];
 
 /// Order types of the API's documentation that ibx does not send: placed,
 /// they fail in the call. Any other name is no order type: the reference
 /// refuses it with 321 (ibx#688; observed on paper, 17/10/2026).
-const ORDER_TYPES_NOT_SENT: [&str; 10] = [
+/// "PEG PRIM VOL" and "PEG SRF VOL", names of the documentation, are no
+/// order type of the reference: refused with 321 (ibx#673).
+const ORDER_TYPES_NOT_SENT: [&str; 6] = [
     "LMT + MKT", "REL + LMT", "REL + MKT", "VWAP", "TRAIL REL + MKT", "TRAIL LMT + MKT",
-    "PEG PRIM VOL", "PEG MID VOL", "PEG MKT VOL", "PEG SRF VOL",
 ];
 
 /// The time in force texts an order takes (GTX and NMIN are read as GTC
@@ -2536,6 +2551,26 @@ fn reported_scale_reset(order: &mut ApiOrder, reported: Option<&ApiOrder>) {
     }
 }
 
+/// A scale order's quantity, and its profit taker's quantity and price, as
+/// the server's reports give them (ibx#751; the reference 10.51, paper,
+/// regular hours 12/11/2026): the order's grows when it starts again after
+/// its profit taker filled (an order of 2 shown with 4, 3 and 5); the
+/// profit taker's is what the order filled and not sold yet (1, 2, 3), at
+/// the price the server moved it to.
+fn reported_scale_quantity(order: &mut ApiOrder, reported: Option<&ApiOrder>, profit_taker: bool) {
+    let Some(r) = reported else { return };
+    if order.scale_init_level_size == i32::MAX && !profit_taker {
+        return;
+    }
+    if r.total_quantity > 0.0 && r.total_quantity != f64::MAX && r.total_quantity != order.total_quantity {
+        order.total_quantity = r.total_quantity;
+        order.total_quantity_text.clear();
+    }
+    if profit_taker && r.lmt_price != 0.0 {
+        order.lmt_price = r.lmt_price;
+    }
+}
+
 /// usePriceMgmtAlgo as openOrder reports it (ibx#492): 0 or 1, never
 /// unset, as the reference; the value the server's report gives, else the
 /// caller's, unset read as 0.
@@ -2664,6 +2699,33 @@ pub fn preview_view(contract: &mut ApiContract, order: &mut ApiOrder, placed_exc
     // paper 12/10/2026).
     order.what_if_type = 1;
     placed_contract(contract, placed_exchange, shared);
+}
+
+/// A volatility order sent as a limit or a market order (on a contract
+/// that is no option) shows as such an order, with the server's price and
+/// none of the volatility fields, as the reference's openOrder (ibx#673;
+/// observed: an AAPL stock VOL order as LMT 345.95, paper, regular hours
+/// 16/10/2026).
+fn reported_volatility_order(order: &mut ApiOrder, reported: &ApiOrder) {
+    let volatility = ["VOL", "PEG PRM VOL", "PEG MID VOL", "PEG MKT VOL", "PEG SURF VOL"].iter()
+        .any(|t| order.order_type.eq_ignore_ascii_case(t))
+        || ClientCore::canonical_order_type(&order.order_type).is_some_and(|t| t == "VOL" || t.ends_with(" VOL"));
+    let as_type = reported.order_type.to_uppercase();
+    if !volatility || !matches!(as_type.as_str(), "LMT" | "MKT") {
+        return;
+    }
+    let plain = ApiOrder::default();
+    order.order_type = as_type;
+    order.lmt_price = if order.order_type == "LMT" { reported.lmt_price } else { plain.lmt_price };
+    order.aux_price = plain.aux_price;
+    order.volatility = plain.volatility;
+    order.volatility_type = plain.volatility_type;
+    order.reference_price_type = plain.reference_price_type;
+    order.continuous_update = plain.continuous_update;
+    order.delta_neutral_order_type = plain.delta_neutral_order_type;
+    order.delta_neutral_aux_price = plain.delta_neutral_aux_price;
+    order.stock_range_lower = plain.stock_range_lower;
+    order.stock_range_upper = plain.stock_range_upper;
 }
 
 fn reported_trail_limit(order: &mut ApiOrder, reported: &ApiOrder) {
@@ -4102,6 +4164,21 @@ impl ClientCore {
         for full in [known, reported].into_iter().flatten().filter(|f| f.con_id == contract.con_id) {
             if contract.local_symbol.is_empty() { contract.local_symbol = full.local_symbol; }
             if contract.trading_class.is_empty() { contract.trading_class = full.trading_class; }
+            // A contract given by its conId alone shows its symbol, type and
+            // currency too, as in the order's openOrder (the reference 10.51,
+            // paper, regular hours 12/11/2026: the fills of AAPL orders
+            // placed by conId).
+            if contract.symbol.is_empty() && contract.sec_type.is_empty() && !full.symbol.is_empty() {
+                contract.symbol = full.symbol;
+                contract.sec_type = full.sec_type;
+                if contract.currency.is_empty() { contract.currency = full.currency; }
+                if contract.last_trade_date_or_contract_month.is_empty() {
+                    contract.last_trade_date_or_contract_month = full.last_trade_date_or_contract_month;
+                }
+                if contract.strike == 0.0 { contract.strike = full.strike; }
+                if contract.right.is_empty() { contract.right = full.right; }
+                if contract.multiplier.is_empty() { contract.multiplier = full.multiplier; }
+            }
         }
         if !venue.is_empty() {
             contract.exchange = venue.to_string();
@@ -4157,6 +4234,12 @@ impl ClientCore {
         });
         if !contract.primary_exchange.is_empty() {
             contract.exchange = std::mem::take(&mut contract.primary_exchange);
+        } else if let Some((primary, class)) = shared.reference.position_venue(con_id) {
+            // A contract known from a trade report of the day: the row
+            // shows the primary exchange and trading class of the
+            // portfolio's lookup, not the venue of the trade.
+            if !primary.is_empty() { contract.exchange = primary; }
+            if contract.trading_class.is_empty() { contract.trading_class = class; }
         }
         contract
     }
@@ -5253,10 +5336,15 @@ impl ClientCore {
                     // order shows its parent's number (ibx#509).
                     if !i.order.oca_group.is_empty() { order.oca_group = i.order.oca_group.clone(); }
                     reported_trail_limit(&mut order, &i.order);
+                    reported_volatility_order(&mut order, &i.order);
                 }
                 reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
                 sent_compete_values(&mut order, info.as_ref().map(|i| &i.order));
                 reported_scale_reset(&mut order, info.as_ref().map(|i| &i.order));
+                // The profit taker this client made for a scale order: a
+                // child under a negative id.
+                let profit_taker = order_id < 0 && order.parent_id > 0;
+                reported_scale_quantity(&mut order, info.as_ref().map(|i| &i.order), profit_taker);
                 reported_auto_cancel_date(&mut order, info.as_ref().map(|i| &i.order));
                 // The order of this client carries its client id, as the
                 // reference's openOrder (ibx#486).
@@ -5819,6 +5907,8 @@ impl ClientCore {
                     }
                     reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
                     reported_scale_reset(&mut order, info.as_ref().map(|i| &i.order));
+                    let profit_taker = oid < 0 && order.parent_id > 0;
+                    reported_scale_quantity(&mut order, info.as_ref().map(|i| &i.order), profit_taker);
                     reported_auto_cancel_date(&mut order, info.as_ref().map(|i| &i.order));
                     let modified = self.modified_orders.lock().unwrap().contains(&oid);
                     session_order_fields(&mut order, &shared.reference.user_name(), modified);
@@ -7101,17 +7191,20 @@ impl ClientCore {
     pub fn refusal_before_sending_with(order: &ApiOrder, exchange: &str, contract_month: &str, account_pending: bool,
         form_10_40: bool, open_close_required: bool) -> Option<(i64, String)>
     {
-        Self::refusal_before_sending_fa(order, exchange, contract_month, account_pending, form_10_40, open_close_required, false)
+        Self::refusal_before_sending_fa(order, exchange, contract_month, account_pending, form_10_40, open_close_required, false, None)
     }
 
     /// `refusal_before_sending_with` on a session that may be an FA one
-    /// (ibx#507).
+    /// (ibx#507). `session`: the account and the logon's super user and
+    /// omnibus flags, for the short-sale rules the reference checks among
+    /// those of the volatility orders (ibx#673).
+    #[allow(clippy::too_many_arguments)]
     pub fn refusal_before_sending_fa(order: &ApiOrder, exchange: &str, contract_month: &str, account_pending: bool,
-        form_10_40: bool, open_close_required: bool, fa: bool) -> Option<(i64, String)>
+        form_10_40: bool, open_close_required: bool, fa: bool, session: Option<(&str, bool, bool)>) -> Option<(i64, String)>
     {
         Self::read_refusal(order)
             .or_else(|| Self::exchange_refusal(exchange))
-            .or_else(|| Self::order_rule_refusal(order, exchange, contract_month, account_pending, form_10_40, open_close_required, fa))
+            .or_else(|| Self::order_rule_refusal(order, exchange, contract_month, account_pending, form_10_40, open_close_required, fa, session))
             .or_else(|| Self::fractional_quantity_refusal(order))
             .or_else(|| Self::good_till_date_unreadable(order, form_10_40))
             .or_else(|| Self::good_after_time_unreadable(order, form_10_40))
@@ -7400,13 +7493,101 @@ impl ClientCore {
         self.held_orders.lock().unwrap().iter().find(|(id, ..)| *id == parent_id).map(|(_, c, o)| (c.clone(), o.clone()))
     }
 
-    /// A volatility order whose volatility type is not 1 or 2: refused at
-    /// once with 321, nothing sent, the id not kept (ibx#673; the reference
-    /// 10.51, paper, regular hours 16/10/2026: an AAPL call without a
-    /// volatility type, 321 within 2 ms, its cancel 10147).
-    fn volatility_type_refusal(order: &ApiOrder) -> Option<(i64, String)> {
-        (order.order_type.eq_ignore_ascii_case("VOL") && !matches!(order.volatility_type, 1 | 2)).then(|| (321,
-            "Error validating request.-'PlaceOrder(3)' : cause - Volatility Type must be 1 or 2 for VOL orders.  Do not set it for other order types.".to_string()))
+    /// The checks the reference makes on an order of the volatility types
+    /// (VOL and the four pegged to volatility) as it reads it, before its
+    /// contract is used, in its order (ibx#673): a short sale slot without
+    /// a hedge, GTC (10052), outside regular hours, the volatility, the
+    /// volatility type (observed: an AAPL call without a type, 321 within 2
+    /// ms, paper, regular hours 16/10/2026; the others not observed yet),
+    /// the pegged types' offset (the auxPrice), the stock range. Refused at
+    /// once, nothing sent, the id not kept.
+    fn volatility_type_refusal(order: &ApiOrder, session: Option<(&str, bool, bool)>) -> Option<(i64, String)> {
+        let kind = Self::canonical_order_type(&order.order_type).map_or_else(|| order.order_type.to_uppercase(), str::to_string);
+        let cause = |text: &str| Some((321, format!("Error validating request.-'PlaceOrder(3)' : cause - {text}")));
+        let set = |v: f64| v != f64::MAX;
+        // The hedge's type, as the reference reads it: a name it does not
+        // know is none.
+        let hedge = {
+            let name = order.delta_neutral_order_type.to_uppercase();
+            let name = Self::canonical_order_type(&name).map_or(name, str::to_string);
+            (ORDER_TYPES_SENT.contains(&name.as_str())).then_some(name)
+        };
+        let peg = match kind.as_str() {
+            "VOL" => None,
+            "PEG PRM VOL" | "PEG MID VOL" | "PEG MKT VOL" | "PEG SURF VOL" => Some(kind.as_str()),
+            _ => {
+                // Another type with a field of the volatility types (not
+                // observed yet).
+                let range = set(order.stock_range_lower) || set(order.stock_range_upper);
+                return if order.continuous_update || hedge.is_some() || set(order.delta_neutral_aux_price) {
+                    cause("Cannot set VOL attribute on non-VOL order.")
+                } else if range && !matches!(kind.as_str(), "PEG STK" | "PEG BENCH") {
+                    cause("Can only set stock range attribute on VOL or RELATIVE_TO_STOCK order.")
+                } else if set(order.volatility) {
+                    cause("VOL order requires non-negative floating point value for volatility.  Do not set it for other order types.")
+                } else if order.volatility_type != i32::MAX {
+                    cause("Volatility Type must be 1 or 2 for VOL orders.  Do not set it for other order types.")
+                } else if order.reference_price_type != i32::MAX {
+                    cause("Reference Price Type must be 1 or 2 for volatility order management.  Do not set it for non-VOL orders.")
+                } else {
+                    None
+                };
+            }
+        };
+        let no_hedge = hedge.is_none();
+        if no_hedge && order.short_sale_slot != 0 {
+            return cause("Short sale slot may be specified for delta hedge orders only.");
+        }
+        // The short-sale rules come next in the reference's order.
+        let short = ["SSHORT", "SSHRT", "SSHORTX", "SSHRTX"].iter().any(|a| order.action.eq_ignore_ascii_case(a));
+        if short && let Some((account, super_user, omnibus)) = session
+            && let Err(text) = crate::engine::hot_loop::order_builder::short_sale_check(&order.attrs(), account, super_user, omnibus)
+        {
+            return cause(text);
+        }
+        if order.tif.eq_ignore_ascii_case("GTC") {
+            return Some((10052, "Invalid time in force".to_string()));
+        }
+        if order.outside_rth {
+            return cause("The \"Outside Regular Trading Hours\" flag is not valid for this order.");
+        }
+        let volatility_needed = match peg {
+            None => !set(order.volatility) || order.volatility < 0.0,
+            Some("PEG MID VOL" | "PEG MKT VOL") if order.continuous_update => !set(order.volatility) || order.volatility <= 0.0,
+            _ => false,
+        };
+        if volatility_needed {
+            return cause("VOL order requires non-negative floating point value for volatility.  Do not set it for other order types.");
+        }
+        if !matches!(order.volatility_type, 1 | 2) {
+            return cause("Volatility Type must be 1 or 2 for VOL orders.  Do not set it for other order types.");
+        }
+        // The hedge: limit, market, relative, passive relative or RPI;
+        // only the relative ones take an aux price.
+        if let Some(hedge) = &hedge {
+            if !matches!(hedge.as_str(), "LMT" | "MKT" | "REL" | "PASSV REL" | "RPI") {
+                return cause("Delta hedge order type is not allowed.");
+            }
+            if matches!(hedge.as_str(), "LMT" | "MKT") && set(order.delta_neutral_aux_price) {
+                return cause("Delta hedge order type requires that no delta hedge aux price be specified.");
+            }
+        }
+        if let Some(peg) = peg && set(order.aux_price) {
+            let offset = order.aux_price;
+            let zero_refused = peg == "PEG MKT VOL";
+            let below_refused = matches!(peg, "PEG PRM VOL" | "PEG MKT VOL");
+            if (offset == 0.0 && zero_refused) || (offset < 0.0 && below_refused) {
+                return cause("Invalid offset value");
+            }
+        }
+        let (lower, upper) = (order.stock_range_lower, order.stock_range_upper);
+        if (set(lower) && lower < 0.0) || (set(upper) && upper < 0.0) {
+            return cause("Stock range attributes cannot be negative.");
+        }
+        if set(lower) && set(upper) && lower >= upper {
+            return cause("If both are set, lower stock range attribute must be less than high stock range attribute.");
+        }
+        None
     }
 
     /// The reading of a hedge order (ibx#614; the reference 10.51, paper,
@@ -7532,15 +7713,19 @@ impl ClientCore {
     /// a negative API order id, the opposite side, a limit at the order's
     /// price moved by the offset, the order's quantity and time in force,
     /// auto-reset as the order's (the reference 10.51, paper, 18/10/2026,
-    /// market closed: ids -2 to -6, each child's openOrder with its parent's
-    /// id). The child is tracked as an order of this client; its id goes
-    /// to the engine with the order.
-    pub fn scale_profit_child(&self, cmd: &mut ControlCommand, contract: &ApiContract, order: &ApiOrder, parent_id: OrderId, instrument: InstrumentId) {
+    /// market closed: each child's openOrder with its parent's id). The
+    /// child is tracked as an order of this client; its id goes to the
+    /// engine with the order. `shared_lowest_child`: the lowest negative
+    /// API order id the session's reports gave, 0 for none.
+    pub fn scale_profit_child(&self, cmd: &mut ControlCommand, contract: &ApiContract, order: &ApiOrder, parent_id: OrderId, instrument: InstrumentId,
+        shared_lowest_child: i64) {
         let ControlCommand::Order(req) = cmd else { return };
         if matches!(req, OrderRequest::Modify { .. }) { return; }
         let Some(scale) = req.new_order_attrs_mut().and_then(|a| a.scale.as_mut()) else { return };
         let Some(offset) = scale.profit_offset else { return };
-        let child_id = self.next_scale_child.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        let below = shared_lowest_child - 1;
+        let child_id = self.next_scale_child.fetch_min(below, std::sync::atomic::Ordering::Relaxed).min(below);
+        self.next_scale_child.store(child_id - 1, std::sync::atomic::Ordering::Relaxed);
         scale.profit_child_id = Some(child_id);
         let offset = offset as f64 / crate::types::PRICE_SCALE as f64;
         let buy = order.action.eq_ignore_ascii_case("BUY");
@@ -7751,8 +7936,9 @@ impl ClientCore {
     /// intent of its orders; the reference 10.51's rule takes it from an
     /// institutional or omnibus logon and some other account kinds, ibx
     /// from the first two (ibx#688).
+    #[allow(clippy::too_many_arguments)]
     fn order_rule_refusal(order: &ApiOrder, exchange: &str, contract_month: &str, account_pending: bool, form_10_40: bool,
-        open_close_required: bool, fa: bool) -> Option<(i64, String)>
+        open_close_required: bool, fa: bool, session: Option<(&str, bool, bool)>) -> Option<(i64, String)>
     {
         let refuse = |cause: &str| Some((321, format!("Error validating request.-'PlaceOrder(3)' : cause - {}", cause)));
         let order_type = order.order_type.to_uppercase();
@@ -7881,6 +8067,11 @@ impl ClientCore {
         // last, 4 bid/ask, 7 last or bid/ask, 8 midpoint.
         if !matches!(order.trigger_method, 0..=4 | 7 | 8) {
             return refuse("Invalid trigger method");
+        }
+        // The fields of the volatility orders, after the trigger method, as
+        // the reference (ibx#673).
+        if let Some(refusal) = Self::volatility_type_refusal(order, session) {
+            return Some(refusal);
         }
         // An auxPrice of 0 is not refused here: the reference 10.51 sends
         // such a stop, touched or RPI order and the server refuses or
@@ -8186,13 +8377,13 @@ impl ClientCore {
     ) -> Option<(i64, String)> {
         let no_single = shared.reference.logon_features().split(',').any(|f| f == ATTACHED_NOT_IN_ONE_REQUEST_FEATURE);
         Self::attached_orders_read_refusal(order, no_single)
-            .or_else(|| Self::volatility_type_refusal(order))
             .or_else(|| self.hedge_read_refusal(order_id, sec_type, order, shared))
             .or_else(|| Self::sell_long_refusal(order))
             .or_else(|| {
                 let (super_user, omnibus) = shared.reference.short_sale_flags();
                 Self::refusal_before_sending_fa(order, exchange, contract_month, account_pending,
-                    shared.reference.form_10_40(), super_user || omnibus, shared.reference.fa_session())
+                    shared.reference.form_10_40(), super_user || omnibus, shared.reference.fa_session(),
+                    Some((account, super_user, omnibus)))
             })
             .or_else(|| Self::fa_method_refusal(order, &shared.reference))
             .or_else(|| self.quote_limit_refusal(order_id, order))
@@ -8596,7 +8787,7 @@ impl ClientCore {
             "SNAP PRIM" => OrderKind::SnapPri { offset: scale(aux_or_zero(order.aux_price)) },
             "PEG BENCH" => Self::peg_bench_kind(order),
             "TRAIL MIT" | "TRAIL LIT" | "PEG BEST" | "RPI" | "PASSV REL" => Self::new_type_kind(order),
-            "VOL" => Self::volatility_kind(order),
+            "VOL" | "PEG PRM VOL" | "PEG MID VOL" | "PEG MKT VOL" | "PEG SURF VOL" => Self::volatility_kind(order),
             // Refused by the engine before anything is sent (ibx#745).
             "PEG STK" => OrderKind::PegStk { delta: order.delta },
             "QUOTE" => OrderKind::Quote,
@@ -8608,7 +8799,17 @@ impl ClientCore {
     /// other values refused at reading).
     fn volatility_kind(order: &ApiOrder) -> OrderKind {
         let volatility = if order.volatility == f64::MAX { 0 } else { price_or_zero(order.volatility) };
-        OrderKind::Volatility { volatility, vol_type: u8::try_from(order.volatility_type).unwrap_or(0) }
+        let peg = match Self::canonical_order_type(&order.order_type).map_or_else(|| order.order_type.to_uppercase(), str::to_string).as_str() {
+            "PEG PRM VOL" => b'P',
+            "PEG MID VOL" => b'D',
+            "PEG MKT VOL" => b'M',
+            "PEG SURF VOL" => b'S',
+            _ => 0,
+        };
+        // The client's limit price is taken by the pegged types only; VOL
+        // ignores it, as the reference (ibx#673).
+        let price = if peg == 0 { 0 } else { price_or_zero(aux_or_zero(order.lmt_price)) };
+        OrderKind::Volatility { volatility, vol_type: u8::try_from(order.volatility_type).unwrap_or(0), peg, price }
     }
 
     /// A TRAIL MIT, TRAIL LIT, PEG BEST, RPI or PASSV REL order from the
@@ -9012,7 +9213,7 @@ impl ClientCore {
             "PEG BENCH" => ex(Self::peg_bench_kind(order)),
             // One encoder for each of these types too (ibx#469).
             "TRAIL MIT" | "TRAIL LIT" | "PEG BEST" | "RPI" | "PASSV REL" => ex(Self::new_type_kind(order)),
-            "VOL" => ex(Self::volatility_kind(order)),
+            "VOL" | "PEG PRM VOL" | "PEG MID VOL" | "PEG MKT VOL" | "PEG SURF VOL" => ex(Self::volatility_kind(order)),
             // Refused by the engine before anything is sent (ibx#745).
             "PEG STK" => ex(OrderKind::PegStk { delta: order.delta }),
             "QUOTE" => ex(OrderKind::Quote),
@@ -10229,11 +10430,66 @@ mod tests {
         let vol = |vol_type: i32| ApiOrder { order_type: "VOL".into(), volatility: 30.0, volatility_type: vol_type, ..lmt(0.0) };
         let text = "Error validating request.-'PlaceOrder(3)' : cause - Volatility Type must be 1 or 2 for VOL orders.  Do not set it for other order types.";
         for bad in [0, 3, i32::MAX] {
-            assert_eq!(ClientCore::volatility_type_refusal(&vol(bad)), Some((321, text.to_string())), "{bad}");
+            assert_eq!(ClientCore::volatility_type_refusal(&vol(bad), None), Some((321, text.to_string())), "{bad}");
         }
-        assert_eq!(ClientCore::volatility_type_refusal(&vol(2)), None);
-        assert_eq!(ClientCore::volatility_type_refusal(&lmt(1.0)), None, "another type");
-        assert!(matches!(ClientCore::order_kind(&vol(1)), Ok(OrderKind::Volatility { vol_type: 1, .. })));
+        assert_eq!(ClientCore::volatility_type_refusal(&vol(2), None), None);
+        assert_eq!(ClientCore::volatility_type_refusal(&lmt(1.0), None), None, "another type");
+        assert!(matches!(ClientCore::order_kind(&vol(1)), Ok(OrderKind::Volatility { vol_type: 1, peg: 0, price: 0, .. })));
+
+        // The reference's other checks of the volatility types, in its
+        // order (ibx#673; not observed yet).
+        let cause = |t: &str| Some((321, format!("Error validating request.-'PlaceOrder(3)' : cause - {t}")));
+        let with = |f: &dyn Fn(&mut ApiOrder)| { let mut o = vol(2); f(&mut o); ClientCore::volatility_type_refusal(&o, None) };
+        assert_eq!(with(&|o| o.short_sale_slot = 1), cause("Short sale slot may be specified for delta hedge orders only."));
+        assert_eq!(with(&|o| o.tif = "GTC".into()), Some((10052, "Invalid time in force".to_string())));
+        assert_eq!(with(&|o| o.outside_rth = true), cause("The \"Outside Regular Trading Hours\" flag is not valid for this order."));
+        let no_vol = cause("VOL order requires non-negative floating point value for volatility.  Do not set it for other order types.");
+        assert_eq!(with(&|o| o.volatility = f64::MAX), no_vol);
+        assert_eq!(with(&|o| o.volatility = -1.0), no_vol);
+        assert_eq!(with(&|o| o.volatility = 0.0), None, "0 passes");
+        assert_eq!(with(&|o| o.stock_range_lower = -1.0), cause("Stock range attributes cannot be negative."));
+        assert_eq!(with(&|o| { o.stock_range_lower = 5.0; o.stock_range_upper = 5.0; }),
+            cause("If both are set, lower stock range attribute must be less than high stock range attribute."));
+        // The pegged types: names, offsets.
+        let peg = |t: &str, offset: f64| ApiOrder { order_type: t.into(), aux_price: offset, ..vol(2) };
+        let bad_offset = cause("Invalid offset value");
+        assert_eq!(ClientCore::volatility_type_refusal(&peg("PEG PRM VOL", -1.0), None), bad_offset);
+        assert_eq!(ClientCore::volatility_type_refusal(&peg("PPV", 0.0), None), None);
+        assert_eq!(ClientCore::volatility_type_refusal(&peg("PEG MKT VOL", 0.0), None), bad_offset);
+        assert_eq!(ClientCore::volatility_type_refusal(&peg("PMV", -1.0), None), bad_offset);
+        assert_eq!(ClientCore::volatility_type_refusal(&peg("PEG MID VOL", -1.0), None), None);
+        assert_eq!(ClientCore::volatility_type_refusal(&peg("PEG SURF VOL", -1.0), None), None);
+        assert_eq!(ClientCore::volatility_type_refusal(&ApiOrder { volatility: f64::MAX, ..peg("PEG MID VOL", 1.0) }, None), None, "no volatility needed");
+        assert_eq!(ClientCore::volatility_type_refusal(&ApiOrder { volatility: 0.0, continuous_update: true, ..peg("PEG MKT VOL", 1.0) }, None), no_vol);
+        let priced = ApiOrder { lmt_price: 2.5, ..peg("PEGSURFVOL", 1.0) };
+        assert!(matches!(ClientCore::order_kind(&ClientCore::with_canonical_order_type(&priced, false)),
+            Ok(OrderKind::Volatility { peg: b'S', price, .. }) if price == crate::api::types::price_from_f64(2.5)));
+        let plain = ApiOrder { lmt_price: 2.5, ..vol(2) };
+        assert!(matches!(ClientCore::order_kind(&plain), Ok(OrderKind::Volatility { peg: 0, price: 0, .. })), "VOL ignores the limit price");
+        // The hedge's type.
+        assert_eq!(with(&|o| o.delta_neutral_order_type = "STP".into()), cause("Delta hedge order type is not allowed."));
+        assert_eq!(with(&|o| { o.delta_neutral_order_type = "LMT".into(); o.delta_neutral_aux_price = 1.0; }),
+            cause("Delta hedge order type requires that no delta hedge aux price be specified."));
+        assert_eq!(with(&|o| { o.delta_neutral_order_type = "REL".into(); o.delta_neutral_aux_price = 0.05; }), None);
+        assert_eq!(with(&|o| o.delta_neutral_order_type = "NOPE".into()), None, "a name that is no type is none");
+        // The fields of the volatility types on another type.
+        let other = |f: &dyn Fn(&mut ApiOrder)| { let mut o = lmt(1.0); f(&mut o); ClientCore::volatility_type_refusal(&o, None) };
+        assert_eq!(other(&|o| o.continuous_update = true), cause("Cannot set VOL attribute on non-VOL order."));
+        assert_eq!(other(&|o| o.stock_range_lower = 1.0), cause("Can only set stock range attribute on VOL or RELATIVE_TO_STOCK order."));
+        assert_eq!(other(&|o| o.volatility = 30.0), no_vol);
+        assert_eq!(other(&|o| o.volatility_type = 2), cause("Volatility Type must be 1 or 2 for VOL orders.  Do not set it for other order types."));
+        assert_eq!(other(&|o| o.reference_price_type = 1),
+            cause("Reference Price Type must be 1 or 2 for volatility order management.  Do not set it for non-VOL orders."));
+        let mut peg_stk = lmt(1.0);
+        peg_stk.order_type = "PEG STK".into();
+        peg_stk.stock_range_lower = 1.0;
+        assert_eq!(ClientCore::volatility_type_refusal(&peg_stk, None), None, "a pegged-to-stock order takes a stock range");
+        // A short sale's slot rules come between the hedge's slot and the
+        // time in force, as the reference.
+        let short = ApiOrder { action: "SSHORT".into(), short_sale_slot: 3, delta_neutral_order_type: "LMT".into(), tif: "GTC".into(), ..vol(2) };
+        assert_eq!(ClientCore::volatility_type_refusal(&short, Some(("U123", true, false))),
+            cause("Short sale slot value must be 1 (broker holds shares) or 2 (delivered from elsewhere)"));
+        assert_eq!(ClientCore::volatility_type_refusal(&short, None), Some((10052, "Invalid time in force".to_string())));
     }
 
     // ibx#614 (the reference 10.51, paper, 16/10/2026): the reading of a
@@ -11412,6 +11668,87 @@ mod session_tests {
         // A combo is shown by its own rule.
         let bag = ApiContract { sec_type: "BAG".into(), exchange: "SMART".into(), ..Default::default() };
         assert_eq!(core.execution_contract(&shared, 7, bag, "ARCA").exchange, "SMART");
+    }
+
+    // The reference 10.51, paper, regular hours 12/11/2026 (the fills of
+    // AAPL orders placed by conId alone): the execution's contract shows
+    // its symbol, type and currency too.
+    #[test]
+    fn the_contract_of_an_execution_of_an_order_placed_by_con_id() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        shared.reference.cache_contract(265598, ApiContract {
+            con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+            currency: "USD".into(), local_symbol: "AAPL".into(), trading_class: "NMS".into(), ..Default::default()
+        });
+        let placed = ApiContract { con_id: 265598, exchange: "SMART".into(), ..Default::default() };
+        let shown = core.execution_contract(&shared, 7, placed, "ARCA");
+        assert_eq!((shown.symbol.as_str(), shown.sec_type.as_str(), shown.currency.as_str(), shown.local_symbol.as_str(),
+            shown.trading_class.as_str(), shown.exchange.as_str()), ("AAPL", "STK", "USD", "AAPL", "NMS", "ARCA"));
+    }
+
+    // The reference 10.51, paper, regular hours 12/11/2026 (SPY, sold on
+    // another venue earlier that day, in a position row of a later process:
+    // ARCA and its trading class): a contract known from a trade report of
+    // the day shows, in its position row, the primary exchange and trading
+    // class of the portfolio's lookup, not the venue of the trade.
+    #[test]
+    fn the_position_row_of_a_contract_known_from_a_trade_report() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        shared.reference.cache_contract(756733, ApiContract {
+            con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "BYX".into(),
+            currency: "USD".into(), local_symbol: "SPY".into(), ..Default::default()
+        });
+        let before = core.position_contract(756733, &shared);
+        assert_eq!((before.exchange.as_str(), before.trading_class.as_str()), ("BYX", ""));
+        shared.reference.note_position_venue(756733, "ARCA", "SPY");
+        let row = core.position_contract(756733, &shared);
+        assert_eq!((row.exchange.as_str(), row.trading_class.as_str(), row.primary_exchange.as_str()), ("ARCA", "SPY", ""));
+    }
+
+    // ibx#751 (the reference 10.51, paper, regular hours 12/11/2026): a
+    // scale order's openOrder shows the quantity the server's reports give
+    // (an order of 2 with 4, 3 and 5), its profit taker's the quantity and
+    // the price the server moved it to; any other order keeps its own.
+    #[test]
+    fn a_scale_order_and_its_profit_taker_show_the_servers_quantity_and_price() {
+        let reported = ApiOrder { total_quantity: 4.0, lmt_price: 355.63, ..Default::default() };
+        let mut parent = ApiOrder { total_quantity: 2.0, total_quantity_text: "2".into(), lmt_price: 355.61, scale_init_level_size: 1, ..Default::default() };
+        reported_scale_quantity(&mut parent, Some(&reported), false);
+        assert_eq!((parent.total_quantity, parent.total_quantity_text.as_str(), parent.lmt_price), (4.0, "", 355.61));
+        let mut child = ApiOrder { total_quantity: 2.0, lmt_price: 355.65, parent_id: 7, ..Default::default() };
+        reported_scale_quantity(&mut child, Some(&reported), true);
+        assert_eq!((child.total_quantity, child.lmt_price), (4.0, 355.63));
+        let mut plain = ApiOrder { total_quantity: 2.0, total_quantity_text: "2".into(), lmt_price: 355.61, ..Default::default() };
+        reported_scale_quantity(&mut plain, Some(&reported), false);
+        assert_eq!((plain.total_quantity, plain.total_quantity_text.as_str(), plain.lmt_price), (2.0, "2", 355.61));
+    }
+
+    // ibx#751 (the reference 10.51, paper: -2 to -6 on 18/10/2026, -7 then
+    // -8 in two processes on 12/11/2026; the server refused "Duplicate ID"
+    // a second -2 of the day, the first having traded): a profit taker's
+    // id starts at -2 and goes down, below the lowest negative id the
+    // server's reports of the session gave.
+    #[test]
+    fn a_profit_takers_id_goes_below_the_ids_of_the_day() {
+        let core = ClientCore::new();
+        let contract = ApiContract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+        let order = ApiOrder { action: "BUY".into(), order_type: "LMT".into(), total_quantity: 2.0, lmt_price: 355.63, tif: "DAY".into(),
+            scale_init_level_size: 1, scale_subs_level_size: 1, scale_price_increment: 0.02, scale_profit_offset: 0.02, ..Default::default() };
+        let child_of = |parent: OrderId, lowest: i64| {
+            let mut cmd = ClientCore::build_order_request(&order, parent, 0).unwrap();
+            core.scale_profit_child(&mut cmd, &contract, &order, parent, 0, lowest);
+            let ControlCommand::Order(mut req) = cmd else { panic!() };
+            req.new_order_attrs_mut().and_then(|a| a.scale.as_ref()).and_then(|s| s.profit_child_id)
+        };
+        assert_eq!(child_of(11, 0), Some(-2));
+        assert_eq!(child_of(12, 0), Some(-3));
+        assert_eq!(child_of(13, -8), Some(-9), "below the lowest id of the day");
+        assert_eq!(child_of(14, -8), Some(-10));
+        // An order without a profit offset has no child and takes no id.
+        let plain = ApiOrder { scale_profit_offset: f64::MAX, ..order.clone() };
+        let mut cmd = ClientCore::build_order_request(&plain, 15, 0).unwrap();
+        core.scale_profit_child(&mut cmd, &contract, &plain, 15, 0, -8);
+        assert_eq!(child_of(16, -8), Some(-11));
     }
 
 

@@ -544,6 +544,11 @@ impl Connection {
         self.held = true;
     }
 
+    /// Whether frames are being kept for one write ([`Self::hold`]).
+    pub fn holding(&self) -> bool {
+        self.held
+    }
+
     /// Write the frames kept since [`Self::hold`], in one write.
     pub fn release(&mut self) -> io::Result<()> {
         if !std::mem::take(&mut self.held) {

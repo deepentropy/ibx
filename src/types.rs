@@ -950,9 +950,13 @@ pub enum OrderKind {
     /// observed yet: no contract of the test account lists the type.
     PassvRel { price: Price, offset: Price },
     /// Volatility order (VOL, ibx#673): the volatility in percent and its
-    /// type (1 daily, 2 annual). Checked for the option's permission; its
-    /// message is not written yet.
-    Volatility { volatility: Price, vol_type: u8 },
+    /// type (1 daily, 2 annual). `peg`: 0 for VOL, else the pegged type
+    /// (b'P' PEG PRM VOL, b'D' PEG MID VOL, b'M' PEG MKT VOL, b'S' PEG SURF
+    /// VOL), whose limit price is `price` (0 when unset). On a contract that
+    /// is no option it goes out as a limit order priced by the account's
+    /// preset (a fund's as a market order); on an option it is checked for
+    /// the permission, its message is not written yet.
+    Volatility { volatility: Price, vol_type: u8, peg: u8, price: Price },
     /// Pegged to stock (PEG STK, ibx#745): refused before anything is
     /// sent, with 387 on a stock as the reference; its message is not
     /// written yet. `delta`: the order's delta as given (`f64::MAX` unset).
