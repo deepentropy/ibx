@@ -1483,50 +1483,14 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         do_srp(&mut tls, &auth.username, &auth.password)?;
     }
 
-    // Post-auth: wait for NS_CONNECT_RESPONSE → NEWCOMMPORTTYPE → NS_FIX_START.
-    // Per-iteration read timeout aligned with the initial-connect path.
+    // Post-auth: wait for NS_CONNECT_RESPONSE → NEWCOMMPORTTYPE → NS_FIX_START,
+    // up to the reconnect budget: the server answers a reconnect only once
+    // it has let the lost session go, often past 10 s (ibx#759).
     tls.tcp().set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FIX_LOGON)))?;
-    let mut fix_ready = false;
-    for _ in 0..20 {
-        let (payload, _) = match ns::ns_recv(&mut tls) {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("CCP reconnect post-auth recv: {}", e);
-                break;
-            }
-        };
-        let text = String::from_utf8_lossy(&payload);
-        let parts: Vec<&str> = text.split(';').collect();
-        let raw_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-        let inner = if raw_type == ns::NS_SECURE_MESSAGE {
-            let ct = B64.decode(parts.get(2).copied().unwrap_or(""))
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-            channel.decrypt(&ct)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        } else {
-            payload
-        };
-
-        let inner_text = String::from_utf8_lossy(&inner);
-        let inner_parts: Vec<&str> = inner_text.split(';').collect();
-        let msg_type: u32 = inner_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-
-        if msg_type == ns::NS_CONNECT_RESPONSE {
-            let newcomm = new_comm_port(auth_start.version, token_hash);
-            session::send_ns(&mut tls, &mut channel, !auth.use_ssl && !refused, newcomm.as_bytes())?;
-        } else if msg_type == ns::NS_FIX_START {
-            fix_ready = true;
-            break;
-        } else if msg_type == ns::NS_ERROR_RESPONSE || msg_type == ns::NS_SECURE_ERROR {
-            return Err(session::ns_error(msg_type, &inner_parts[2..]));
-        }
-        // Ignore 530 keepalives and other types
-    }
+    let newcomm = new_comm_port(auth_start.version, token_hash);
+    let deadline = std::time::Instant::now() + Duration::from_secs_f64(TIMEOUT_RECONNECT_DATA_START);
+    reconnect_data_start(&mut tls, &mut channel, !auth.use_ssl && !refused, newcomm.as_bytes(), deadline)?;
     tls.tcp().set_read_timeout(None)?;
-    if !fix_ready {
-        return Err(io::Error::new(io::ErrorKind::Other, "CCP reconnect: no FIX_START after auth"));
-    }
 
     // Logon: a reconnect of the same session carries its epoch (ibx#422).
     let logon_msg = build_ccp_reconnect_logon(&auth.hw_info, &auth.encoded, CCP_HEARTBEAT, 1, &auth.session_epoch);
@@ -1572,6 +1536,63 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     Ok(CcpReconnect { conn, session_epoch, ns_secure_refused: refused, logon })
 }
 
+
+/// The end of a reconnect's auth: the server's connect response is
+/// answered with `newcomm` (the port type change), then its data start
+/// ends the wait. A read that times out (`WouldBlock` on macOS, `TimedOut`
+/// elsewhere) is read again until `deadline`: the server sends nothing
+/// while it lets the lost session go, 7 to 12 s on the reference's
+/// recorded reconnects (ibx#759). An error frame, a closed socket or the
+/// deadline ends the attempt.
+fn reconnect_data_start<S: Read + Write>(
+    stream: &mut S,
+    channel: &mut SecureChannel,
+    secure: bool,
+    newcomm: &[u8],
+    deadline: std::time::Instant,
+) -> io::Result<()> {
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "CCP reconnect: no FIX_START after auth"));
+        }
+        let (payload, _) = match ns::ns_recv(stream) {
+            Ok(r) => r,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+                log::info!("CCP reconnect: no server start yet, waiting ({})", e);
+                continue;
+            }
+            Err(e) => {
+                log::warn!("CCP reconnect post-auth recv: {}", e);
+                return Err(e);
+            }
+        };
+        let text = String::from_utf8_lossy(&payload);
+        let parts: Vec<&str> = text.split(';').collect();
+        let raw_type: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+        let inner = if raw_type == ns::NS_SECURE_MESSAGE {
+            let ct = B64.decode(parts.get(2).copied().unwrap_or(""))
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            channel.decrypt(&ct)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        } else {
+            payload
+        };
+
+        let inner_text = String::from_utf8_lossy(&inner);
+        let inner_parts: Vec<&str> = inner_text.split(';').collect();
+        let msg_type: u32 = inner_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+        if msg_type == ns::NS_CONNECT_RESPONSE {
+            session::send_ns(stream, channel, secure, newcomm)?;
+        } else if msg_type == ns::NS_FIX_START {
+            return Ok(());
+        } else if msg_type == ns::NS_ERROR_RESPONSE || msg_type == ns::NS_SECURE_ERROR {
+            return Err(session::ns_error(msg_type, inner_parts.get(2..).unwrap_or(&[])));
+        }
+        // Keepalives and other types are passed over.
+    }
+}
 
 /// Start of a login on the auth connection, then the auth start is read
 /// (ibx#423). In the reference's SSL mode (jts.ini `[Logon] UseSSL=true`,
@@ -3114,6 +3135,74 @@ mod tests {
     impl Write for AuthWire {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.output.extend_from_slice(buf); Ok(buf.len()) }
         fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    /// An auth connection whose reads time out `stalls` times (with
+    /// `kind`) before its frames come, as a server that waits before it
+    /// answers a reconnect (ibx#759).
+    struct StalledWire {
+        wire: AuthWire,
+        stalls: usize,
+        kind: io::ErrorKind,
+    }
+
+    impl Read for StalledWire {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.stalls > 0 {
+                self.stalls -= 1;
+                return Err(io::Error::new(self.kind, "Resource temporarily unavailable"));
+            }
+            self.wire.read(buf)
+        }
+    }
+
+    impl Write for StalledWire {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> { self.wire.write(buf) }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    fn far() -> std::time::Instant { std::time::Instant::now() + Duration::from_secs(60) }
+
+    // ibx#759: the server sends nothing for a while after a reconnect's
+    // auth (12 s on a recorded reconnect of the reference). Reads that time
+    // out, as WouldBlock (macOS) or TimedOut (Windows, Linux), are read
+    // again; the connect response is answered and the data start ends the
+    // wait.
+    #[test]
+    fn reconnect_waits_through_timed_out_reads_for_the_data_start() {
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            let mut wire = StalledWire {
+                wire: AuthWire::new(&["50;530;", "50;523;", "50;525;"]),
+                stalls: 3,
+                kind,
+            };
+            reconnect_data_start(&mut wire, &mut SecureChannel::new(), false, b"50;526;0;", far()).unwrap();
+            assert_eq!(wire.wire.sent(), vec!["50;526;0;".to_string()], "{:?}", kind);
+            assert_eq!(wire.stalls, 0);
+        }
+    }
+
+    // ibx#759: past the deadline the attempt ends, so the next one starts.
+    #[test]
+    fn reconnect_data_start_ends_at_its_deadline() {
+        let mut wire = StalledWire { wire: AuthWire::new(&[]), stalls: usize::MAX, kind: io::ErrorKind::WouldBlock };
+        let err = reconnect_data_start(&mut wire, &mut SecureChannel::new(), false, b"50;526;0;",
+            std::time::Instant::now()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(wire.wire.sent().is_empty());
+    }
+
+    // ibx#759: a closed socket or an error frame ends the attempt at once.
+    #[test]
+    fn reconnect_data_start_ends_on_close_or_error_frame() {
+        let mut wire = AuthWire::new(&["50;523;"]);
+        let err = reconnect_data_start(&mut wire, &mut SecureChannel::new(), false, b"50;526;0;", far()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(wire.sent(), vec!["50;526;0;".to_string()]);
+
+        let mut wire = AuthWire::new(&["50;519;refused;"]);
+        assert!(reconnect_data_start(&mut wire, &mut SecureChannel::new(), false, b"50;526;0;", far()).is_err());
+        assert!(wire.sent().is_empty());
     }
 
     /// The connect request of the reference's login of 02/10/2026, masked.

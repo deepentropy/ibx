@@ -84,6 +84,11 @@ pub const FIX_RECV_BUF: usize = 4096;
 /// Timeouts (seconds).
 pub const TIMEOUT_FIX_LOGON: f64 = 10.0;
 pub const TIMEOUT_FIX_READ: f64 = 30.0;
+/// Budget for the server's start of a reconnected auth session, after the
+/// auth. The server answers only once it has let the lost session go: 7.3 s
+/// and 12.1 s on two recorded reconnects of the reference, 8 s on ibx's
+/// (ibx#759). A single 10 s read failed every reconnect slower than that.
+pub const TIMEOUT_RECONNECT_DATA_START: f64 = 60.0;
 /// Overall wall-clock budget for a farm logon exchange (key exchange excluded).
 /// Raised from 5 s: on a high-latency regional gateway a single response
 /// segment can lag past 5 s, and the read must retry against this deadline
