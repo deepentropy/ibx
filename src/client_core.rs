@@ -1658,6 +1658,10 @@ pub struct ClientCore {
     /// the lowest one the server's reports of the session gave, since the
     /// server refuses an id whose order of the day traded ("Duplicate ID").
     next_scale_child: std::sync::atomic::AtomicI64,
+    /// The scale orders whose profit taker the server refused: their later
+    /// openOrders show no profit offset (ibx#751; the reference 10.51,
+    /// paper, 18/10/2026: a randomized scale order without auto-reset).
+    scale_profit_refused: Mutex<HashSet<OrderId>>,
     /// The exchange each conId's slot was registered with, and the slots
     /// of orders by conId on another exchange (ibx#743).
     slot_exchanges: Mutex<HashMap<InstrumentId, String>>,
@@ -2764,6 +2768,7 @@ impl ClientCore {
             con_id_to_instrument: Mutex::new(HashMap::new()),
             account_updates_asked: AtomicBool::new(false),
             next_scale_child: std::sync::atomic::AtomicI64::new(-2),
+            scale_profit_refused: Mutex::new(HashSet::new()),
             slot_exchanges: Mutex::new(HashMap::new()),
             order_slots: Mutex::new(HashMap::new()),
             last_quotes: Mutex::new(HashMap::new()),
@@ -5345,6 +5350,15 @@ impl ClientCore {
                 // child under a negative id.
                 let profit_taker = order_id < 0 && order.parent_id > 0;
                 reported_scale_quantity(&mut order, info.as_ref().map(|i| &i.order), profit_taker);
+                // A profit taker the server refused: its order shows no
+                // profit offset from then on.
+                if profit_taker && status == "Inactive" {
+                    self.scale_profit_refused.lock().unwrap().insert(order.parent_id);
+                } else if order.scale_init_level_size != i32::MAX && order.scale_profit_offset != f64::MAX
+                    && self.scale_profit_refused.lock().unwrap().contains(&order_id)
+                {
+                    order.scale_profit_offset = f64::MAX;
+                }
                 reported_auto_cancel_date(&mut order, info.as_ref().map(|i| &i.order));
                 // The order of this client carries its client id, as the
                 // reference's openOrder (ibx#486).
@@ -5909,6 +5923,11 @@ impl ClientCore {
                     reported_scale_reset(&mut order, info.as_ref().map(|i| &i.order));
                     let profit_taker = oid < 0 && order.parent_id > 0;
                     reported_scale_quantity(&mut order, info.as_ref().map(|i| &i.order), profit_taker);
+                    if order.scale_init_level_size != i32::MAX && order.scale_profit_offset != f64::MAX
+                        && self.scale_profit_refused.lock().unwrap().contains(&oid)
+                    {
+                        order.scale_profit_offset = f64::MAX;
+                    }
                     reported_auto_cancel_date(&mut order, info.as_ref().map(|i| &i.order));
                     let modified = self.modified_orders.lock().unwrap().contains(&oid);
                     session_order_fields(&mut order, &shared.reference.user_name(), modified);
@@ -11721,6 +11740,25 @@ mod session_tests {
         let mut plain = ApiOrder { total_quantity: 2.0, total_quantity_text: "2".into(), lmt_price: 355.61, ..Default::default() };
         reported_scale_quantity(&mut plain, Some(&reported), false);
         assert_eq!((plain.total_quantity, plain.total_quantity_text.as_str(), plain.lmt_price), (2.0, "2", 355.61));
+    }
+
+    // ibx#751 (the reference 10.51, paper, 18/10/2026, market closed: a
+    // randomized scale order without auto-reset, whose profit taker the
+    // server refuses): once its profit taker is Inactive, the order's
+    // openOrder shows no profit offset.
+    #[test]
+    fn a_scale_order_whose_profit_taker_is_refused_shows_no_profit_offset() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        let contract = ApiContract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+        let order = ApiOrder { action: "BUY".into(), order_type: "LMT".into(), total_quantity: 2.0, lmt_price: 50.0, tif: "DAY".into(),
+            scale_init_level_size: 1, scale_subs_level_size: 1, scale_price_increment: 0.1, scale_profit_offset: 0.25, ..Default::default() };
+        let mut cmd = ClientCore::build_order_request(&order, 21, 0).unwrap();
+        core.scale_profit_child(&mut cmd, &contract, &order, 21, 0, 0);
+        core.track_order(21, contract, order, 0);
+        let offset = |core: &ClientCore| core.order_view(21, &shared, "PreSubmitted").unwrap().order.scale_profit_offset;
+        assert_eq!(offset(&core), 0.25);
+        assert!(core.order_view(-2, &shared, "Inactive").is_some(), "the profit taker's own view");
+        assert_eq!(offset(&core), f64::MAX);
     }
 
     // ibx#751 (the reference 10.51, paper: -2 to -6 on 18/10/2026, -7 then
