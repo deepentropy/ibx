@@ -374,9 +374,11 @@ pub fn decode(code: i32, payload: &[u8], rec: &mut GenericRecord, ctx: DecodeCtx
         // entry's acknowledgement), sizes (4, 5) and exchanges (16, 17; a
         // set of the contract's exchanges). For the bid then the ask, the
         // price (105, 106), size (107, 108) and exchanges (109, 110), each
-        // when it changed; an unset price (below 0) or exchange (0) gives
-        // none. The exchanges go as the set's number, written as letters
-        // by the farm.
+        // when it changed; an unset price (0 or below) or exchange (0)
+        // gives none (regular hours 12/11/2026: a side with no odd-lot
+        // quote came as price 0, size 0 and no exchange, and the reference
+        // gave nothing for it; ibx gave a price of 0.0). The exchanges go
+        // as the set's number, written as letters by the farm.
         ODD_LOT => {
             let Some((entries, _)) = entry_list(payload) else { return out };
             let get = |t: u64| entries.iter().find(|(e, _)| *e == t).map(|(_, v)| *v);
@@ -387,7 +389,7 @@ pub fn decode(code: i32, payload: &[u8], rec: &mut GenericRecord, ctx: DecodeCtx
             for (p, s, x, pf, sf, xf, (pt, st, xt)) in sides {
                 if let Some(raw) = get(p) {
                     let px = raw as f64 * ctx.entry_min_tick;
-                    if rec.set_double(pf, px) && raw >= 0 {
+                    if rec.set_double(pf, px) && raw > 0 {
                         price(&mut out, pt, px);
                     }
                 }
@@ -1045,6 +1047,11 @@ mod tests {
         assert_eq!(ticks("0e00d2852c038840"),
             [GenTick::Price(106, 538.93), GenTick::Size(108, 3.0), GenTick::Text(110, "64".into())]);
         assert!(ticks("0ce42c008800").is_empty());
+        // 12/11/2026, MSFT in regular hours: a bid of 37 and an ask side
+        // with no quote (price 0, size 0, no exchange): nothing for the ask.
+        let bid_only = ticks("0600cbbf24250c002c008507008800");
+        assert!(matches!(&bid_only[..], [GenTick::Price(105, p), GenTick::Size(107, s), GenTick::Text(109, _)]
+            if (*p - 521.59).abs() < 1e-9 && *s == 37.0), "{bid_only:?}");
         assert_eq!(length_width(ODD_LOT), 0, "a list of quote entries");
         assert!(at_once(ODD_LOT) && sent(ODD_LOT) && valid_for(ODD_LOT, "STK"));
     }
