@@ -660,6 +660,10 @@ fn snapshot_pass(snap: &mut PlainSnapshot, m: &Mirror, pass: Pass, out: &mut Out
             // Kept values carry no auto-execution for a snapshot (ibx#671;
             // the reference 10.51: false in a snapshot, true in a stream).
             out.price(pt, idx, !delayed && !kept && auto == Some(true));
+            // The pre-open state, as on a stream (ibx#692; the reference
+            // 10.51, paper, 13/11/2026 15:28 Paris: the snapshot of an AAPL
+            // call two minutes before the open, bid and ask -1 with it).
+            pre_open_mark(out, m);
             // A kept -1 has no size (ibx#647; the reference 10.51, paper,
             // 12/10/2026 after hours, an option snapshot).
             if kept && f[idx] < 0 {
@@ -717,8 +721,16 @@ fn snapshot_pass(snap: &mut PlainSnapshot, m: &Mirror, pass: Pass, out: &mut Out
     // (ibx#494; overnight trades both: the reference 10.40 gave it on SPY,
     // captured 02/10/2026, the reference 10.51 none on AAPL, paper,
     // 19/10/2026, a fresh process, the farm's trade status 0).
+    // An option snapshot made while the quote is in its pre-open state
+    // gives the halted state, 0 too (ibx#692; the reference 10.51, paper,
+    // 13/11/2026 15:28 Paris, an AAPL call two minutes before the open).
     let form_10_40 = out.shared.reference.form_10_40();
-    if trade && !delayed && !option && let Some(status) = m.halted.filter(|s| s & 3 != 0 || form_10_40) && snap.take(TICK_HALTED) {
+    let halted = if option {
+        m.halted.filter(|_| m.auto.pre_open() == Some(true))
+    } else {
+        m.halted.filter(|s| s & 3 != 0 || form_10_40)
+    };
+    if trade && !delayed && let Some(status) = halted && snap.take(TICK_HALTED) {
         out.halted(status);
     }
 }
@@ -1615,6 +1627,33 @@ mod tests {
         let lines = poll(&core, &shared);
         assert!(lines.iter().any(|l| l == "size:1:8:0"), "{lines:?}");
         assert!(!lines.iter().any(|l| l.starts_with("generic:1:49")), "{lines:?}");
+    }
+
+    // ibx#692 (the reference 10.51, paper, 13/11/2026 15:28 Paris, an AAPL
+    // call two minutes before the open): its snapshot's bid and ask of -1
+    // carry the pre-open state and the halted state of 0 is given.
+    #[test]
+    fn an_option_snapshot_before_the_open_has_the_pre_open_state_and_the_halted_state() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        // The call's stream, then its snapshot, as in the run.
+        assert!(core.attach_md_request(&shared, 2, 5, false, "OPT", "SMART", None, false, false));
+        let q = Quote { bid: -PRICE_SCALE, ask: -PRICE_SCALE, close: 2077 * PRICE_SCALE / 100, ..Default::default() };
+        let message = TestMessage { steps: Some(&[MdStep::Quote, MdStep::Last, MdStep::Daily]), halted: Some(0),
+            auto_bits: Some(12), pre_open: Some(true), sizes_seen: true, ..Default::default() };
+        shared.market.push_test_message(5, &q, &message);
+        let mut out = Vec::new();
+        core.poll_market_data(&shared, None, &mut out);
+        assert!(core.attach_md_request(&shared, 1, 5, true, "OPT", "SMART", None, false, false));
+        shared.market.push_test_message(5, &q, &TestMessage { steps: Some(&[MdStep::Quote]), ..message });
+        out.clear();
+        core.poll_market_data(&shared, None, &mut out);
+        let marks: Vec<(i32, bool)> = out.iter().filter_map(|o| match o {
+            MdOut::Tick(1, MdTick::Price { tick_type, pre_open, .. }) if *tick_type <= 2 => Some((*tick_type, *pre_open)),
+            _ => None,
+        }).collect();
+        assert_eq!(marks, [(1, true), (2, true)]);
+        let lines = lines(&out);
+        assert!(lines.iter().any(|l| l == "generic:1:49:0"), "{lines:?}");
     }
 
     // ibx#680 (the reference 10.51, SPX on CBOE, 13/10/2026, regular
