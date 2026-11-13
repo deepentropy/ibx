@@ -7994,7 +7994,9 @@ fn a_paced_market_data_request_does_not_wait_for_its_subscribe() {
     let slot = core.register_mkt_data(&shared, &tx, 1, 265598, "AAPL", "SMART", "STK", "USD", &Default::default(), false, "mdoff", 0)
         .unwrap();
     assert_eq!(slot, Some(7));
-    assert!(started.elapsed() < std::time::Duration::from_millis(200), "{:?}", started.elapsed());
+    // Well under the wait for a reply; 200 ms was missed once on a busy
+    // machine (0.29 s, 13/11/2026), the test's own thread starting late.
+    assert!(started.elapsed() < std::time::Duration::from_millis(1000), "{:?}", started.elapsed());
     drop(tx);
     assert_eq!(engine.join().unwrap(), ["slot 265598", "subscribe 265598 reply false"]);
 }
