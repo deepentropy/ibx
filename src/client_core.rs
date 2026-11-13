@@ -4426,6 +4426,17 @@ impl ClientCore {
     }
 
     pub fn subscribe_pnl_single(&self, req_id: i64, con_id: i64) {
+        // The first single request made while the P&L already runs for an
+        // account request: its first answer comes with the next
+        // computation, not at once from the last one (the reference 10.51,
+        // paper, 13/11/2026: five single requests made 2.5 s after the
+        // account's, answered 4 ms after the account's next value). Each
+        // lock is taken alone.
+        let first = self.pnl_single_reqs.lock().unwrap().is_empty();
+        if first {
+            let mut q = self.pnl_quotes.lock().unwrap();
+            q.seen_single = q.grid_generation;
+        }
         self.pnl_single_reqs.lock().unwrap().insert(req_id, con_id);
     }
 
@@ -10027,6 +10038,25 @@ mod tests {
         let update = core.poll_pnl(&shared).pop().expect("callback must fire");
         assert!((update.daily_pnl - 1.0).abs() < 1e-6, "daily={}", update.daily_pnl);
         assert!((update.unrealized_pnl - 1.0).abs() < 1e-6, "unreal={}", update.unrealized_pnl);
+    }
+
+    // The reference 10.51 (paper, 13/11/2026): single requests made 2.5 s
+    // after the account's get their first answer with the account's next
+    // value, on the grid.
+    #[test]
+    fn a_single_request_made_while_the_pnl_runs_waits_for_the_next_computation() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        seed_pnl_position(&core, &shared, 111, 0, 1, 100.0, 105.0, 0.0);
+        core.subscribe_pnl(40);
+        pnl_ready(&core);
+        assert_eq!(core.poll_pnl(&shared).len(), 1, "the account's value");
+        core.subscribe_pnl_single(41, 111);
+        assert!(core.poll_pnl_single(&shared).is_empty(), "not from the last computation");
+        // The next computation, a second later.
+        *core.pnl_quotes.lock().unwrap().computed_at_mut().unwrap() -= PNL_RECALC;
+        shared.portfolio.set_pnl_price(111, 106.0);
+        core.poll_pnl(&shared);
+        assert_eq!(core.poll_pnl_single(&shared).len(), 1);
     }
 
     // ── poll_pnl_single regression tests (#168) ──
