@@ -942,16 +942,11 @@ def test_pnl_first_request_of_the_session():
     assert out["ours"][0].split("|")[:5] == out["theirs"][0].split("|")[:5]
 
 # The same replayed on the recording's time, the client computing on it too
-# (ibx#515): one callback per computation, the first five callbacks equal to
-# the last digit; the next ones differ (ibx#757).
+# (ibx#515), its first computation as long after the request as the
+# reference's (ibx#757): the seventeen callbacks of the two requests equal to
+# the last digit.
 def test_pnl_on_the_recordings_time():
     out = replay("gw1051/20261015/pnl_first_request", compare=["market_data"], skip_frame="dividends_cancel", paced=True)
     assert out["frame_error"] is None, out["frame_error"]
-    assert len(out["ours"]) == len(out["theirs"])
-    same_lines(out["ours"][:5], out["theirs"][:5])
-
-
-@pytest.mark.skip(reason="ibx#757: the P&L values from the fifth computation and those of the session start differ")
-def test_pnl_callbacks_in_full():
-    assert_same(replay("gw1051/20261015/pnl_first_request", compare=["market_data"], skip_frame="dividends_cancel",
-                       paced=True))
+    assert len(out["theirs"]) == 17
+    assert_same(out)

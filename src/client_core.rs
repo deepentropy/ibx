@@ -3609,8 +3609,12 @@ impl ClientCore {
             q.asked.insert(c, had || total);
         }
         // A copied wait: on a paced session only, as the others (ibx#723).
-        if !q.started && control_tx.paced() && !shared.portfolio.pnl_first_wait_off() {
-            q.first_at = Some(shared.client_now() + PNL_FIRST_WAIT);
+        // A replay waits as its recording did, so that it computes at the
+        // reference's times (ibx#757).
+        let first_wait = shared.portfolio.pnl_first_wait_of_recording()
+            .or_else(|| (control_tx.paced() && !shared.portfolio.pnl_first_wait_off()).then_some(PNL_FIRST_WAIT));
+        if !q.started && let Some(first_wait) = first_wait {
+            q.first_at = Some(shared.client_now() + first_wait);
         }
         q.started = true;
         let _ = control_tx.send(ControlCommand::PnlQuotes { con_ids: new, second_price: total });

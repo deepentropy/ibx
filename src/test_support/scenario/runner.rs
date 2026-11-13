@@ -833,6 +833,15 @@ pub fn run(sc: &Scenario, opts: &Options, links: &mut Links, driver: &mut dyn Dr
     }
     if opts.paced {
         links.pace();
+        // The reference's first P&L value comes a moment after the request
+        // (0.1 to 0.16 s) and its one-second grid starts there: the replay
+        // computes at those times, so that a price that came in between is
+        // on the same side of each computation (ibx#757).
+        let asked = recs.iter().find(|r| r.leg == "api_out" && r.msg == "REQ_PNL").map(|r| r.nanos);
+        let answered = asked.and_then(|t| recs.iter().find(|r| r.leg == "api_in" && r.msg == "PNL" && r.nanos > t).map(|r| r.nanos - t));
+        if let Some(wait) = answered {
+            links.shared.portfolio.set_pnl_first_wait_of_recording(std::time::Duration::from_nanos(wait));
+        }
     }
     let mut run = Run {
         links, driver, opts, recs, at: 0,

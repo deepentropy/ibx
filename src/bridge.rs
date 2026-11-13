@@ -2863,6 +2863,9 @@ pub struct PortfolioState {
     /// The first P&L computation waits as the reference's (ibx#723); off
     /// for a replay, whose client has no clock of the recording.
     pnl_first_wait_off: AtomicBool,
+    /// The wait before the first P&L computation of a replayed recording,
+    /// in microseconds; 0 for none set.
+    pnl_first_wait_us: std::sync::atomic::AtomicU64,
     /// The positions whose quantity the server's position feed moved, in
     /// order, with a running number (ibx#707): a reqPositions row each. A
     /// fill of this session moves its position itself, so the feed's
@@ -2903,6 +2906,7 @@ impl PortfolioState {
             row_sizes: Mutex::new(HashMap::new()),
             row_size_moves: AtomicU64::new(0),
             pnl_first_wait_off: AtomicBool::new(false),
+            pnl_first_wait_us: std::sync::atomic::AtomicU64::new(0),
             feed_moves: Mutex::new(Vec::new()),
             positions: std::array::from_fn(|_| AtomicU64::new(0)),
             midnight_seeds: Mutex::new(HashMap::new()),
@@ -3004,6 +3008,20 @@ impl PortfolioState {
 
     pub fn pnl_first_wait_off(&self) -> bool {
         self.pnl_first_wait_off.load(Ordering::Acquire)
+    }
+
+    /// The wait before the first P&L computation, as the recording being
+    /// replayed has it: the replay then computes at the reference's times
+    /// (ibx#757).
+    #[doc(hidden)] pub fn set_pnl_first_wait_of_recording(&self, wait: std::time::Duration) {
+        self.pnl_first_wait_us.store(wait.as_micros() as u64, Ordering::Release);
+    }
+
+    pub fn pnl_first_wait_of_recording(&self) -> Option<std::time::Duration> {
+        match self.pnl_first_wait_us.load(Ordering::Acquire) {
+            0 => None,
+            us => Some(std::time::Duration::from_micros(us)),
+        }
     }
 
     /// The running number of the portfolio rows that moved a size.

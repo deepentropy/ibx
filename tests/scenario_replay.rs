@@ -936,28 +936,19 @@ fn pnl_first_request_of_the_session() {
     let (ours, theirs) = (fields(&o.ours[0]), fields(&o.theirs[0].1));
     assert_eq!(&ours[..5], &theirs[..5]);
     // Replayed on the recording's time, the client computing on it too
-    // (ibx#515): the computations at the reference's times, the first
-    // four values and the single answer equal to the last digit. The next
-    // ones differ: ibx#757.
+    // (ibx#515), its first computation as long after the request as the
+    // reference's (0.16 s here), so that every price falls on the same side
+    // of each computation (ibx#757): the seventeen callbacks of the two
+    // requests are equal to the last digit, the values of the second
+    // request included.
     let o = replay(&sc, &Options::default().compare(&[MARKET_DATA]).skip_frame(dividends_cancel).paced());
     assert_eq!(o.frame_error, None);
     let theirs: Vec<String> = o.theirs.iter().map(|(_, l)| l.clone()).collect();
-    assert_eq!(o.ours.len(), theirs.len(), "one callback per computation, as the reference");
-    assert_same_callbacks(&o.ours[..5], &theirs[..5]);
+    assert_eq!(theirs.len(), 17);
+    assert_same_callbacks(&o.ours, &theirs);
 }
 
-// Every P&L callback of the replays on the recording's time: the
-// computations from the fifth value of the first requests, and those of
-// the session start, differ (ibx#757).
-#[test]
-#[ignore = "ibx#757: the P&L values from the fifth computation and those of the session start differ"]
-fn pnl_callbacks_in_full() {
-    let o = replay(&load_scenario("gw1051/20261015/pnl_first_request"),
-        &Options::default().compare(&[MARKET_DATA]).skip_frame(dividends_cancel).paced());
-    o.assert_same();
-    for name in ["gw1051/20261019b4s/session_start", "20261007/session_start"] {
-        let o = replay(&load_scenario(name), &Options::default().compare(&[ORDER, SUBSCRIPTION]).skip_frame(core_model)
-            .keep(|l| l.starts_with("pnl")).paced());
-        o.assert_same();
-    }
-}
+// The P&L callbacks of the session start recordings (07/10/2026 and
+// 19/10/2026) cannot be compared beyond the first value: those recordings
+// hold the account link only, without the market data the later values are
+// computed from (ibx#757).
