@@ -1735,6 +1735,10 @@ pub struct ClientCore {
     /// The configuration reqConfig gives and updateConfig changes
     /// (ibx#610, ibx#612).
     pub config: Mutex<session_config::SessionConfig>,
+    /// The session's time zone setting (0 the contract's zone, 1 UTC, 2
+    /// the machine's zone) and its rounding of account values (ibx#747).
+    times_shown: std::sync::atomic::AtomicU8,
+    account_values_rounded: AtomicBool,
     /// The last request parameters of each instrument (minimum tick, BBO
     /// exchange, snapshot permissions): a request that joins gets them at
     /// once (ibx#444).
@@ -2203,7 +2207,48 @@ impl ClientCore {
         if let Some(refusal) = update_config_refusal(level, request, logon_features) {
             return Err(refusal);
         }
-        Ok(self.config.lock().unwrap().update(request))
+        let mut config = self.config.lock().unwrap();
+        let answer = config.update(request);
+        // The settings ibx acts on (ibx#747), read without the lock where
+        // the answers are given.
+        let shown = match config.time_zone_shown() {
+            session_config::TimeZoneShown::Instrument => 0,
+            session_config::TimeZoneShown::Utc => 1,
+            session_config::TimeZoneShown::Operator => 2,
+        };
+        self.times_shown.store(shown, Ordering::Relaxed);
+        self.account_values_rounded.store(config.rounds_account_values(), Ordering::Relaxed);
+        Ok(answer)
+    }
+
+    /// `time` as the session's time zone setting writes it (ibx#747): kept
+    /// with the default setting, the zone of the contract. `z` for an
+    /// execution's time.
+    pub fn time_as_set(&self, time: &mut String, z: bool) {
+        let shown = match self.times_shown.load(Ordering::Relaxed) {
+            0 => return,
+            1 => session_config::TimeZoneShown::Utc,
+            _ => session_config::TimeZoneShown::Operator,
+        };
+        if let Some(text) = session_config::time_shown(time, shown, z, &crate::gateway::machine_time_zone()) {
+            *time = text;
+        }
+    }
+
+    /// Whether the times are written as the default setting writes them.
+    pub fn times_as_placed(&self) -> bool {
+        self.times_shown.load(Ordering::Relaxed) == 0
+    }
+
+    /// An account value as the session's rounding setting gives it
+    /// (ibx#747): the value itself with the default setting.
+    pub fn account_value_as_set<'a>(&self, value: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.account_values_rounded.load(Ordering::Relaxed)
+            && let Some(rounded) = session_config::account_value_rounded(value)
+        {
+            return std::borrow::Cow::Owned(rounded);
+        }
+        std::borrow::Cow::Borrowed(value)
     }
 }
 
@@ -2891,6 +2936,8 @@ impl ClientCore {
             md_delayed_known: Mutex::new(HashSet::new()),
             md_frozen: Mutex::new(HashMap::new()),
             config: Mutex::new(session_config::SessionConfig::paper()),
+            times_shown: std::sync::atomic::AtomicU8::new(0),
+            account_values_rounded: AtomicBool::new(false),
             instrument_params: Mutex::new(HashMap::new()),
             instrument_news: Mutex::new(HashMap::new()),
             md_joins: Mutex::new(Vec::new()),
@@ -5369,6 +5416,7 @@ impl ClientCore {
         if let Some(rezoned) = shared.reference.time_zone_id(con_id).and_then(|zone| exec_time_rezoned(time, &zone)) {
             *time = rezoned;
         }
+        self.time_as_set(time, true);
     }
 
     pub fn matching_executions(&self, filter: &ExecutionFilter) -> Vec<StoredExecution> {

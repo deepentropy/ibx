@@ -63,6 +63,63 @@ struct Message {
     warning: bool,
 }
 
+/// The zone the times given to a client are written in, the session's
+/// `sendInstrumentTimezone` (ibx#747; the reference 10.51, paper, regular
+/// hours 13/11/2026, the same requests under each value): the zone of the
+/// contract with its name (`20261113 09:43:55 US/Eastern`), UTC
+/// (`20261113-14:43:55`, an execution's time with a final `Z`), or the
+/// zone of the machine with its name (`20261113 15:43:55 Europe/Paris`).
+/// It changes the times of executions, of completed orders, of the bars
+/// shorter than a day asked in the text form, and the two times of a bar
+/// request's end; not a bar's date, the Unix form, a head timestamp, the
+/// trading hours of contract details, nor an order's own dates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeZoneShown {
+    Instrument,
+    Utc,
+    Operator,
+}
+
+/// `text`, a time written `yyyyMMdd HH:mm:ss {zone}`, as `shown` writes
+/// it; `z` for the final `Z` of an execution's time in UTC. None when the
+/// text is kept: the instrument's zone, or a text of another form (a
+/// date, Unix seconds, an empty time).
+pub fn time_shown(text: &str, shown: TimeZoneShown, z: bool, machine_zone: &str) -> Option<String> {
+    if shown == TimeZoneShown::Instrument {
+        return None;
+    }
+    let (civil, zone) = (text.get(..17)?, text.get(18..)?);
+    if text.as_bytes().get(17) != Some(&b' ') || zone.is_empty() {
+        return None;
+    }
+    let civil = jiff::civil::DateTime::strptime("%Y%m%d %H:%M:%S", civil).ok()?;
+    let at = civil.to_zoned(jiff::tz::TimeZone::get(zone).ok()?).ok()?.timestamp();
+    Some(match shown {
+        TimeZoneShown::Utc => format!("{}{}", at.to_zoned(jiff::tz::TimeZone::UTC).strftime("%Y%m%d-%H:%M:%S"), if z { "Z" } else { "" }),
+        _ => {
+            let tz = jiff::tz::TimeZone::get(machine_zone).ok()?;
+            format!("{} {}", at.to_zoned(tz).strftime("%Y%m%d %H:%M:%S"), machine_zone)
+        }
+    })
+}
+
+/// An account value as the session gives it with
+/// `roundAccountValuesToNearestWholeNumber` on (ibx#747; the reference
+/// 10.51, paper, regular hours 13/11/2026: every value written with a
+/// decimal point in the account summary and the account updates, 116 of
+/// them, the exchange rates too: 915.63 gives 916, -29.98 gives -30,
+/// 1.1033517 gives 1, 0.00 gives 0; a whole number, a text and a list of
+/// dated amounts are kept). None when the value is kept.
+pub fn account_value_rounded(value: &str) -> Option<String> {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    let (whole, fraction) = digits.split_once('.')?;
+    if whole.is_empty() || fraction.is_empty() || !whole.bytes().chain(fraction.bytes()).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let rounded = value.parse::<f64>().ok()?.round();
+    Some(if rounded == 0.0 { "0".to_string() } else { format!("{rounded:.0}") })
+}
+
 /// A setting an update names, in the order the reference applies them
 /// and names them among the changed fields.
 struct Setting {
@@ -253,11 +310,13 @@ impl SessionConfig {
             free("loggingLevel", s.logging_level.is_some()),
             free("bulkDataTimeout", s.bulk_data_timeout.is_some()),
             follows!("componentExchSeparator", component_exch_separator),
-            follows!("roundAccountValuesToNearestWholeNumber", round_account_values_to_nearest_whole_number),
+            // Followed since ibx#747: the account values are rounded.
+            free("roundAccountValuesToNearestWholeNumber", s.round_account_values_to_nearest_whole_number.is_some()),
             free("showAdvancedOrderRejectInUi", s.show_advanced_order_reject_in_ui.is_some()),
             follows!("rejectMessagesAboveMaxRate", reject_messages_above_max_rate),
             follows!("maintainConnectionOnIncorrectFields", maintain_connection_on_incorrect_fields),
-            follows!("sendInstrumentTimezone", send_instrument_timezone, text),
+            // Followed since ibx#747: the times are written in that zone.
+            free("sendInstrumentTimezone", s.send_instrument_timezone.is_some()),
             follows!("historicalDataMaxSize", historical_data_max_size),
             follows!("autoReportNettingEventContractTrades", auto_report_netting_event_contract_trades),
             follows!("readOnlyApi", read_only_api),
@@ -294,6 +353,20 @@ impl SessionConfig {
             follows!("defaultAlgorithm", default_algorithm),
             follows!("doNotRouteToDarkPools", do_not_route_to_dark_pools),
         ]
+    }
+
+    /// The zone the times given to a client are written in (ibx#747).
+    pub fn time_zone_shown(&self) -> TimeZoneShown {
+        match self.settings.send_instrument_timezone.as_deref() {
+            Some(v) if v.eq_ignore_ascii_case("utc") => TimeZoneShown::Utc,
+            Some(v) if v.eq_ignore_ascii_case("operator") => TimeZoneShown::Operator,
+            _ => TimeZoneShown::Instrument,
+        }
+    }
+
+    /// Whether the account values are given as whole numbers (ibx#747).
+    pub fn rounds_account_values(&self) -> bool {
+        self.settings.round_account_values_to_nearest_whole_number == Some(true)
     }
 
     /// The answer to updateConfig: the reference's checks first, then the
@@ -341,6 +414,12 @@ impl SessionConfig {
                 cur.logging_level = Some(canonical(v, &["system", "error", "warning", "info", "detail"]));
             }
             if let Some(v) = s.bulk_data_timeout { cur.bulk_data_timeout = Some(v); }
+            if let Some(v) = &s.send_instrument_timezone {
+                cur.send_instrument_timezone = Some(canonical(v, &["instrument", "operator", "utc"]));
+            }
+            if let Some(v) = s.round_account_values_to_nearest_whole_number {
+                cur.round_account_values_to_nearest_whole_number = Some(v);
+            }
             if let Some(v) = s.show_advanced_order_reject_in_ui { cur.show_advanced_order_reject_in_ui = Some(v); }
             if !s.trusted_ips.is_empty() { cur.trusted_ips = s.trusted_ips.clone(); }
         }
@@ -527,6 +606,56 @@ mod tests {
     // "error" with the field named, and nothing is changed; the value ibx
     // follows is taken.
     #[test]
+    // ibx#747 (the reference 10.51, paper, regular hours 13/11/2026): the
+    // zone of the times and the rounding of the account values are taken,
+    // answered "success" with the field named, and given back by reqConfig.
+    #[test]
+    fn the_time_zone_and_the_rounding_are_taken() {
+        let mut c = SessionConfig::paper();
+        assert_eq!((c.time_zone_shown(), c.rounds_account_values()), (TimeZoneShown::Instrument, false));
+        let r = settings(7701, ApiSettingsConfig { send_instrument_timezone: Some("UTC".into()), ..Default::default() });
+        assert_eq!(answer(&mut c, &r), success(7701, &["configuration.api.settings.sendInstrumentTimezone"]));
+        assert_eq!(c.time_zone_shown(), TimeZoneShown::Utc);
+        assert_eq!(c.response(Some(1)).api.unwrap().settings.unwrap().send_instrument_timezone.as_deref(), Some("utc"));
+        let r = settings(7702, ApiSettingsConfig { send_instrument_timezone: Some("operator".into()),
+            round_account_values_to_nearest_whole_number: Some(true), ..Default::default() });
+        assert_eq!(answer(&mut c, &r), success(7702, &["configuration.api.settings.roundAccountValuesToNearestWholeNumber",
+            "configuration.api.settings.sendInstrumentTimezone"]));
+        assert_eq!((c.time_zone_shown(), c.rounds_account_values()), (TimeZoneShown::Operator, true));
+        let r = settings(7703, ApiSettingsConfig { send_instrument_timezone: Some("instrument".into()),
+            round_account_values_to_nearest_whole_number: Some(false), ..Default::default() });
+        assert_eq!(c.update(&r).status.as_deref(), Some("success"));
+        assert_eq!((c.time_zone_shown(), c.rounds_account_values()), (TimeZoneShown::Instrument, false));
+    }
+
+    #[test]
+    fn a_time_is_written_in_the_zone_of_the_setting() {
+        let t = "20261113 09:43:55 US/Eastern";
+        assert_eq!(time_shown(t, TimeZoneShown::Instrument, true, "Europe/Paris"), None);
+        assert_eq!(time_shown(t, TimeZoneShown::Utc, true, "Europe/Paris").as_deref(), Some("20261113-14:43:55Z"));
+        assert_eq!(time_shown(t, TimeZoneShown::Utc, false, "Europe/Paris").as_deref(), Some("20261113-14:43:55"));
+        assert_eq!(time_shown(t, TimeZoneShown::Operator, true, "Europe/Paris").as_deref(), Some("20261113 15:43:55 Europe/Paris"));
+        assert_eq!(time_shown("20261113 15:41:53 MET", TimeZoneShown::Utc, true, "Europe/Paris").as_deref(), Some("20261113-14:41:53Z"));
+        assert_eq!(time_shown("20261113 15:41:53 MET", TimeZoneShown::Operator, false, "Europe/Paris").as_deref(), Some("20261113 15:41:53 Europe/Paris"));
+        // A bar's date, Unix seconds, an empty time: kept.
+        for kept in ["20261113", "1794580200", "", "20261113 09:43:55"] {
+            assert_eq!(time_shown(kept, TimeZoneShown::Utc, false, "Europe/Paris"), None, "{kept}");
+        }
+    }
+
+    #[test]
+    fn an_account_value_is_rounded_to_a_whole_number() {
+        for (value, rounded) in [("915.63", "916"), ("-29.98", "-30"), ("1.1033517", "1"), ("0.00", "0"), ("908762.8429", "908763"),
+            ("-1685.51", "-1686"), ("-0.40", "0"), ("6328880.76", "6328881")]
+        {
+            assert_eq!(account_value_rounded(value).as_deref(), Some(rounded), "{value}");
+        }
+        for kept in ["1794603600", "INDIVIDUAL", "true", "", "20261113:910193.94401762;20261116:910195", "DU1", "1", "-30"] {
+            assert_eq!(account_value_rounded(kept), None, "{kept}");
+        }
+    }
+
+    #[test]
     fn a_value_ibx_cannot_follow_is_refused_with_the_field_named() {
         let mut c = SessionConfig::paper();
         let before = c.response(Some(1));
@@ -535,12 +664,12 @@ mod tests {
         assert_eq!(answer(&mut c, &r), unfollowed(7901, &[&s("readOnlyApi")]));
         let r = settings(7902, ApiSettingsConfig {
             master_client_id: Some(0), download_open_orders_on_connection: Some(false), historical_data_max_size: Some(4),
-            send_instrument_timezone: Some("utc".into()), option_exercise_request_type: Some("final".into()),
+            option_exercise_request_type: Some("final".into()),
             total_quantity_for_mutual_funds: Some(true), component_exch_separator: Some("-".into()),
             ..Default::default()
         });
         assert_eq!(answer(&mut c, &r), unfollowed(7902, &[&s("totalQuantityForMutualFunds"), &s("componentExchSeparator"),
-            &s("sendInstrumentTimezone"), &s("historicalDataMaxSize"), &s("optionExerciseRequestType"),
+            &s("historicalDataMaxSize"), &s("optionExerciseRequestType"),
             &s("downloadOpenOrdersOnConnection"), &s("masterClientId")]));
         let r = UpdateConfigRequest {
             reset_api_order_sequence: Some(true),

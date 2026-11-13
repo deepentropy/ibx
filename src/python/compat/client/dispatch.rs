@@ -490,7 +490,7 @@ impl EClient {
         let account_name = self.account();
         if let Some(batch) = self.core.prepare_account_updates(shared, &account_name) {
             for field in &batch.fields {
-                call_wrapper!(self.cb(py), py, "update_account_value", (field.key.as_str(), field.value.as_str(), field.currency.as_str(), account_name.as_str()));
+                call_wrapper!(self.cb(py), py, "update_account_value", (field.key.as_str(), &*self.core.account_value_as_set(&field.value), field.currency.as_str(), account_name.as_str()));
             }
 
             let portfolio = self.core.prepare_portfolio_updates(shared);
@@ -547,7 +547,7 @@ impl EClient {
             for batch in self.core.prepare_account_summary(shared) {
                 let account = batch.account.as_deref().unwrap_or(acct_name.as_str());
                 for row in &batch.rows {
-                    call_wrapper!(self.cb(py), py, "account_summary", (batch.req_id, account, row.key.as_str(), row.value.as_str(), row.currency.as_str()));
+                    call_wrapper!(self.cb(py), py, "account_summary", (batch.req_id, account, row.key.as_str(), &*self.core.account_value_as_set(&row.value), row.currency.as_str()));
                 }
                 if batch.end {
                     call_wrapper!(self.cb(py), py, "account_summary_end", (batch.req_id,));
@@ -941,8 +941,9 @@ impl EClient {
                     for row in run(&mut ib.completed_orders, until) {
                         match row {
                             Some(row) => {
-                                let (contract, mut order, state) = *row;
+                                let (contract, mut order, mut state) = *row;
                                 crate::client_core::reported_unset_values(&mut order);
+                                self.core.time_as_set(&mut state.completed_time, false);
                                 let c_py = Py::new(py, super::super::contract::Contract::from_api(py, &contract)?)?.into_any();
                                 let o_py = Py::new(py, super::super::contract::Order::from_api(py, &order)?)?.into_any();
                                 let s_py = Py::new(py, super::super::contract::OrderState::from_api(py, &state)?)?.into_any();
@@ -1040,7 +1041,15 @@ impl EClient {
                     Kind::historical_data => {
                     // Drain historical data -> historicalData + historicalDataEnd
                     let hist_data = run(&mut ib.historical_data, until);
-                    for (req_id, response) in hist_data {
+                    for (req_id, mut response) in hist_data {
+                        // The times in the zone of the session's setting (ibx#747).
+                        if !self.core.times_as_placed() {
+                            for bar in &mut response.bars {
+                                self.core.time_as_set(&mut bar.time, false);
+                            }
+                            self.core.time_as_set(&mut response.start, false);
+                            self.core.time_as_set(&mut response.end, false);
+                        }
                         let mut bars = Vec::with_capacity(response.bars.len());
                         for bar in &response.bars {
                             let bar_obj = BarData::reported(
@@ -1068,7 +1077,8 @@ impl EClient {
                     }
                     Kind::historical_updates => {
                     // keepUpToDate: the whole current bar each time (ibx#429).
-                    for (req_id, bar) in run(&mut ib.historical_updates, until) {
+                    for (req_id, mut bar) in run(&mut ib.historical_updates, until) {
+                        self.core.time_as_set(&mut bar.time, false);
                         let bar_obj = BarData::reported(
                             bar.time, bar.open, bar.high, bar.low, bar.close,
                             bar.volume, bar.wap, bar.count, String::new(),

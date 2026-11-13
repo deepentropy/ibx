@@ -126,8 +126,9 @@ impl EClient {
                     for row in run(&mut ib.completed_orders, until) {
                         match row {
                             Some(row) => {
-                                let (contract, mut order, state) = *row;
+                                let (contract, mut order, mut state) = *row;
                                 crate::client_core::reported_unset_values(&mut order);
+                                self.core.time_as_set(&mut state.completed_time, false);
                                 wrapper.completed_order(&contract, &order, &state);
                             }
                             None => wrapper.completed_orders_end(),
@@ -699,7 +700,15 @@ impl EClient {
 
     /// Historical data → historical_data + historical_data_end
     fn deliver_historical_data(&self, wrapper: &mut impl Wrapper, items: impl IntoIterator<Item = (ReqId, HistoricalResponse)>) {
-        for (req_id, response) in items {
+        for (req_id, mut response) in items {
+            // The times in the zone of the session's setting (ibx#747).
+            if !self.core.times_as_placed() {
+                for bar in &mut response.bars {
+                    self.core.time_as_set(&mut bar.time, false);
+                }
+                self.core.time_as_set(&mut response.start, false);
+                self.core.time_as_set(&mut response.end, false);
+            }
             for bar in &response.bars {
                 let bd = BarData {
                     date: bar.time.clone(),
@@ -722,7 +731,8 @@ impl EClient {
 
     /// keepUpToDate: the whole current bar each time (ibx#429).
     fn deliver_historical_updates(&self, wrapper: &mut impl Wrapper, items: impl IntoIterator<Item = (ReqId, HistoricalBar)>) {
-        for (req_id, bar) in items {
+        for (req_id, mut bar) in items {
+            self.core.time_as_set(&mut bar.time, false);
             let bd = BarData {
                 date: bar.time,
                 open: bar.open,
@@ -906,7 +916,7 @@ impl EClient {
         // the end, once per subscription.
         if let Some(batch) = self.core.prepare_account_updates(&self.shared, &self.account_id) {
             for field in &batch.fields {
-                wrapper.update_account_value(&field.key, &field.value, &field.currency, &self.account_id);
+                wrapper.update_account_value(&field.key, &self.core.account_value_as_set(&field.value), &field.currency, &self.account_id);
             }
             let portfolio = self.core.prepare_portfolio_updates(&self.shared);
             for entry in &portfolio {
@@ -937,7 +947,7 @@ impl EClient {
         for batch in self.core.prepare_account_summary(&self.shared) {
             let account = batch.account.as_deref().unwrap_or(&self.account_id);
             for row in &batch.rows {
-                wrapper.account_summary(batch.req_id, account, &row.key, &row.value, &row.currency);
+                wrapper.account_summary(batch.req_id, account, &row.key, &self.core.account_value_as_set(&row.value), &row.currency);
             }
             if batch.end {
                 wrapper.account_summary_end(batch.req_id);
