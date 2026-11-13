@@ -944,9 +944,13 @@ def test_pnl_first_request_of_the_session():
 # The same replayed on the recording's time, the client computing on it too
 # (ibx#515), its first computation as long after the request as the
 # reference's (ibx#757): the seventeen callbacks of the two requests equal to
-# the last digit.
+# the last digit. ibx gives one more, the first row alone at the second
+# computation (ibx#746), which the reference gave in 8 of 10 session starts
+# and not in this recording.
 def test_pnl_on_the_recordings_time():
     out = replay("gw1051/20261015/pnl_first_request", compare=["market_data"], skip_frame="dividends_cancel", paced=True)
     assert out["frame_error"] is None, out["frame_error"]
     assert len(out["theirs"]) == 17
-    assert_same(out)
+    ours = list(out["ours"])
+    assert ours.pop(1) == "pnl|9003|-73.19997558593786|42.285724414062315|0"
+    same_lines(ours, out["theirs"])

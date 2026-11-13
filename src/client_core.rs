@@ -392,6 +392,11 @@ pub struct PnlQuotes {
     /// The last computation each kind of request looked at.
     seen_total: u64,
     seen_single: u64,
+    /// All rows of the second computation, held while the account requests
+    /// are given its first row alone (ibx#746).
+    second_rows: Option<Vec<PnlRow>>,
+    /// The first computation on the grid after the first value was made.
+    second_done: bool,
 }
 
 impl PnlQuotes {
@@ -6085,6 +6090,18 @@ impl ClientCore {
         if q.generation == 0 {
             rows.truncate(1);
         }
+        // The second computation: the account requests get the first
+        // value's row alone, now at its P&L price, then all rows (ibx#746;
+        // the reference 10.51, paper: 8 of 10 session starts from 15/10 to
+        // 12/11/2026, the two values 3 to 5 ms apart; regular hours
+        // 12/11/2026: -30.114178 at the mark, -29.914593 at the P&L price,
+        // then the sum of the five rows).
+        if q.generation >= 1 && due && !std::mem::replace(&mut q.second_done, true)
+            && rows.len() > 1 && !self.pnl_reqs.lock().unwrap().is_empty()
+        {
+            q.second_rows = Some(rows.clone());
+            rows.truncate(1);
+        }
         q.rows = rows;
         q.generation += 1;
         if due {
@@ -6122,7 +6139,15 @@ impl ClientCore {
     /// The computation of the last grid tick (ibx#723).
     fn grid_pnl(&self, shared: &SharedState) -> u64 {
         self.compute_pnl(shared);
-        self.pnl_quotes.lock().unwrap().grid_generation
+        let mut q = self.pnl_quotes.lock().unwrap();
+        // The single requests read all rows: a first row held alone for the
+        // account requests (ibx#746) is completed first.
+        if let Some(rows) = q.second_rows.take() {
+            q.rows = rows;
+            q.generation += 1;
+            q.grid_generation = q.generation;
+        }
+        q.grid_generation
     }
 
     /// The reqPnL values of the last computation (ibx#511): each field the
@@ -6132,6 +6157,27 @@ impl ClientCore {
     /// them when they differ from what it got last; a request started
     /// after a computation gets the next one.
     pub fn poll_pnl(&self, shared: &SharedState) -> Vec<PnlUpdate> {
+        let mut out = self.poll_pnl_once(shared);
+        // The second computation's all rows, right after its first row.
+        let second = {
+            let mut q = self.pnl_quotes.lock().unwrap();
+            match q.second_rows.take() {
+                Some(rows) => {
+                    q.rows = rows;
+                    q.generation += 1;
+                    q.grid_generation = q.generation;
+                    true
+                }
+                None => false,
+            }
+        };
+        if second {
+            out.extend(self.poll_pnl_once(shared));
+        }
+        out
+    }
+
+    fn poll_pnl_once(&self, shared: &SharedState) -> Vec<PnlUpdate> {
         if self.pnl_reqs.lock().unwrap().is_empty() {
             return Vec::new();
         }
@@ -9575,6 +9621,8 @@ mod tests {
         let mut q = core.pnl_quotes.lock().unwrap();
         q.started = true;
         q.generation = q.generation.max(1);
+        // Past the session's second computation (ibx#746).
+        q.second_done = true;
         q.computed_at = None;
     }
 
@@ -10132,7 +10180,13 @@ mod tests {
         }
         assert!(core.poll_pnl(&shared).is_empty(), "paced: once a second");
         *core.pnl_quotes.lock().unwrap().computed_at_mut().unwrap() -= PNL_RECALC;
-        let full = core.poll_pnl(&shared).pop().expect("all rows");
+        // The second computation: the first row alone, at its P&L price,
+        // then all rows (ibx#746).
+        let mut second = core.poll_pnl(&shared);
+        assert_eq!(second.len(), 2, "the first row alone, then all rows");
+        let full = second.pop().expect("all rows");
+        let one_row = second.pop().expect("the first row");
+        assert_eq!((one_row.daily_pnl, one_row.unrealized_pnl, one_row.realized_pnl), (-73.19997558593786, 42.285724414062315, 0.0));
         assert_eq!(full.daily_pnl, 0.9497729858385355);
         assert_eq!(full.unrealized_pnl, -990.9473989141641);
         assert!((full.realized_pnl - -716.9810584).abs() < 1e-9, "{}", full.realized_pnl);

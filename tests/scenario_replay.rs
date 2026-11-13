@@ -941,11 +941,17 @@ fn pnl_first_request_of_the_session() {
     // of each computation (ibx#757): the seventeen callbacks of the two
     // requests are equal to the last digit, the values of the second
     // request included.
+    // ibx gives one more: at the second computation, the first row alone
+    // at its P&L price, before all rows (ibx#746). The reference gave that
+    // value in 8 of 10 session starts; this recording is one of the two
+    // without it.
     let o = replay(&sc, &Options::default().compare(&[MARKET_DATA]).skip_frame(dividends_cancel).paced());
     assert_eq!(o.frame_error, None);
     let theirs: Vec<String> = o.theirs.iter().map(|(_, l)| l.clone()).collect();
     assert_eq!(theirs.len(), 17);
-    assert_same_callbacks(&o.ours, &theirs);
+    let mut ours = o.ours.clone();
+    assert_eq!(ours.remove(1), "pnl|9003|-73.19997558593786|42.285724414062315|0", "the first row alone");
+    assert_same_callbacks(&ours, &theirs);
 }
 
 // The P&L callbacks of the session start recordings (07/10/2026 and
