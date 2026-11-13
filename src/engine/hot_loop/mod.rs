@@ -5818,9 +5818,14 @@ mod tests {
                 shared.command_clock().take_turn();
             })
         };
-        // The client's two commands reach the queue.
-        std::thread::sleep(Duration::from_millis(20));
-        engine.poll_once();
+        // The client's two commands reach the queue (its thread may start
+        // late on a busy machine: 20 ms were not enough once, 13/11/2026).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            std::thread::sleep(Duration::from_millis(5));
+            engine.poll_once();
+            if engine.cmd_queue.len() >= 3 || Instant::now() >= deadline { break; }
+        }
         assert_eq!(engine.cmd_queue.len(), 3, "the second request, the error, the turn");
         assert!(shared.orders.drain_order_errors().is_empty(), "the error waits for its turn");
         engine.set_pace_clock(start + ms(100));
