@@ -1313,6 +1313,10 @@ pub struct OrderState {
     /// The flags the engine dropped from an order before sending it, as
     /// `DROPPED_*` bits: the order's openOrder shows them off (ibx#607).
     dropped_flags: Mutex<HashMap<i64, u8>>,
+    /// The count of the session's answers when a report of the server
+    /// first gave each order as held: the openOrder of a report written
+    /// before shows the order as it was then.
+    held_since: Mutex<HashMap<OrderId, u64>>,
     /// The orders held with transmit off whose placeOrder's lookups have
     /// not all answered yet: the session does not know them as parents yet
     /// (ibx#718). False until the engine took the order.
@@ -1365,6 +1369,7 @@ impl OrderState {
             cancel_rejects: Mutex::new(Vec::with_capacity(16)),
             order_errors: SeqQueue::new(&stamp),
             dropped_flags: Mutex::new(HashMap::new()),
+            held_since: Mutex::new(HashMap::new()),
             held_unknown: Mutex::new(HashMap::new()),
             held_unknown_changed: Condvar::new(),
             error_tap: ErrorTap::default(),
@@ -1728,6 +1733,19 @@ impl OrderState {
     /// A row of the answer of reqCompletedOrders, or its end (ibx#695).
     #[doc(hidden)] pub fn push_completed_row(&self, row: CompletedRow) {
         self.completed_rows.push(row);
+    }
+
+    /// Note that a report gave the order as held: every order report
+    /// written from now on counts at or after it. The first time stays.
+    #[doc(hidden)] pub fn note_held(&self, order_id: OrderId) {
+        let at = self.order_reports.clock.load(Ordering::Relaxed);
+        self.held_since.lock().unwrap().entry(order_id).or_insert(at);
+    }
+
+    /// The count of the session's answers from which the order is held;
+    /// None while no report gave it as held.
+    pub fn held_since(&self, order_id: OrderId) -> Option<u64> {
+        self.held_since.lock().unwrap().get(&order_id).copied()
     }
 
     #[doc(hidden)] pub fn push_order_info(&self, order_id: OrderId, info: RichOrderInfo) {

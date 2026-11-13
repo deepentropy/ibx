@@ -1880,6 +1880,9 @@ pub struct ClientCore {
     /// Ids of tracked orders placed again under the same id (a modify):
     /// their openOrder shows no derived trail stop price (ibx#521).
     pub modified_orders: Mutex<HashSet<OrderId>>,
+    /// The trail stop price each market-if-touched order was first shown
+    /// with: it stays after a modify.
+    pub touched_stops: Mutex<HashMap<OrderId, f64>>,
     /// The order as it was before a modify placed while it was not
     /// answered yet: put back when the engine answers 103, the order not
     /// sent yet (ibx#688).
@@ -2607,20 +2610,77 @@ fn reported_scale_quantity(order: &mut ApiOrder, reported: Option<&ApiOrder>, pr
 /// usePriceMgmtAlgo as openOrder reports it (ibx#492): 0 or 1, never
 /// unset, as the reference; the value the server's report gives, else the
 /// caller's, unset read as 0.
-/// The compete values as the server's reports give them (100 and 0.02
-/// until the order is held, then unset), else as the order goes out: a
-/// pegged-to-best order's 100 and 0.02 whatever was set (ibx#469); and
-/// postToAts, which is never sent, unset (the reference 10.51, paper,
-/// regular hours, 19/10/2026, ibx#605).
-fn sent_compete_values(order: &mut ApiOrder, reported: Option<&ApiOrder>) {
-    if let Some(r) = reported {
-        order.min_compete_size = r.min_compete_size;
-        order.compete_against_best_offset = r.compete_against_best_offset;
-    } else if order.order_type.eq_ignore_ascii_case("PEG BEST") {
+/// The compete values the reference shows: a stock order's 100 and 0.02
+/// until a report of the server gives it as held, before its first report
+/// too, then unset; none for a future, a currency pair or a combo; a
+/// pegged-to-best order's 100 and 0.02 until held whatever was set
+/// (ibx#469); and postToAts, which is never sent, unset (the reference
+/// 10.51, paper, regular hours: 19/10/2026, ibx#605; 13/11/2026, 31 orders
+/// of 14 types: a stock stop listed 4 s after its only report still has
+/// them, a closing order listed before any report has them, a future's and
+/// a currency pair's stop and limit orders never have them).
+fn sent_compete_values(order: &mut ApiOrder, held: bool, stock: bool) {
+    if !held && (stock || order.order_type.eq_ignore_ascii_case("PEG BEST")) {
         order.min_compete_size = 100;
         order.compete_against_best_offset = 0.02;
+    } else {
+        order.min_compete_size = i32::MAX;
+        order.compete_against_best_offset = f64::MAX;
     }
     order.post_to_ats = i32::MAX;
+}
+
+/// The limit price the reference shows for a stock's stop order placed
+/// without one, until a report of the server gives the order as held: the
+/// stop price + 0.03, added as doubles (10.51, paper, regular hours
+/// 13/11/2026: nine stop orders on AAPL and KO, both sides, DAY and GTC,
+/// each first openOrder, and the listing 4 s later of the five buys, which
+/// had no other report: 321.7 gives 321.72999999999996, 500 gives 500.03,
+/// 499.99 gives 500.02; 0 once held, and on every openOrder of a future's
+/// and a currency pair's stop).
+///
+/// The same for a trailing order placed with its stop price (20 gives
+/// 20.03). A market-if-touched order and a trailing order without a stop
+/// price show the contract's market price instead, when the session has
+/// its quotes, and 0 when it has none (the same day: PEP, 144.3 on four
+/// orders with the quotes running, both sides, 0 on two orders before the
+/// quotes were asked; KO, 99.03 and 99.04).
+/// None of it once the order was modified (a stop moved before any other
+/// report: 900.03, then 0 with its compete values still shown).
+const STOP_LIMIT_SHOWN: f64 = 0.03;
+
+fn limit_shown_until_held(order: &mut ApiOrder, held: bool, stock: bool, modified: bool, market: impl FnOnce() -> Option<f64>) {
+    let given = |v: f64| v != f64::MAX && v != 0.0;
+    if !stock || modified || held || given(order.lmt_price) {
+        return;
+    }
+    let is = |t: &str| order.order_type.eq_ignore_ascii_case(t);
+    let stop = if is("STP") {
+        order.aux_price
+    } else if is("TRAIL") {
+        order.trail_stop_price
+    } else {
+        f64::MAX
+    };
+    if given(stop) {
+        order.lmt_price = stop + STOP_LIMIT_SHOWN;
+    } else if (is("MIT") || is("TRAIL")) && let Some(price) = market() {
+        order.lmt_price = price;
+    }
+}
+
+/// The market price of [`limit_shown_until_held`]: the midpoint of the bid
+/// and the ask, rounded half up to the cent (the reference 10.51, paper,
+/// regular hours 13/11/2026: ten touched orders on SPY with its quotes
+/// running, ten of ten; 750.03 and 750.06 give 750.05, 749.93 and 749.95
+/// give 749.94; the last price differed on six of them). None without
+/// both sides.
+fn market_price_shown(q: &crate::types::Quote) -> Option<f64> {
+    if q.bid <= 0 || q.ask <= 0 {
+        return None;
+    }
+    let mid = (q.bid as f64 / PRICE_SCALE_F + q.ask as f64 / PRICE_SCALE_F) / 2.0;
+    Some((mid * 100.0 + 0.5).floor() / 100.0)
 }
 
 /// The compete values of a what-if preview's openOrder: 100 and 0.02, a
@@ -2691,17 +2751,34 @@ pub const NOT_A_SHAREHOLDER: &str = "Not an insider or substantial shareholder";
 ///   a modify, on its callbacks and on a later listing). PEG BEST after a
 ///   modify is not recorded and follows LMT;
 /// - trailStopPrice of a STP order: its stop price, the new one after a
-///   modify.
+///   modify;
+/// - the same two rules for the other types (the reference 10.51, paper,
+///   regular hours 13/11/2026, every openOrder of each order and its
+///   listing): a closing limit and a midprice order as a LMT (30 gives
+///   31); a stop limit, a market or limit if touched, a relative and a
+///   price improvement order show their auxPrice (500, 30, 0.01, 0.02),
+///   a price improvement order without one its limit price + 1 (100 gives
+///   101, a sell at 900 gives 901); a future's and a currency pair's too
+///   (1000 gives 1001, 0.5 gives 1.5);
+/// - auxPrice 0 for a LMT order, whatever the caller gave (2.0 shown 0.0).
 fn session_order_fields(order: &mut ApiOrder, user: &str, modified: bool) {
     if order.submitter.is_empty() {
         order.submitter = user.to_string();
     }
     let unset = |v: f64| v == f64::MAX || v == 0.0;
     let is = |t: &str| order.order_type.eq_ignore_ascii_case(t);
-    if is("LMT") || is("PEG BEST") {
-        order.trail_stop_price = if modified || unset(order.lmt_price) { f64::MAX } else { order.lmt_price + 1.0 };
-    } else if is("STP") && !unset(order.aux_price) {
-        order.trail_stop_price = order.aux_price;
+    let limit_plus_one = |o: &ApiOrder| if modified || unset(o.lmt_price) { f64::MAX } else { o.lmt_price + 1.0 };
+    if is("LMT") {
+        order.aux_price = 0.0;
+    }
+    if is("LMT") || is("PEG BEST") || is("LOC") || is("MIDPRICE") {
+        order.trail_stop_price = limit_plus_one(order);
+    } else if is("STP") {
+        if !unset(order.aux_price) {
+            order.trail_stop_price = order.aux_price;
+        }
+    } else if is("STP LMT") || is("MIT") || is("LIT") || is("REL") || is("RPI") {
+        order.trail_stop_price = if unset(order.aux_price) { limit_plus_one(order) } else { order.aux_price };
     }
 }
 
@@ -2867,6 +2944,7 @@ impl ClientCore {
             finished_combo_params: Mutex::new(HashMap::new()),
             unknown_parent_refused: Mutex::new(HashMap::new()),
             modified_orders: Mutex::new(HashSet::new()),
+            touched_stops: Mutex::new(HashMap::new()),
             modify_undo: Mutex::new(HashMap::new()),
             quote_times: Mutex::new(std::collections::VecDeque::new()),
             silent_executions: Mutex::new(HashSet::new()),
@@ -5418,7 +5496,33 @@ impl ClientCore {
         }
     }
 
+    /// The quote of a contract whose market data this client has running:
+    /// by the slot of a request made with the conId, else by the slot of a
+    /// request whose contract the engine looked up.
+    fn running_quote(&self, shared: &SharedState, con_id: i64) -> Option<crate::types::Quote> {
+        if con_id == 0 {
+            return None;
+        }
+        let instruments = self.con_id_to_instrument.lock().unwrap();
+        let slots = self.md_slot_con_ids.lock().unwrap();
+        let observers = self.instrument_to_req.lock().unwrap();
+        let runs = |slot: &InstrumentId| observers.get(slot).is_some_and(|reqs| !reqs.is_empty());
+        let slot = instruments.get(&con_id).copied().filter(runs)
+            .or_else(|| slots.iter().find(|(slot, c)| **c == con_id && runs(slot)).map(|(slot, _)| *slot))?;
+        shared.market.try_quote(slot)
+    }
+
     pub fn order_view(&self, order_id: OrderId, shared: &SharedState, status: &str) -> Option<OrderView> {
+        self.order_view_at(order_id, shared, status, None)
+    }
+
+    /// The view of an order for the report counted `at` among the
+    /// session's answers (None: as the order is now). A report written
+    /// before the server gave the order as held shows it as it was then,
+    /// also when the next report came before this one was given (two
+    /// reports of a stop order 2 ms apart, paper 13/11/2026).
+    pub fn order_view_at(&self, order_id: OrderId, shared: &SharedState, status: &str, at: Option<u64>) -> Option<OrderView> {
+        let held = shared.orders.held_since(order_id).is_some_and(|since| at.is_none_or(|at| at >= since));
         let tracked = self.open_orders.lock().unwrap().get(&order_id).cloned();
         let info = shared.orders.get_order_info(order_id);
         // The quantity filled so far, from the fills this client saw or
@@ -5430,8 +5534,17 @@ impl ClientCore {
         let reported_con_id = info.as_ref().map_or(0, |i| i.contract.con_id);
         let mut state = info.as_ref().map(|i| i.order_state.clone()).unwrap_or_default();
         state.status = status.into();
-        let (contract, order, last_fill_price, client_id) = match (tracked, info) {
+        let (contract, order, last_fill_price, client_id, reported_contract) = match (tracked, info) {
             (Some(t), info) => {
+                // The contract the server reported, for an order placed
+                // without a conId on a contract the session has no
+                // definition of (captured 05/10/2026, reqOpenOrders of two
+                // TRAIL orders on SPY placed by symbol).
+                let reported_contract = if t.contract.con_id == 0 {
+                    info.as_ref().filter(|i| i.contract.con_id != 0).map(|i| i.contract.clone())
+                } else {
+                    None
+                };
                 let mut order = t.order;
                 order.order_id = order_id;
                 if let Some(i) = &info {
@@ -5444,7 +5557,19 @@ impl ClientCore {
                     reported_volatility_order(&mut order, &i.order);
                 }
                 reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
-                sent_compete_values(&mut order, info.as_ref().map(|i| &i.order));
+                // A stock order: by the contract as placed, else as the
+                // session knows it, else as the server reported it; a
+                // contract of no known type is taken as a stock.
+                let named = |c: &ApiContract| (!c.sec_type.is_empty()).then(|| c.sec_type.to_ascii_uppercase());
+                let known_id = if t.contract.con_id != 0 { t.contract.con_id } else { reported_con_id };
+                let sec_type = named(&t.contract)
+                    .or_else(|| (known_id != 0).then(|| self.get_contract(known_id, shared)).flatten().and_then(|c| named(&c)))
+                    .or_else(|| info.as_ref().and_then(|i| named(&i.contract)));
+                let stock = sec_type.as_deref().is_none_or(|s| s == "STK");
+                sent_compete_values(&mut order, held, stock);
+                let modified = self.modified_orders.lock().unwrap().contains(&order_id);
+                limit_shown_until_held(&mut order, held, stock, modified,
+                    || self.running_quote(shared, known_id).and_then(|q| market_price_shown(&q)));
                 reported_scale_reset(&mut order, info.as_ref().map(|i| &i.order));
                 // The profit taker this client made for a scale order: a
                 // child under a negative id.
@@ -5524,15 +5649,28 @@ impl ClientCore {
                 {
                     order.post_only = false;
                 }
-                let modified = self.modified_orders.lock().unwrap().contains(&order_id);
                 session_order_fields(&mut order, &shared.reference.user_name(), modified);
-                (t.contract, order, t.last_fill_price, client_id)
+                // A market-if-touched order keeps the trail stop price it
+                // was placed with: a modify of its trigger changes its
+                // auxPrice alone (the reference 10.51, paper, regular hours
+                // 13/11/2026: 900 moved to 901, every later openOrder and
+                // the listing with auxPrice 901 and trailStopPrice 900).
+                if order.order_type.eq_ignore_ascii_case("MIT") && order.trail_stop_price != f64::MAX {
+                    let mut placed = self.touched_stops.lock().unwrap();
+                    order.trail_stop_price = *placed.entry(order_id).or_insert(order.trail_stop_price);
+                }
+                (t.contract, order, t.last_fill_price, client_id, reported_contract)
             }
             // An order the server reported: its own client id, and no
             // submitter (ibx#519).
             (None, Some(i)) => {
                 let client_id = i.order.client_id as i64;
                 let mut order = i.order;
+                // The compete values of a stock order not held yet only.
+                if !i.contract.sec_type.is_empty() && !i.contract.sec_type.eq_ignore_ascii_case("STK") {
+                    order.min_compete_size = i32::MAX;
+                    order.compete_against_best_offset = f64::MAX;
+                }
                 // An order this client placed and saw end is still an
                 // order of the session (the leg fills after a combo's
                 // Filled report).
@@ -5546,7 +5684,7 @@ impl ClientCore {
                         order.smart_combo_routing_params = p.clone();
                     }
                 }
-                (i.contract, order, 0.0, client_id)
+                (i.contract, order, 0.0, client_id, None)
             }
             (None, None) => return None,
         };
@@ -5555,13 +5693,20 @@ impl ClientCore {
         let mut contract = if contract.con_id != 0 && !bag {
             self.get_contract(contract.con_id, shared).unwrap_or(contract)
         } else if reported_con_id != 0 && !bag {
-            self.get_contract(reported_con_id, shared).unwrap_or(contract)
+            self.get_contract(reported_con_id, shared).or(reported_contract).unwrap_or(contract)
         } else {
             contract
         };
         placed_contract(&mut contract, &placed_exchange, shared);
         let mut order = order;
         reported_unset_values(&mut order);
+        // A combo order shows no compete values, from its first report on
+        // (the reference 10.51, paper, regular hours 13/11/2026: a combo
+        // of two funds the server refused, both openOrder of it).
+        if bag {
+            order.min_compete_size = i32::MAX;
+            order.compete_against_best_offset = f64::MAX;
+        }
         // The start time in the zone of the contract's trading hours, as
         // the reference shows it (ibx#598, paper 12/10/2026: "16:00:00" on
         // a Paris machine shows "20261012 10:00:00 US/Eastern").
@@ -6000,60 +6145,27 @@ impl ClientCore {
             }
         }
 
-        // Local tracked orders (non-terminal), enriched from secdef cache
-        {
-            let orders = self.open_orders.lock().unwrap();
-            for (&oid, o) in orders.iter() {
-                if is_open_status(&o.status) {
-                    let info = shared.orders.get_order_info(oid);
-                    // An order placed without a conId shows the contract the
-                    // server reported (captured 05/10/2026, reqOpenOrders of
-                    // two TRAIL orders on SPY placed by symbol).
-                    let con_id = if o.contract.con_id != 0 {
-                        o.contract.con_id
-                    } else {
-                        info.as_ref().map_or(0, |i| i.contract.con_id)
-                    };
-                    let mut contract = if con_id != 0 {
-                        self.get_contract(con_id, shared)
-                            .or_else(|| info.as_ref().map(|i| i.contract.clone()).filter(|c| c.con_id == con_id))
-                            .unwrap_or_else(|| o.contract.clone())
-                    } else {
-                        o.contract.clone()
-                    };
-                    let mut order = o.order.clone();
-                    if let Some(info) = &info {
-                        reported_trail_limit(&mut order, &info.order);
-                        // The OCA group the order has on the server, as in
-                        // the order's own openOrder (ibx#509, ibx#547).
-                        if !info.order.oca_group.is_empty() { order.oca_group = info.order.oca_group.clone(); }
-                    }
-                    reported_price_mgmt(&mut order, info.as_ref().map(|i| &i.order));
-                    reported_scale_reset(&mut order, info.as_ref().map(|i| &i.order));
-                    let profit_taker = oid < 0 && order.parent_id > 0;
-                    reported_scale_quantity(&mut order, info.as_ref().map(|i| &i.order), profit_taker);
-                    if order.scale_init_level_size != i32::MAX && order.scale_profit_offset != f64::MAX
-                        && self.scale_profit_refused.lock().unwrap().contains(&oid)
-                    {
-                        order.scale_profit_offset = f64::MAX;
-                    }
-                    reported_auto_cancel_date(&mut order, info.as_ref().map(|i| &i.order));
-                    let modified = self.modified_orders.lock().unwrap().contains(&oid);
-                    session_order_fields(&mut order, &shared.reference.user_name(), modified);
-                    placed_contract(&mut contract, &o.contract.exchange, shared);
-                    reported_unset_values(&mut order);
-                    Self::apply_combo_view(oid, &mut contract, &mut order, shared);
-                    result.push((oid, TrackedOrder {
-                        contract,
-                        order,
-                        status: o.status.clone(),
-                        filled: o.filled,
-                        remaining: o.remaining,
-                        instrument: o.instrument,
-                        last_fill_price: o.last_fill_price,
-                    }));
-                }
-            }
+        // The orders this client tracks, not ended: each as its openOrder
+        // shows it, the listing is the same view of the order (the
+        // reference 10.51, paper, regular hours 13/11/2026: a stop order
+        // listed 4 s after its only report, the same fields as that
+        // report's openOrder; an order placed with outside RTH, dropped
+        // with 2109, listed without it).
+        let open: Vec<(OrderId, TrackedOrder)> = self.open_orders.lock().unwrap().iter()
+            .filter(|(_, o)| is_open_status(&o.status))
+            .map(|(&oid, o)| (oid, o.clone()))
+            .collect();
+        for (oid, o) in open {
+            let Some(view) = self.order_view(oid, shared, &o.status) else { continue };
+            result.push((oid, TrackedOrder {
+                contract: view.contract,
+                order: view.order,
+                status: o.status,
+                filled: o.filled,
+                remaining: o.remaining,
+                instrument: o.instrument,
+                last_fill_price: o.last_fill_price,
+            }));
         }
 
         // Add shared-only entries not already present from local
@@ -11946,6 +12058,173 @@ mod session_tests {
         assert_eq!(time, "20261113 15:41:53 MET");
         core.execution_time_in_zone(&shared, 265598, &mut time);
         assert_eq!(time, "20261113 15:41:53 MET", "a contract whose zone is not known keeps its time");
+    }
+
+    // The reference 10.51, paper, regular hours 13/11/2026 (two runs of 31
+    // and 24 orders that cannot fill, each listed 4 s later): what a
+    // stock order shows until a report of the server gives it as held, and
+    // what the listing shows.
+    fn view_test_order(core: &ClientCore, id: OrderId, sec_type: &str, order: ApiOrder) {
+        let contract = ApiContract { con_id: 8894, symbol: "KO".into(), sec_type: sec_type.into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+        core.track_order(id, contract, order, 3);
+        core.update_order_status(id, "PreSubmitted", 0.0, 1.0);
+    }
+
+    /// A report of the server for the order: the first one (not held) or a
+    /// later one (held: no compete values).
+    fn view_test_report(shared: &SharedState, id: OrderId, order: &ApiOrder, held: bool) {
+        let mut reported = order.clone();
+        (reported.min_compete_size, reported.compete_against_best_offset) = if held { (i32::MAX, f64::MAX) } else { (100, 0.02) };
+        if held {
+            shared.orders.note_held(id);
+        }
+        shared.orders.push_order_info(id, crate::bridge::RichOrderInfo {
+            contract: ApiContract { con_id: 8894, ..Default::default() }, order: reported,
+            order_state: Default::default(), last_exec: Default::default(),
+        });
+    }
+
+    fn shown(core: &ClientCore, shared: &SharedState, id: OrderId) -> (f64, f64, f64, i32) {
+        let o = core.order_view(id, shared, "PreSubmitted").unwrap().order;
+        (o.lmt_price, o.aux_price, o.trail_stop_price, o.min_compete_size)
+    }
+
+    #[test]
+    fn a_stock_stop_shows_its_stop_plus_three_cents_until_held() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        let stop = |aux: f64| ApiOrder { action: "BUY".into(), order_type: "STP".into(), total_quantity: 1.0, aux_price: aux, tif: "DAY".into(), ..Default::default() };
+        // Before any report, and after the first one: the limit, the
+        // compete values; the listing is the same view.
+        view_test_order(&core, 31, "STK", stop(321.7));
+        assert_eq!(shown(&core, &shared, 31), (321.7 + 0.03, 321.7, 321.7, 100));
+        view_test_report(&shared, 31, &stop(321.7), false);
+        assert_eq!(shown(&core, &shared, 31), (321.72999999999996, 321.7, 321.7, 100));
+        let listed = core.open_orders_listing(&shared, OpenOrdersRequest::Open);
+        let o = &listed.iter().find(|(id, ..)| *id == 31).expect("listed").1.order;
+        assert_eq!((o.lmt_price, o.trail_stop_price, o.min_compete_size, o.compete_against_best_offset), (321.72999999999996, 321.7, 100, 0.02));
+        // Held: as the server has it; the openOrder of the report written
+        // before shows the order as it was then, also when it is given
+        // after the next report came.
+        shared.orders.push_order_error(31, 2109, "a report written before".into());
+        view_test_report(&shared, 31, &stop(321.7), true);
+        assert_eq!(shown(&core, &shared, 31), (0.0, 321.7, 321.7, i32::MAX));
+        let since = shared.orders.held_since(31).expect("held");
+        assert!(since > 0);
+        let at = |count: u64| {
+            let o = core.order_view_at(31, &shared, "PreSubmitted", Some(count)).unwrap().order;
+            (o.lmt_price, o.min_compete_size)
+        };
+        assert_eq!(at(since - 1), (321.72999999999996, 100));
+        assert_eq!(at(since), (0.0, i32::MAX));
+        // Modified before it is held: no limit, the compete values stay.
+        view_test_order(&core, 32, "STK", stop(900.0));
+        view_test_report(&shared, 32, &stop(900.0), false);
+        assert_eq!(shown(&core, &shared, 32).0, 900.03);
+        view_test_order(&core, 32, "STK", stop(901.0));
+        assert_eq!(shown(&core, &shared, 32), (0.0, 901.0, 901.0, 100));
+        // A future's and a currency pair's stop: neither.
+        for (id, sec_type) in [(33, "FUT"), (34, "CASH")] {
+            view_test_order(&core, id, sec_type, stop(20000.0));
+            view_test_report(&shared, id, &stop(20000.0), false);
+            assert_eq!(shown(&core, &shared, id), (0.0, 20000.0, 20000.0, i32::MAX), "{sec_type}");
+        }
+        // A stop placed with a limit price of its own keeps it.
+        view_test_order(&core, 35, "STK", ApiOrder { lmt_price: 5.0, ..stop(30.0) });
+        assert_eq!(shown(&core, &shared, 35).0, 5.0);
+    }
+
+    #[test]
+    fn a_touched_or_trailing_stock_order_shows_the_midpoint_until_held() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        let order = |kind: &str, aux: f64| ApiOrder { action: "SELL".into(), order_type: kind.into(), total_quantity: 1.0, aux_price: aux, tif: "DAY".into(), ..Default::default() };
+        // No quote of the contract: nothing.
+        view_test_order(&core, 41, "STK", order("MIT", 900.0));
+        view_test_order(&core, 42, "STK", order("TRAIL", 40.0));
+        assert_eq!(shown(&core, &shared, 41), (0.0, 900.0, 900.0, 100));
+        assert_eq!(shown(&core, &shared, 42), (0.0, 40.0, f64::MAX, 100));
+        // A quote of the contract without a running request: nothing.
+        let price = |p: f64| (p * PRICE_SCALE_F).round() as Price;
+        shared.market.push_quote(3, &crate::types::Quote { bid: price(750.03), ask: price(750.06), ..Default::default() });
+        assert_eq!(shown(&core, &shared, 41).0, 0.0);
+        // Its quotes running: the midpoint, rounded half up to the cent.
+        core.con_id_to_instrument.lock().unwrap().insert(8894, 3);
+        core.instrument_to_req.lock().unwrap().insert(3, vec![9301]);
+        shared.market.push_quote(3, &crate::types::Quote { bid: price(750.03), ask: price(750.06), last: price(750.059), ..Default::default() });
+        assert_eq!(shown(&core, &shared, 41).0, 750.05);
+        assert_eq!(shown(&core, &shared, 42).0, 750.05);
+        shared.market.push_quote(3, &crate::types::Quote { bid: price(749.93), ask: price(749.95), last: price(749.95), ..Default::default() });
+        assert_eq!(shown(&core, &shared, 41).0, 749.94);
+        // A trailing order placed with its stop: the stop + 0.03.
+        view_test_order(&core, 43, "STK", ApiOrder { trail_stop_price: 20.0, ..order("TRAIL", 40.0) });
+        assert_eq!(shown(&core, &shared, 43), (20.03, 40.0, 20.0, 100));
+        // Held: none of it.
+        for id in [41, 42, 43] {
+            let kind = if id == 41 { "MIT" } else { "TRAIL" };
+            view_test_report(&shared, id, &order(kind, 40.0), true);
+            assert_eq!(shown(&core, &shared, id).0, 0.0, "{id}");
+        }
+        // One side of the quote alone: nothing.
+        view_test_order(&core, 44, "STK", order("MIT", 900.0));
+        shared.market.push_quote(3, &crate::types::Quote { bid: price(749.93), ..Default::default() });
+        assert_eq!(shown(&core, &shared, 44).0, 0.0);
+    }
+
+    #[test]
+    fn the_trail_stop_price_shown_by_order_type() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        let order = |kind: &str, lmt: f64, aux: f64| ApiOrder { action: "BUY".into(), order_type: kind.into(), total_quantity: 1.0,
+            lmt_price: lmt, aux_price: aux, tif: "DAY".into(), ..Default::default() };
+        let unset = f64::MAX;
+        // (type, limit, aux) gives (aux shown, trail stop shown).
+        let cases: [(&str, f64, f64, f64, f64); 12] = [
+            ("LMT", 30.0, unset, 0.0, 31.0),
+            ("LMT", 30.0, 2.0, 0.0, 31.0),
+            ("LOC", 30.0, unset, 0.0, 31.0),
+            ("MIDPRICE", 30.0, unset, 0.0, 31.0),
+            ("STP LMT", 501.0, 500.0, 500.0, 500.0),
+            ("MIT", unset, 500.0, 500.0, 500.0),
+            ("LIT", 29.0, 30.0, 30.0, 30.0),
+            ("REL", 30.0, 0.01, 0.01, 0.01),
+            ("REL", 30.0, unset, 0.0, 31.0),
+            ("RPI", 100.0, unset, 0.0, 101.0),
+            ("RPI", 900.0, 0.02, 0.02, 0.02),
+            ("MOC", unset, unset, 0.0, unset),
+        ];
+        for (k, (kind, lmt, aux, aux_shown, stop_shown)) in cases.into_iter().enumerate() {
+            let id = 50 + k as OrderId;
+            view_test_order(&core, id, "STK", order(kind, lmt, aux));
+            view_test_report(&shared, id, &order(kind, lmt, aux), true);
+            let (_, a, s, _) = shown(&core, &shared, id);
+            assert_eq!((a, s), (aux_shown, stop_shown), "{kind} {lmt} {aux}");
+        }
+        // After a modify: a limit-type order shows none, a trigger-type
+        // order its new auxPrice, a touched order the one it was placed with.
+        for (id, kind, lmt, aux, stop_shown) in [(70, "MIDPRICE", 29.0, unset, unset), (71, "LMT", 29.0, 2.0, unset),
+            (72, "STP LMT", 901.0, 899.0, 899.0), (73, "REL", 30.0, 0.02, 0.02), (74, "MIT", unset, 901.0, 900.0)]
+        {
+            let first = if kind == "MIT" { 900.0 } else { aux };
+            view_test_order(&core, id, "STK", order(kind, if lmt == unset { unset } else { lmt + 1.0 }, first));
+            view_test_report(&shared, id, &order(kind, lmt, first), true);
+            let _ = shown(&core, &shared, id);
+            view_test_order(&core, id, "STK", order(kind, lmt, aux));
+            let (_, a, s, _) = shown(&core, &shared, id);
+            assert_eq!(s, stop_shown, "{kind} modified");
+            if kind == "MIT" { assert_eq!(a, 901.0); }
+        }
+    }
+
+    #[test]
+    fn a_combo_order_shows_no_compete_values() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        let order = ApiOrder { action: "BUY".into(), order_type: "LMT".into(), total_quantity: 1.0, lmt_price: 20.0, tif: "DAY".into(), ..Default::default() };
+        let contract = ApiContract { symbol: "QQQ,SPY".into(), sec_type: "BAG".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+        core.track_order(81, contract, order.clone(), 4);
+        core.update_order_status(81, "Inactive", 0.0, 1.0);
+        let o = core.order_view(81, &shared, "Inactive").unwrap().order;
+        assert_eq!((o.min_compete_size, o.compete_against_best_offset, o.trail_stop_price), (i32::MAX, f64::MAX, 21.0));
+        view_test_report(&shared, 81, &order, false);
+        let o = core.order_view(81, &shared, "Inactive").unwrap().order;
+        assert_eq!((o.min_compete_size, o.compete_against_best_offset), (i32::MAX, f64::MAX));
     }
 
     // ibx#751 (the reference 10.51, paper, 13/11/2026, regular hours): a

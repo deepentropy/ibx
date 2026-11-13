@@ -197,11 +197,11 @@ impl EClient {
 
     /// open_order + order_status for every report of a known order; a
     /// cancel gives order_status only (ibx#473).
-    fn report_order_update(&self, py: Python<'_>, shared: &Arc<SharedState>, update: &crate::types::OrderUpdate) -> PyResult<()> {
+    fn report_order_update(&self, py: Python<'_>, shared: &Arc<SharedState>, update: &crate::types::OrderUpdate, at: u64) -> PyResult<()> {
         let status = order_status_str(update.status);
         let filled = update.filled_qty_fixed as f64 / QTY_SCALE_F;
         let remaining = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
-        let view = self.core.order_view(update.order_id, shared, status);
+        let view = self.core.order_view_at(update.order_id, shared, status, Some(at));
         let (last_fill_price, client_id) = view.as_ref().map(|v| (v.last_fill_price, v.client_id)).unwrap_or((0.0, 0));
         let why_held = self.core.why_held(status, view.as_ref().map_or("", |v| v.order.order_type.as_str()), update.parent_id);
         // A cancel, and an order that never left, give the status only.
@@ -808,16 +808,16 @@ impl EClient {
                     // them; a reject then gives the order and its status once more
                     // (ibx#486). Statuses and notices in the order they were written
                     // (ibx#532).
-                    for report in run(&mut ib.order_reports, until) {
+                    for (at, report) in crate::client_core::inbox::run_counted(&mut ib.order_reports, until) {
                         match report {
                             crate::bridge::OrderReport::Update(update) => {
-                                self.report_order_update(py, shared, &update)?;
+                                self.report_order_update(py, shared, &update, at)?;
                                 reported.insert(update.order_id, update);
                             }
                             crate::bridge::OrderReport::Notice(order_id, code, msg) => {
                                 call_wrapper!(self.cb(py), py, "error", (shared.orders.api_order_id(order_id), code, msg.as_str(), ""));
                                 if let Some(update) = reported.get(&order_id).filter(|u| code == 201 && u.status != OrderStatus::Cancelled) {
-                                    self.report_order_update(py, shared, update)?;
+                                    self.report_order_update(py, shared, update, at)?;
                                 }
                             }
                         }

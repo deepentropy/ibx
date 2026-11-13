@@ -5702,8 +5702,18 @@ pub(crate) fn order_contract_reply(context: &mut Context, shared: &SharedState, 
             // The slot of that conId when it routes the same way: the
             // waiting orders take it and this slot is freed; else this slot
             // keeps the conId.
+            // The broker's ATS venue is written as the smart route on the
+            // wire and is another exchange all the same: an order for it
+            // keeps its own slot (the reference 10.51, paper, regular hours
+            // 13/11/2026: a not-held KO order given by its symbol for that
+            // venue after KO orders on SMART, discarded by the redirect
+            // precaution naming the venue).
+            let given = |m: &crate::engine::market_state::MarketState, i| {
+                let e = m.exchange(i);
+                if e.is_empty() { "SMART".to_string() } else { e.to_ascii_uppercase() }
+            };
             let same_route = |m: &crate::engine::market_state::MarketState, a, b| {
-                m.order_routing(a) == m.order_routing(b) && m.currency(a) == m.currency(b)
+                m.order_routing(a) == m.order_routing(b) && m.currency(a) == m.currency(b) && given(m, a) == given(m, b)
             };
             match context.market.instrument_by_con_id(con_id).filter(|&known| known != slot && same_route(&context.market, known, slot)) {
                 Some(known) => {
@@ -5853,6 +5863,11 @@ fn redirect_precaution(
             let (code, text) = redirect_warning(shown);
             log::warn!("Order {} discarded: directed to {} (redirect precaution)", oid, exchange);
             shared.orders.push_order_error(oid, code, text);
+            // The order is numbered when it is placed, sent or not: its
+            // Cancelled status has that permId (the reference 10.51,
+            // paper, regular hours 13/11/2026: three orders discarded in a
+            // row, the three ids after the last order sent).
+            let perm_id = context.new_server_id();
             shared.orders.push_order_update(OrderUpdate {
                 order_id: oid,
                 instrument,
@@ -5860,7 +5875,7 @@ fn redirect_precaution(
                 filled_qty_fixed: 0,
                 remaining_qty_fixed: qty,
                 avg_fill_price: 0,
-                perm_id: oid,
+                perm_id,
                 parent_id: req.new_order_side().and_then(|(_, a)| a).map_or(0, |a| a.parent_id),
                 timestamp_ns: context.now_ns(),
             });
@@ -5983,6 +5998,8 @@ fn route_bbo_precaution(req: &OrderRequest, context: &mut Context, shared: &Arc<
     let oid = req.order_id();
     log::warn!("Order {} discarded: route marketable to BBO (precaution)", oid);
     shared.orders.push_order_error(oid, 10353, ROUTE_BBO_WARNING.to_string());
+    // Numbered as any order placed (see the redirect precaution).
+    let perm_id = context.new_server_id();
     shared.orders.push_order_update(OrderUpdate {
         order_id: oid,
         instrument,
@@ -5990,7 +6007,7 @@ fn route_bbo_precaution(req: &OrderRequest, context: &mut Context, shared: &Arc<
         filled_qty_fixed: 0,
         remaining_qty_fixed: qty,
         avg_fill_price: 0,
-        perm_id: oid,
+        perm_id,
         parent_id: attrs.parent_id,
         timestamp_ns: context.now_ns(),
     });
@@ -7629,7 +7646,11 @@ mod tests {
         let (sent, errors, statuses, notices) = run("OVERNIGHT", true, false);
         assert!(!sent);
         assert_eq!(errors, [(8, 10329, "This order will be directly routed to OVERNIGHT.\nRestriction is specified in Precautionary Settings of Global Configuration/API.".to_string())]);
-        assert_eq!(statuses, [(OrderStatus::Cancelled, crate::types::QTY_SCALE, 8)]);
+        // Cancelled with a permId of the session's sequence, not the
+        // order id (the reference 10.51, paper, regular hours 13/11/2026).
+        assert_eq!(statuses.len(), 1);
+        assert_eq!((statuses[0].0, statuses[0].1), (OrderStatus::Cancelled, crate::types::QTY_SCALE));
+        assert_ne!(statuses[0].2, 8);
         assert_eq!(notices, [(8, 201, "Order rejected - reason:Order was discarded.".to_string())]);
         let (sent, errors, ..) = run("ISLAND", true, false);
         assert!(!sent);
@@ -7732,6 +7753,44 @@ mod tests {
         let tags: Vec<u32> = order.iter().map(|(t, _)| *t).filter(|t| matches!(t, 59 | 8032 | 100)).collect();
         assert_eq!(tags, [59, 8032, 100], "{order:?}");
         assert_eq!((tag(order, 8032), tag(order, 100)), (Some("1"), Some("BEST")));
+    }
+
+    // The reference 10.51, paper, regular hours 13/11/2026: an order for
+    // the venue given by its symbol, after orders of the contract on SMART,
+    // keeps the venue: the redirect precaution discards it and names it;
+    // and a discarded order takes the next id of the session's orders.
+    #[test]
+    fn an_order_for_the_ats_venue_by_symbol_keeps_its_venue_when_the_contract_is_known_on_smart() {
+        let mut context = order_context();
+        let known = context.market.register(265598);
+        context.market.set_symbol(known, "AAPL".into());
+        context.market.set_routing(known, "STK", "SMART");
+        context.market.set_currency(known, "USD");
+        let slot = context.market.try_register_unresolved().unwrap();
+        context.market.set_symbol(slot, "AAPL".into());
+        context.market.set_routing(slot, "STK", "IBKRATS");
+        context.market.set_currency(slot, "USD");
+        context.pending_orders.push(OrderRequest::SubmitLimit { order_id: 6, instrument: slot, side: Side::Buy, qty: 1, price: 100 * P });
+        let shared = Arc::new(SharedState::new());
+        let (client, mut server) = crate::protocol::connection::mem_pair();
+        let mut conn = Some(Connection::new_mem(client));
+        let _ = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        let id = format!("FixSecDefReqBySymbol{}", ORDER_LOOKUP_FIRST_ID);
+        let reply = format!("8=FIX.4.1|35=d|320={id}|322=*|323=4|55=AAPL|167=STK|207=BEST|6008=265598|15=USD|6431=LMT/3,MKT/1,STP/1,RTH/1|6046=BEST,NASDAQ,IBKRATS|146=1|6344=1|6008=265598|10=000|").replace('|', "\x01");
+        assert!(order_contract_reply(&mut context, &shared, &id, reply.as_bytes()));
+        assert_eq!(context.market.exchange(slot), "IBKRATS", "the order keeps its own slot");
+        assert_eq!(context.market.con_id(slot), Some(265598));
+        let frames = drain_frames(&mut context, &shared, &mut conn, &mut server);
+        assert!(frames.iter().all(|f| tag(f, 35) != Some("D")), "{frames:?}");
+        let errors = shared.orders.drain_order_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!((errors[0].0, errors[0].1), (6, 10311));
+        assert!(errors[0].2.starts_with("This order will be directly routed to IBKRATS."), "{}", errors[0].2);
+        let updates = shared.orders.drain_order_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].status, OrderStatus::Cancelled);
+        assert_ne!(updates[0].perm_id, 6);
+        assert_eq!(context.new_server_id(), updates[0].perm_id + 1, "the next order's id follows");
     }
 
     #[test]

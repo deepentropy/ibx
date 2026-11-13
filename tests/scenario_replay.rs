@@ -19,20 +19,8 @@ use ibx::test_support::scenario::{load_scenario, replay, Options, Outcome};
 use ibx::test_support::scenario::runner::assert_same_callbacks;
 use ibx::test_support::Fields;
 
-/// Known differences the order scenarios mask on both sides, each with its
-/// own ignored test in src/golden/orders.rs (ibx#510): the first openOrder
-/// of a STP order shows a limit price the wire does not carry
-/// (`stp_first_open_order_limit_price`).
-fn known(line: &str) -> String {
-    let mut f: Vec<String> = line.split('|').map(str::to_string).collect();
-    if f[0] == "openOrder" && f[5].contains("orderType=STP,") {
-        f[5] = f[5].split(',').map(|kv| if kv.starts_with("lmtPrice=") { "lmtPrice=-" } else { kv }).collect::<Vec<_>>().join(",");
-    }
-    f.join("|")
-}
-
 fn orders() -> Options {
-    Options::default().compare(&[ORDER]).mask(known)
+    Options::default().compare(&[ORDER])
 }
 
 /// Replay a scenario and check both legs; the outcome for more checks.
@@ -201,7 +189,7 @@ fn premarket_fill_then_modify_on_10_51() {
 fn top_of_book_after_orders_on_the_contract() {
     for (name, skip, until) in [("gw1051/20261019pre/premarket_order_types", [2167, 2168, 2706, 2707], 2773),
         ("20260928/premarket_order_types", [21961, 21962, 22575, 22576], 22599)] {
-        check(name, Options::default().mask(known).skip_seqs(&skip).until(until)
+        check(name, Options::default().skip_seqs(&skip).until(until)
             .keep(|l| !["9002", "9003"].contains(&l.split('|').nth(1).unwrap_or(""))));
     }
 }
@@ -249,7 +237,7 @@ fn rth_order_types() {
     // client sees).
     for (name, first, until) in [("gw1051/20261019rth/rth_order_types", 15, 2217), ("20260928/rth_order_types", 1, 6581)] {
         let skip: Vec<i64> = (first..first + 7).collect();
-        let mut opts = Options::default().mask(known).skip_orders(&skip).until(until)
+        let mut opts = Options::default().skip_orders(&skip).until(until)
             .keep(|l| !l.starts_with("commissionAndFeesReport"));
         if name.starts_with("gw1051/") {
             opts = opts.skip_frame(exchange_map);
@@ -271,7 +259,7 @@ fn rth_order_types() {
 fn combo_fill_executions_and_commissions() {
     // Recorded again on 10.51 at level 225 (19/10/2026, ibx#604).
     for name in ["gw1051/20261019rth/i105_combo_fill", "20260930/i105_combo_fill"] {
-        let o = check(name, Options::default().mask(known).skip_frame(exchange_map)
+        let o = check(name, Options::default().skip_frame(exchange_map)
             .keep(|l| !l.starts_with("position") && l.split('|').nth(1) != Some("9501")));
         assert!(o.theirs.iter().any(|(_, l)| l.starts_with("execDetails|")), "{name}");
         assert!(o.theirs.iter().any(|(_, l)| l.starts_with("commissionAndFeesReport|")), "{name}");
@@ -291,7 +279,7 @@ fn combo_fill_executions_and_commissions() {
 // earlier request's cancel (ibx#694).
 #[test]
 fn partial_fills_then_executions() {
-    let o = check("gw1051/20261014/partial_fills", Options::default().mask(known).skip_frame(exchange_map).until(2137));
+    let o = check("gw1051/20261014/partial_fills", Options::default().skip_frame(exchange_map).until(2137));
     // Seven executions as they came (the split sale twice), then 1, 3
     // and 6 rows of reqExecutions.
     assert_eq!(o.theirs.iter().filter(|(_, l)| l.starts_with("execDetails|")).count(), 17);
@@ -317,13 +305,13 @@ fn combo_symbol_conflict() {
 #[test]
 fn combo_orders_price_change_and_cancel() {
     let first = load_scenario("20260926/i105_combo_stock_smart");
-    check("20260926b/i105_combo_stock_smart", Options::default().mask(known).replies_from(&first));
+    check("20260926b/i105_combo_stock_smart", Options::default().replies_from(&first));
 }
 
 #[test]
 fn combo_per_leg_prices() {
     let first = load_scenario("20260926/i105_combo_stock_smart");
-    check("20260926b/i105_combo_leg_prices", Options::default().mask(known).replies_from(&first));
+    check("20260926b/i105_combo_leg_prices", Options::default().replies_from(&first));
 }
 
 // The combo orders on 10.51 at level 225, market closed (18/10/2026,
@@ -334,10 +322,10 @@ fn combo_per_leg_prices() {
 #[test]
 fn combo_orders_on_10_51() {
     let first = load_scenario("gw1051/20261018/i105_combo_stock_smart");
-    let o = check("gw1051/20261018/i105_combo_stock_smart", Options::default().mask(known));
+    let o = check("gw1051/20261018/i105_combo_stock_smart", Options::default());
     assert!(o.theirs.iter().any(|(_, l)| l.contains("|399|")), "{:?}", o.theirs);
     for name in ["gw1051/20261018b/i105_combo_stock_smart", "gw1051/20261018b/i105_combo_leg_prices"] {
-        let o = check(name, Options::default().mask(known).replies_from(&first));
+        let o = check(name, Options::default().replies_from(&first));
         assert!(o.frames_compared >= 2, "{name}: {}", o.frames_compared);
     }
 }
@@ -864,7 +852,7 @@ fn generic_ticks_in_one_list_on_10_51() {
 fn fill_then_positions() {
     let sc = load_scenario("gw1051/20261015/fill_then_positions");
     for opts in [orders().positions_of_the_recording(), orders().positions_of_the_recording().paced()] {
-        let o = replay(&sc, &opts.mask(known));
+        let o = replay(&sc, &opts);
         assert!(o.frame_error.is_none(), "{:?}", o.frame_error);
         assert_eq!(o.frames_compared, 2, "the buy and the sale");
         let snapshot = |lines: &[String]| -> (Vec<String>, Vec<String>) {
@@ -894,7 +882,7 @@ fn cancel_during_the_first_orders_lookups() {
     let sc = load_scenario("gw1051/20261015/cancel_during_lookup");
     for opts in [orders().positions_of_the_recording().lookups_at_their_point(),
                  orders().positions_of_the_recording().lookups_at_their_point().paced()] {
-        let o = replay(&sc, &opts.mask(known));
+        let o = replay(&sc, &opts);
         assert!(o.frame_error.is_none(), "{:?}", o.frame_error);
         assert_eq!(o.frames_compared, 1, "the sale only");
         let theirs: Vec<String> = o.theirs.iter().map(|(_, l)| l.clone()).collect();

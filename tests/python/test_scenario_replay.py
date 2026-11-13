@@ -334,15 +334,6 @@ class Driver:
         return json.dumps(calls, default=str)
 
 
-def known(line):
-    """The known differences of the Rust order scenarios (tests/scenario_replay.rs
-    `known`): the first STP limit price."""
-    f = line.split("|")
-    if f[0] == "openOrder" and len(f) > 5 and "orderType=STP," in f[5]:
-        f[5] = ",".join("lmtPrice=-" if kv.startswith("lmtPrice=") else kv for kv in f[5].split(","))
-    return "|".join(f)
-
-
 def replay(name, **opts):
     w = Recorder()
     c = EClient(w)
@@ -350,7 +341,7 @@ def replay(name, **opts):
     return out
 
 
-def assert_same(out, keep=lambda l: True, mask=known):
+def assert_same(out, keep=lambda l: True, mask=lambda l: l):
     assert out["frame_error"] is None, out["frame_error"]
     assert out["not_made"] == [], out["not_made"]
     ours = [mask(l) for l in out["ours"] if keep(l)]
@@ -482,8 +473,8 @@ def test_fill_then_positions():
         return sorted(lines[:end]), lines[end:]
 
     assert out["frame_error"] is None, out["frame_error"]
-    ours_first, ours_rest = split([known(l) for l in out["ours"]])
-    theirs_first, theirs_rest = split([known(l) for l in out["theirs"]])
+    ours_first, ours_rest = split(list(out["ours"]))
+    theirs_first, theirs_rest = split(list(out["theirs"]))
     assert ours_first == theirs_first
     for k, (a, b) in enumerate(zip(ours_rest, theirs_rest)):
         assert a == b, f"callback {k}:\n  ours      {a}\n  reference {b}"
@@ -926,7 +917,7 @@ def test_cancel_during_the_first_orders_lookups(paced):
                  lookups_at_their_point=True, paced=paced)
     assert out["frame_error"] is None, out["frame_error"]
     assert out["frames_compared"] == 1
-    ours, theirs = [known(l) for l in out["ours"]], [known(l) for l in out["theirs"]]
+    ours, theirs = list(out["ours"]), list(out["theirs"])
     a, b = ours.index("positionEnd"), theirs.index("positionEnd")
     assert sorted(ours[:a]) == sorted(theirs[:b])
     same_lines(ours[a:], theirs[b:])

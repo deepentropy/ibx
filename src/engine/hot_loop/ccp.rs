@@ -434,6 +434,35 @@ Loan Value [{loan}] must exceed the new total Initial Margin of  [{margin}].");
     text.to_string()
 }
 
+/// The reason of a server refusal as the reference gives it in error 201:
+/// the server's text, but for the refusal of a product that has no key
+/// information document, which the reference shows with line break marks
+/// of its own where the server's text has a space (10.51, paper, regular
+/// hours 13/11/2026: a combo order of two US funds; seven marks, the first
+/// in place of the space, the last before the final " .").
+pub(crate) fn shown_reject_reason(text: &str) -> std::borrow::Cow<'_, str> {
+    const START: &str = "No Trading Permission, Customer Ineligible; Ineligibility reasons: We're sorry but you cannot \
+trade this product based upon your classification as a \"Retail\" client under MiFID regulations.";
+    if !text.starts_with(START) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = text.to_string();
+    for (from, to) in [
+        ("Ineligibility reasons: We're", "Ineligibility reasons:<br>We're"),
+        ("under MiFID regulations", "under MiFID <br>regulations"),
+        ("it also introduces", "it also <br>introduces"),
+        ("it does not have a Key", "it does not<br> have a Key"),
+        ("To learn more about", "To learn <br>more about"),
+        ("are exempt from this", "are exempt <br>from this"),
+    ] {
+        out = out.replacen(from, to, 1);
+    }
+    if let Some(body) = out.strip_suffix(" .") {
+        out = format!("{body}<br> .");
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 fn perm_id_of(parsed: &fix::FieldMap<'_>) -> i64 {
     parsed.get(&11)
         .map(|s| s.strip_prefix('C').unwrap_or(s))
@@ -603,6 +632,10 @@ pub(crate) struct CcpState {
     /// Contract details answers waiting for the company lookup of their
     /// underlying and, when asked, its preferred definition (ibx#733).
     pub(crate) held_details: Vec<HeldDetails>,
+    /// Contract details asked on a venue the server answered with the
+    /// smart-routed record: the request, the venue, and the contracts
+    /// whose definition on that venue is still to ask.
+    pub(crate) venue_lookups: Vec<(ReqId, String, std::collections::VecDeque<i64>)>,
     /// Matching-symbols requests sent and not answered: (own request id
     /// sent, API reqId). No deadline, as in the reference; cleared without
     /// an answer when the auth link drops (ibx#369).
@@ -1212,6 +1245,7 @@ impl CcpState {
             preferred_after_company: HashSet::new(),
             pending_preferred: Vec::new(),
             held_details: Vec::new(),
+            venue_lookups: Vec::new(),
             pending_matching_symbols: Vec::new(),
             next_matching_symbols_id: 1,
             matching_waiting: None,
@@ -1841,7 +1875,7 @@ impl CcpState {
         let reject = tag(150) == Some("8") || tag(39) == Some("8");
         if reject && tag(20) != Some("3") {
             context.what_ifs.remove(clord);
-            let reason = parsed.get(&58).copied().unwrap_or("");
+            let reason = shown_reject_reason(parsed.get(&58).copied().unwrap_or(""));
             shared.orders.push_order_error(order_id, 201, format!("Order rejected - reason:{}", reason));
             return;
         }
@@ -2379,7 +2413,7 @@ impl CcpState {
         // reference reads as a missing permission (below).
         let mut perm_again: Option<i64> = None;
         if status == crate::types::OrderStatus::Rejected && status_changed {
-            let reason = parsed.get(&58).copied().unwrap_or("");
+            let reason = shown_reject_reason(parsed.get(&58).copied().unwrap_or(""));
             notice_out = Some((201, format!("Order rejected - reason:{}", reason)));
             // A reject of reason 901 for an order whose class the account
             // has no permission for, by the answer known by then: 460 in
@@ -2782,8 +2816,8 @@ impl CcpState {
             // report gives the order as held, unset from then on (the
             // reference 10.51, paper, regular hours, 19/10/2026: 26 orders,
             // every pending-new report is such a report; ibx#605).
-            if parsed.get(&6205).copied() == Some("1") {
-                context.compete_cleared.insert(clord_id);
+            if parsed.get(&6205).copied() == Some("1") && context.compete_cleared.insert(clord_id) {
+                shared.orders.note_held(clord_id);
             }
             let (min_compete_size, compete_against_best_offset) = if context.compete_cleared.contains(&clord_id) {
                 (i32::MAX, f64::MAX)
@@ -3700,6 +3734,34 @@ impl CcpState {
         self.pending_secdef.push((req_id, true, Instant::now() + SECDEF_TIMEOUT));
     }
 
+    /// The definition of a contract on one venue, for a contract details
+    /// request made on that venue and answered with the smart-routed record
+    /// (the reference 10.51, paper, regular hours 13/11/2026: IBM, KO and
+    /// SPY asked on OVERNIGHT, the first request of a process included; each
+    /// row is the venue's: its exchange, its 23 order types, its own
+    /// trading hours, no aggregated group). Its answer is the row.
+    fn send_venue_definition(&mut self, req_id: ReqId, con_id: i64, exchange: &str, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
+        if let Some(conn) = ccp_conn.as_mut().filter(|_| !self.disconnected) {
+            let name = format!("{}{}", crate::control::contracts::SECDEF_MSG_NAME, req_id);
+            let con_id_str = con_id.to_string();
+            let ts = chrono_free_timestamp();
+            let _ = conn.send_fix(&[
+                (fix::TAG_MSG_TYPE, "c"),
+                (fix::TAG_SENDING_TIME, &ts),
+                (crate::control::contracts::TAG_SECURITY_REQ_ID, &name),
+                (crate::control::contracts::TAG_SECURITY_REQ_TYPE, "2"),
+                (146, "1"),
+                (crate::control::contracts::TAG_IB_CON_ID, &con_id_str),
+                (6004, exchange),
+            ]);
+            hb.last_ccp_sent = Instant::now();
+            log::info!("Venue definition asked: req_id={} con_id={} exchange={}", req_id, con_id, exchange);
+        } else {
+            log::warn!("venue definition req_id={} queued with no CCP socket", req_id);
+        }
+        self.pending_secdef.push((req_id, true, Instant::now() + SECDEF_TIMEOUT));
+    }
+
     pub(crate) fn send_secdef_request_by_symbol(&mut self, req_id: ReqId, symbol: &str, sec_type: &str, exchange: &str, currency: &str, filters: &crate::types::SecDefFilters, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
         let strike = filters.strike_text();
         let (sec_type, continuous, with_futures) = lookup_sec_type(sec_type, filters);
@@ -4064,10 +4126,55 @@ impl CcpState {
         }
         if records.is_empty() && continuous.is_empty() {
             // No record: never a conId 0 row (ibx#400).
+            self.venue_lookups.retain(|v| v.0 != req_id);
             self.no_security_definition(req_id, shared, ccp_conn, hb);
             return;
         }
         let lookup = self.take_lookup(req_id);
+        // A request on a venue answered with smart-routed records alone:
+        // the rows are the venue's own definitions, asked contract by
+        // contract in the order of the records (see
+        // `send_venue_definition`).
+        if !single_shot && !internal_lookup(req_id) && continuous.is_empty()
+            && let Some(venue) = lookup.as_ref().map(|l| l.exchange.as_str()).filter(|e| !matches!(*e, "" | "SMART" | "BEST"))
+            && records.iter().all(|d| d.con_id != 0 && d.exchange == "SMART")
+        {
+            let mut con_ids: std::collections::VecDeque<i64> = std::collections::VecDeque::new();
+            for d in &records {
+                if !con_ids.contains(&d.con_id) {
+                    con_ids.push_back(d.con_id);
+                }
+            }
+            let venue = venue.to_string();
+            // The smart route's market rule, for the venue's row.
+            for d in &records {
+                if let Some(rule) = d.market_rule_id {
+                    self.market_rule_by_exchange.insert((d.con_id, d.exchange.clone()), rule);
+                }
+            }
+            if let Some(first) = con_ids.pop_front() {
+                self.send_venue_definition(req_id, first, &venue, ccp_conn, hb);
+                self.venue_lookups.push((req_id, venue, con_ids));
+                return;
+            }
+        }
+        // The answer of a venue's definition: the next contract is asked,
+        // the end comes after the last one's row. Its row has the market
+        // rule of each of its exchanges, as a row of the lookup itself
+        // (27 rules on the reference's row of IBM on OVERNIGHT).
+        let mut venue_row = false;
+        if single_shot && let Some(i) = self.venue_lookups.iter().position(|v| v.0 == req_id) {
+            venue_row = true;
+            match self.venue_lookups[i].2.pop_front() {
+                Some(next) => {
+                    let venue = self.venue_lookups[i].1.clone();
+                    self.send_venue_definition(req_id, next, &venue, ccp_conn, hb);
+                }
+                None => {
+                    self.venue_lookups.swap_remove(i);
+                }
+            }
+        }
         let multiplier = lookup.as_ref().and_then(|l| l.filters.multiplier.parse::<f64>().ok());
         // The request symbol is the CUSIP of a bond row when it reads as
         // one (as the reference does, ibx#436).
@@ -4184,7 +4291,7 @@ impl CcpState {
         for under in futures_preferred {
             self.send_underlying_preferred(under, context, ccp_conn, hb);
         }
-        let by_symbol = !single_shot && !contracts::secdef_response_is_last(msg);
+        let by_symbol = venue_row || (!single_shot && !contracts::secdef_response_is_last(msg));
         // The rest of the request (its per-exchange lookups, its trading
         // hours, its rows) waits for the company's answer and, when asked,
         // for the underlying's preferred definition, as the reference
@@ -4786,6 +4893,7 @@ impl CcpState {
         // Not while a fan-out still holds rows of the request (ibx#689).
         if !self.pending_schedule_pair.iter().any(|p| p.api_req_id == req_id)
             && !self.pending_fanout.iter().any(|p| p.api_req_id == req_id)
+            && !self.venue_lookups.iter().any(|v| v.0 == req_id)
         {
             shared.reference.push_contract_details_end(req_id);
             emit(event_tx, Event::ContractDetailsEnd(req_id));
@@ -6176,6 +6284,33 @@ mod tests {
         assert!(context.what_ifs.is_empty());
     }
 
+    // The reference 10.51, paper, regular hours 13/11/2026: the refusal of
+    // a product without a key information document, as error 201 gives it.
+    #[test]
+    fn the_refusal_for_a_missing_information_document_has_the_references_line_breaks() {
+        let server = "No Trading Permission, Customer Ineligible; Ineligibility reasons: We're sorry but you cannot trade \
+this product based upon your classification as a \"Retail\" client under MiFID regulations. While this classification \
+entitles you to the widest range of regulatory protections, it also introduces product eligibility considerations. \
+Specifically, you cannot trade this product because it does not have a Key Information Document (KID) or does not have \
+one in a language approved for your country. To learn more about this regulation and KIDs, or, if you believe you qualify \
+as a \"Professional\" client and are exempt from this restriction, see https://example.com/faq/1136192471 .";
+        let shown = shown_reject_reason(server);
+        let lines: Vec<&str> = shown.split("<br>").collect();
+        assert_eq!(lines.len(), 8, "{shown}");
+        assert_eq!(lines[0], "No Trading Permission, Customer Ineligible; Ineligibility reasons:");
+        assert!(lines[1].starts_with("We're sorry") && lines[1].ends_with("under MiFID "), "{}", lines[1]);
+        assert!(lines[2].starts_with("regulations.") && lines[2].ends_with("it also "), "{}", lines[2]);
+        assert!(lines[3].starts_with("introduces") && lines[3].ends_with("it does not"), "{}", lines[3]);
+        assert!(lines[4].starts_with(" have a Key") && lines[4].ends_with("To learn "), "{}", lines[4]);
+        assert!(lines[5].starts_with("more about") && lines[5].ends_with("are exempt "), "{}", lines[5]);
+        assert!(lines[6].starts_with("from this restriction") && lines[6].ends_with("1136192471"), "{}", lines[6]);
+        assert_eq!(lines[7], " .");
+        // The text without the marks is the server's, but for the first space.
+        assert_eq!(shown.replace("<br>", "").len() + 1, server.len());
+        // Any other reason is the server's.
+        assert_eq!(shown_reject_reason("YOUR ORDER IS NOT ACCEPTED."), "YOUR ORDER IS NOT ACCEPTED.");
+    }
+
     // ibx#462: a reject report of a preview
     // (execution type or order status rejected, not a status report) gives
     // error 201 alone; a status report with the rejected status is the
@@ -7499,6 +7634,76 @@ mod tests {
         ccp.process_ccp_message(&reply("42"), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
         assert!(ccp_messages_sent(&mut server).is_empty());
         assert_eq!(shared.reference.drain_contract_details().len(), 2);
+    }
+
+    // The reference 10.51, paper, regular hours 13/11/2026: a stock's
+    // contract details asked on OVERNIGHT; the lookup's answer is the
+    // smart-routed record, the row given is the venue's own definition.
+    #[test]
+    fn details_asked_on_a_venue_answered_with_the_smart_record_give_the_venues_row() {
+        let (mut ccp, mut context, shared) = u186_test_state();
+        let (client, mut server) = socket_pair();
+        let mut conn = Some(Connection::new_mem(client));
+        let mut hb = HeartbeatState::new();
+        ccp.send_secdef_request_by_symbol(51, "IBM", "STK", "OVERNIGHT", "USD", &Default::default(), &mut conn, &mut hb);
+        let _ = ccp_messages_sent(&mut server);
+        let smart = pipe_msg("35=d|320=FixSecDefReqBySymbol51|323=4|55=IBM|167=STK|207=BEST|6008=8314|6031=26|\
+             146=0|6344=1|6008=8314|6046=BEST,NYSE,OVERNIGHT,");
+        ccp.process_ccp_message(&smart, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        // One question: the contract on the venue; no row, no end yet.
+        let sent = ccp_messages_sent(&mut server);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].contains("|320=SecDefReqMsgReqByConid") && sent[0].ends_with("|321=2|146=1|6008=8314|6004=OVERNIGHT"), "{sent:?}");
+        assert!(shared.reference.drain_contract_details().is_empty());
+        assert!(shared.reference.drain_contract_details_end().is_empty());
+        let venue = pipe_msg("35=d|320=SecDefReqMsgReqByConid51|323=4|55=IBM|167=STK|207=OVERNIGHT|6008=8314|6031=26|\
+             146=0|6344=1|6008=8314|6046=BEST,NYSE,OVERNIGHT,");
+        ccp.process_ccp_message(&venue, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        // The rule of its other exchange is asked; the row comes with it.
+        let asked = ccp_messages_sent(&mut server);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(asked[0].ends_with("|6008=8314|6004=NYSE"), "{asked:?}");
+        assert!(shared.reference.drain_contract_details().is_empty());
+        let rid = asked[0].split('|').find_map(|f| f.strip_prefix("320=")).unwrap().to_string();
+        let rule = pipe_msg(&format!("35=d|320={rid}|323=4|55=IBM|167=STK|207=NYSE|6008=8314|6031=27|146=0|6344=0"));
+        ccp.process_ccp_message(&rule, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let rows = shared.reference.drain_contract_details();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].0, rows[0].1.con_id, rows[0].1.exchange.as_str()), (51, 8314, "OVERNIGHT"));
+        assert_eq!(rows[0].1.market_rule_ids, "26,27,26", "the smart route's, then each exchange's");
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![51]);
+        assert!(ccp.venue_lookups.is_empty() && ccp.pending_secdef.is_empty() && ccp.pending_fanout.is_empty());
+
+        // A venue the server answers itself: its record is the row.
+        ccp.send_secdef_request_by_symbol(52, "IBM", "STK", "OVERNIGHT", "USD", &Default::default(), &mut conn, &mut hb);
+        let _ = ccp_messages_sent(&mut server);
+        let own = pipe_msg("35=d|320=FixSecDefReqBySymbol52|323=4|55=IBM|167=STK|207=OVERNIGHT|6008=8314|6031=26|\
+             146=0|6344=1|6008=8314|6046=BEST,NYSE,OVERNIGHT,");
+        ccp.process_ccp_message(&own, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(ccp.venue_lookups.is_empty());
+        assert!(!ccp_messages_sent(&mut server).iter().any(|m| m.contains("SecDefReqMsgReqByConid")));
+        assert_eq!(shared.reference.drain_contract_details().len(), 1);
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![52]);
+
+        // Two contracts in the smart answer: asked one after the other,
+        // one end after the second row; a venue's lookup that finds
+        // nothing ends the request with the error.
+        ccp.send_secdef_request_by_symbol(53, "XY", "STK", "OVERNIGHT", "", &Default::default(), &mut conn, &mut hb);
+        let _ = ccp_messages_sent(&mut server);
+        let two = pipe_msg("35=d|320=FixSecDefReqBySymbol53|323=4|55=XY|167=STK|207=BEST|6008=1|6031=26|55=XY|167=STK|207=BEST|6008=2|6031=26|\
+             146=0|6344=2|6008=1|6046=BEST,OVERNIGHT,|6008=2|6046=BEST,OVERNIGHT,");
+        ccp.process_ccp_message(&two, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let answer = |con_id: u32| pipe_msg(&format!(
+            "35=d|320=SecDefReqMsgReqByConid53|323=4|55=XY|167=STK|207=OVERNIGHT|6008={con_id}|6031=26|146=0|6344=1|6008={con_id}|6046=BEST,OVERNIGHT,"));
+        assert!(ccp_messages_sent(&mut server).iter().any(|m| m.ends_with("|6008=1|6004=OVERNIGHT")));
+        ccp.process_ccp_message(&answer(1), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(ccp_messages_sent(&mut server).iter().any(|m| m.ends_with("|6008=2|6004=OVERNIGHT")));
+        assert!(shared.reference.drain_contract_details_end().is_empty(), "the second contract is on its way");
+        ccp.process_ccp_message(&answer(2), &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        let ids: Vec<i64> = shared.reference.drain_contract_details().iter().map(|(_, d)| d.con_id).collect();
+        assert_eq!(ids, [1, 2]);
+        assert_eq!(shared.reference.drain_contract_details_end(), vec![53]);
+        assert!(ccp.venue_lookups.is_empty());
     }
 
     // ibx#689 (the reference 10.51's recording of a whole option chain,

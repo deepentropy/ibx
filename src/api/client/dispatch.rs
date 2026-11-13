@@ -118,7 +118,7 @@ impl EClient {
                         wrapper.error(self.shared.orders.api_order_id(order_id), code, &msg, "");
                     }
                 }
-                Kind::order_reports => self.deliver_order_reports(wrapper, run(&mut ib.order_reports, until), &mut reported),
+                Kind::order_reports => self.deliver_order_reports(wrapper, crate::client_core::inbox::run_counted(&mut ib.order_reports, until), &mut reported),
                 Kind::what_if_responses => self.deliver_what_ifs(wrapper, run(&mut ib.what_if_responses, until)),
                 // The server's finished orders of the day, then the end
                 // (ibx#695).
@@ -428,17 +428,17 @@ impl EClient {
     /// the order and its status once more (ibx#486; every four-leg
     /// recording of 26/09 to 02/10/2026). The 201 of an order the
     /// redirect precaution discarded (Cancelled) does not.
-    fn deliver_order_reports(&self, wrapper: &mut impl Wrapper, reports: impl IntoIterator<Item = OrderReport>, reported: &mut HashMap<OrderId, OrderUpdate>) {
-        for report in reports {
+    fn deliver_order_reports(&self, wrapper: &mut impl Wrapper, reports: impl IntoIterator<Item = (u64, OrderReport)>, reported: &mut HashMap<OrderId, OrderUpdate>) {
+        for (at, report) in reports {
             match report {
                 OrderReport::Update(update) => {
-                    self.report_order_update(wrapper, &update);
+                    self.report_order_update(wrapper, &update, at);
                     reported.insert(update.order_id, update);
                 }
                 OrderReport::Notice(order_id, code, msg) => {
                     wrapper.error(self.shared.orders.api_order_id(order_id), code, &msg, "");
                     if let Some(update) = reported.get(&order_id).filter(|u| code == 201 && u.status != OrderStatus::Cancelled) {
-                        self.report_order_update(wrapper, update);
+                        self.report_order_update(wrapper, update, at);
                     }
                 }
             }
@@ -484,11 +484,11 @@ impl EClient {
 
     /// openOrder (not for a cancel) and orderStatus of an order update
     /// (ibx#473).
-    fn report_order_update(&self, wrapper: &mut impl Wrapper, update: &OrderUpdate) {
+    fn report_order_update(&self, wrapper: &mut impl Wrapper, update: &OrderUpdate, at: u64) {
         let status = order_status_str(update.status);
         let filled_f = update.filled_qty_fixed as f64 / QTY_SCALE_F;
         let remaining_f = update.remaining_qty_fixed as f64 / QTY_SCALE_F;
-        let view = self.core.order_view(update.order_id, &self.shared, status);
+        let view = self.core.order_view_at(update.order_id, &self.shared, status, Some(at));
         let (last_fill_price, client_id) = view.as_ref().map(|v| (v.last_fill_price, v.client_id)).unwrap_or((0.0, 0));
         let why_held = self.core.why_held(status, view.as_ref().map_or("", |v| v.order.order_type.as_str()), update.parent_id);
         // A cancel, and an order that never left, give the status only.

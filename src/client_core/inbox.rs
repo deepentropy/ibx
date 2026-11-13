@@ -200,8 +200,13 @@ fn merge_queue<T>(into: &mut VecDeque<(u64, T)>, from: VecDeque<(u64, T)>) {
 
 /// The answers of a queue counted below `until`, in their order.
 pub(crate) fn run<T>(queue: &mut VecDeque<(u64, T)>, until: u64) -> impl Iterator<Item = T> + '_ {
+    run_counted(queue, until).map(|(_, item)| item)
+}
+
+/// [`run`], each answer with its count.
+pub(crate) fn run_counted<T>(queue: &mut VecDeque<(u64, T)>, until: u64) -> impl Iterator<Item = (u64, T)> + '_ {
     let n = queue.iter().take_while(|(at, _)| *at < until).count();
-    queue.drain(..n).map(|(_, item)| item)
+    queue.drain(..n)
 }
 
 #[cfg(test)]
