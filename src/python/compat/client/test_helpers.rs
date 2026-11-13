@@ -831,7 +831,7 @@ impl EClient {
                 .collect(),
         };
         let object = super::super::config::update_config_response(py, &response)?;
-        self.wrapper.call_method1(py, "update_config_response_proto_buf", (object,))?;
+        self.cb(py).call_method1(py, "update_config_response_proto_buf", (object,))?;
         Ok(())
     }
 

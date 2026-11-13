@@ -172,7 +172,7 @@ impl EClient {
         let _request = crate::engine::park::one_request();
         if let Some(r) = self.not_connected(-1) { return r; }
         if self.later(move |this, py| this.req_managed_accts(py)) { return Ok(()); }
-        self.wrapper.call_method1(py, "managed_accounts", (self.managed_accounts_text().as_str(),))?;
+        self.cb(py).call_method1(py, "managed_accounts", (self.managed_accounts_text().as_str(),))?;
         Ok(())
     }
 

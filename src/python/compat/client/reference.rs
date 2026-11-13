@@ -486,13 +486,15 @@ impl EClient {
         // (ibx#437).
         match crate::client_core::market_rule_answer(rule, market_rule_id) {
             Ok(increments) => {
-                let list = pyo3::types::PyList::new(py, increments.iter().map(|pi| {
-                    pyo3::types::PyTuple::new(py, &[pi.low_edge, pi.increment]).unwrap()
-                }))?;
-                self.wrapper.call_method1(py, "market_rule", (market_rule_id as i64, list.as_any()))?;
+                // Each with the official attributes, and still a pair (ibx#725).
+                let entries = increments.iter()
+                    .map(|pi| super::super::named::price_increment(py, pi.low_edge, pi.increment))
+                    .collect::<PyResult<Vec<_>>>()?;
+                let list = pyo3::types::PyList::new(py, entries)?;
+                self.cb(py).call_method1(py, "market_rule", (market_rule_id as i64, list.as_any()))?;
             }
             Err((code, message)) => {
-                self.wrapper.call_method1(py, "error", (-1i64, code, message.as_str(), ""))?;
+                self.cb(py).call_method1(py, "error", (-1i64, code, message.as_str(), ""))?;
             }
         }
         Ok(())

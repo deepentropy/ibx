@@ -842,6 +842,11 @@ pub struct MarketDataState {
     /// API client gives the last size and price in their steps from
     /// session level 222 (ibx#613). Written when a subscription goes out.
     last_increments: Box<[[AtomicU64; 2]; MAX_INSTRUMENTS]>,
+    /// The last price and last size precisions of the contracts whose
+    /// definition was read, by contract id, as the definition's text: the
+    /// protobuf form of the Python client's tickReqParams carries them
+    /// (ibx#725). Written when a definition is read, never on a tick.
+    precisions: Mutex<HashMap<i64, (String, String)>>,
 }
 
 /// What a client reports as tickReqParams for a subscription, from its
@@ -963,6 +968,7 @@ impl MarketDataState {
             tbt_errors: SeqQueue::new(&stamp),
             error_tap: ErrorTap::default(),
             last_increments: Box::new(std::array::from_fn(|_| [AtomicU64::new(0), AtomicU64::new(0)])),
+            precisions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1245,6 +1251,20 @@ impl MarketDataState {
             s.store(size, Ordering::Relaxed);
             p.store(price, Ordering::Relaxed);
         }
+    }
+
+    /// The last price and last size precisions of a contract's definition
+    /// (ibx#725); an empty text for one it does not give.
+    #[doc(hidden)] pub fn set_precisions(&self, con_id: i64, price: Option<f64>, size: Option<f64>) {
+        if price.is_some() || size.is_some() {
+            let text = |v: Option<f64>| v.map(|v| v.to_string()).unwrap_or_default();
+            self.precisions.lock().unwrap().insert(con_id, (text(price), text(size)));
+        }
+    }
+
+    /// The precisions of a contract whose definition was read (ibx#725).
+    pub fn precisions(&self, con_id: i64) -> Option<(String, String)> {
+        self.precisions.lock().unwrap().get(&con_id).cloned()
     }
 
     /// The size and price increments of a slot's contract (ibx#613): two

@@ -322,7 +322,7 @@ impl EClient {
             ClientCore::wait_order_replay(&shared);
             self.core.next_valid_id(&shared)
         });
-        self.wrapper.call_method1(py, "next_valid_id", (next_id,))?;
+        self.cb(py).call_method1(py, "next_valid_id", (next_id,))?;
         let _ = num_ids;
         Ok(())
     }
@@ -439,7 +439,7 @@ impl EClient {
             };
             let exec_py = Py::new(py, exec_obj)?.into_any();
 
-            self.wrapper.call_method(
+            self.cb(py).call_method(
                 py, "exec_details",
                 (req_id, &c_py, &exec_py),
                 None,
@@ -456,9 +456,9 @@ impl EClient {
                 yield_redemption_date: cr.yield_redemption_date.clone(),
             };
             let report_py = Py::new(py, report)?.into_any();
-            self.wrapper.call_method1(py, "commission_and_fees_report", (&report_py,))?;
+            self.cb(py).call_method1(py, "commission_and_fees_report", (&report_py,))?;
         }
-        self.wrapper.call_method1(py, "exec_details_end", (req_id,))?;
+        self.cb(py).call_method1(py, "exec_details_end", (req_id,))?;
         Ok(())
     }
 
@@ -494,14 +494,14 @@ impl EClient {
             // An order kept pending after a refusal: its status only
             // (ibx#682).
             if tracked.status != "ApiPending" {
-                self.wrapper.call_method(
+                self.cb(py).call_method(
                     py, "open_order",
                     (*order_id, &c_py, &o_py, &state_py),
                     None,
                 )?;
             }
             let why_held = self.core.why_held(&tracked.status, &tracked.order.order_type, tracked.order.parent_id);
-            self.wrapper.call_method(
+            self.cb(py).call_method(
                 py, "order_status",
                 (*order_id, tracked.status.as_str(), crate::python::compat::values::decimal_to_py(py, tracked.filled)?,
                  crate::python::compat::values::decimal_to_py(py, tracked.remaining)?,
@@ -509,7 +509,7 @@ impl EClient {
                 None,
             )?;
         }
-        self.wrapper.call_method0(py, "open_order_end")?;
+        self.cb(py).call_method0(py, "open_order_end")?;
         Ok(())
     }
 }

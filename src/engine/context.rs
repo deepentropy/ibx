@@ -389,6 +389,9 @@ pub struct Context {
     /// packed (`md_events::Increment`), kept from session level 222, whose
     /// last size and price are given in their steps (ibx#613).
     pub(crate) def_increments: HashMap<i64, (u64, u64)>,
+    /// The last price and size precisions of definitions just read, to
+    /// hand to the client (ibx#725).
+    pub(crate) precisions_due: Vec<(i64, Option<f64>, Option<f64>)>,
     /// The conIds whose increments came since the last publication to
     /// their market data slots (ibx#613).
     pub(crate) increments_due: Vec<i64>,
@@ -678,6 +681,7 @@ impl Context {
             mifid_orders: std::collections::HashMap::new(),
             round_lots: HashMap::new(),
             def_increments: HashMap::new(),
+            precisions_due: Vec::new(),
             increments_due: Vec::new(),
             order_lookup_filters: HashMap::new(),
             us_lots: std::collections::HashSet::new(),

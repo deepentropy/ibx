@@ -223,6 +223,10 @@ fn note_record_terms(context: &mut Context, con_id: i64, def: &crate::control::c
     if terms.is_option() || crate::control::optcalc::market::has_model(&terms.sec_type) {
         context.option_terms.insert(con_id, terms);
     }
+    // Its precisions, for the protobuf form of tickReqParams (ibx#725).
+    if def.last_price_precision.is_some() || def.last_size_precision.is_some() {
+        context.precisions_due.push((con_id, def.last_price_precision, def.last_size_precision));
+    }
     // The steps of its last size and price, from session level 222
     // (ibx#613).
     if crate::client_core::session_level() >= crate::client_core::LEVEL_FRACTIONAL_LAST_SIZE {
@@ -245,6 +249,9 @@ pub(crate) fn increments_lookup_needed(level: i32, context: &Context, con_id: i6
 /// The increments of definitions that came give their contracts' market
 /// data slots their steps (ibx#613).
 pub(crate) fn publish_answered_increments(context: &mut Context, shared: &SharedState) {
+    for (con_id, price, size) in context.precisions_due.drain(..) {
+        shared.market.set_precisions(con_id, price, size);
+    }
     if context.increments_due.is_empty() {
         return;
     }

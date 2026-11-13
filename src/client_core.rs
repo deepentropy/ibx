@@ -3699,6 +3699,14 @@ impl ClientCore {
     }
 
     /// The market data requests of an instrument, in the order they came.
+    /// The last price and last size precisions of a market data request's
+    /// contract, once its definition was read (ibx#725).
+    pub fn precisions_of(&self, req_id: i64, shared: &SharedState) -> Option<(String, String)> {
+        let instrument = *self.req_to_instrument.lock().unwrap().get(&req_id)?;
+        let con_id = *self.md_slot_con_ids.lock().unwrap().get(&instrument)?;
+        shared.market.precisions(con_id)
+    }
+
     pub fn md_requests_of(&self, instrument: InstrumentId) -> Vec<i64> {
         self.instrument_to_req.lock().unwrap().get(&instrument).cloned().unwrap_or_default()
     }

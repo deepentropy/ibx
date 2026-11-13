@@ -3,6 +3,8 @@
 pub mod client;
 pub mod config;
 pub mod contract;
+pub(crate) mod named;
+pub(crate) mod proto_forms;
 pub mod tick_types;
 pub mod values;
 pub mod wrapper;
@@ -83,5 +85,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     tick_types::register(m)?;
     wrapper::register(m)?;
     client::register(m)?;
+    named::register(m)?;
+    // After the classes: it adds the protobuf requests and callbacks to them.
+    proto_forms::register(m)?;
     Ok(())
 }

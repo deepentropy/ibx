@@ -67,6 +67,8 @@ _OFFICIAL = {
     "verify_message_api": "verifyMessageAPI",
     "verify_and_auth_message_api": "verifyAndAuthMessageAPI",
 }
+# The protobuf requests and callbacks (ibx#725), under the names the client itself lists.
+_OFFICIAL.update(ibx.proto_forms.OFFICIAL_NAMES)
 
 # Official keyword arguments whose ibx name is not their snake case (an ibx
 # argument that is not used has the same name after an underscore).
@@ -86,9 +88,10 @@ IBX_ONLY = {
 # Official requests and callbacks ibx does not have.
 NOT_IN_IBX = {
     # connection set-up of a socket client
-    "setConnState", "setConnectOptions", "setOptionalCapabilities", "startApi",
+    "setConnState", "setConnectOptions", "setOptionalCapabilities", "startApi", "startApiProtoBuf",
     # callbacks
     "rerouteMktDataReq", "rerouteMktDepthReq", "tickEFP", "winError",
+    "rerouteMarketDataRequestProtoBuf", "rerouteMarketDepthRequestProtoBuf",
 }
 
 
@@ -208,8 +211,25 @@ def _forward(name):
     return call
 
 
+class _Proto:
+    """A protobuf callback of the bridge: the target's when the target defines it, else
+    the client's own, which does nothing. The client gives the protobuf callbacks to a
+    wrapper that defines them (ibx#725), and looks at its first callback."""
+
+    def __init__(self, name):
+        self.name, self.official = name, official_name(name)
+
+    def __get__(self, bridge, owner=None):
+        if bridge is None:
+            return self
+        target = getattr(bridge._target, self.official)
+        if getattr(target, "__func__", target) is _nothing:
+            return getattr(super(_Bridge, bridge), self.name)
+        return target
+
+
 for _name in CALLBACKS:
-    setattr(_Bridge, _name, _forward(_name))
+    setattr(_Bridge, _name, _Proto(_name) if _name.endswith("_proto_buf") else _forward(_name))
 
 # ── Requests ──
 

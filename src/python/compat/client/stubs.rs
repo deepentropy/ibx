@@ -16,7 +16,7 @@ impl EClient {
         let sc = match answer {
             Ok(sc) => sc,
             Err((code, msg)) => {
-                self.wrapper.call_method1(py, "error", (req_id, code, msg.as_str(), ""))?;
+                self.cb(py).call_method1(py, "error", (req_id, code, msg.as_str(), ""))?;
                 return Ok(());
             }
         };
@@ -26,14 +26,14 @@ impl EClient {
         for c in sc.iter() {
             map.set_item(c.bit_number, (c.exchange.as_str(), c.exchange_letter.as_str()))?;
         }
-        self.wrapper.call_method1(py, "smart_components", (req_id, map.as_any()))?;
+        self.cb(py).call_method1(py, "smart_components", (req_id, map.as_any()))?;
         Ok(())
     }
 
     /// The error of a refused display group request (ibx#424).
     fn display_group_refused(&self, py: Python<'_>, text: &str) -> PyResult<()> {
         let (id, code) = crate::client_core::DISPLAY_GROUP_REFUSAL;
-        self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
+        self.cb(py).call_method1(py, "error", (id, code, text, ""))?;
         Ok(())
     }
 
@@ -156,7 +156,7 @@ impl EClient {
         // The local clock plus the offset to the server clock of the
         // logon, as the reference (ibx#421).
         let now = self.shared_state()?.reference.server_time_secs();
-        self.wrapper.call_method1(py, "current_time", (now,))?;
+        self.cb(py).call_method1(py, "current_time", (now,))?;
         Ok(())
     }
 
@@ -167,7 +167,7 @@ impl EClient {
         if self.later(move |this, py| this.req_current_time_in_millis(py)) { return Ok(()); }
         // The clock of req_current_time, in milliseconds (ibx#516).
         let now = self.shared_state()?.reference.server_time_millis();
-        self.wrapper.call_method1(py, "current_time_in_millis", (now,))?;
+        self.cb(py).call_method1(py, "current_time_in_millis", (now,))?;
         Ok(())
     }
 
@@ -183,7 +183,7 @@ impl EClient {
         // The official client library's own check, on the caller's thread
         // before anything is sent: never put off (ibx#532).
         if let Some((code, text)) = crate::client_core::lookup_cancel_refusal(crate::client_core::session_level(), false) {
-            self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
+            self.cb(py).call_method1(py, "error", (req_id, code, text, ""))?;
         }
         Ok(())
     }
@@ -197,7 +197,7 @@ impl EClient {
         // The official client library's own check, on the caller's thread
         // before anything is sent: never put off (ibx#532).
         if let Some((code, text)) = crate::client_core::lookup_cancel_refusal(crate::client_core::session_level(), true) {
-            self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
+            self.cb(py).call_method1(py, "error", (req_id, code, text, ""))?;
         }
         Ok(())
     }
@@ -218,7 +218,7 @@ impl EClient {
         let (name, version) = (api_name.to_string(), api_version.to_string());
         if self.later(move |this, py| this.verify_request(py, &name, &version)) { return Ok(()); }
         let (id, code, text) = crate::client_core::VERIFY_REQUEST_NO_INTENT;
-        self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
+        self.cb(py).call_method1(py, "error", (id, code, text, ""))?;
         Ok(())
     }
 
@@ -235,7 +235,7 @@ impl EClient {
         if self.later(move |this, py| this.verify_message(py, &data)) { return Ok(()); }
         if self.shared_state()?.reference.form_10_40() {
             let (id, code, text) = crate::client_core::VERIFY_MESSAGE_OUT_OF_SEQUENCE;
-            self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
+            self.cb(py).call_method1(py, "error", (id, code, text, ""))?;
             return Ok(());
         }
         // No answer, and the session answers no more request, as the
@@ -258,7 +258,7 @@ impl EClient {
         let (name, version, key) = (api_name.to_string(), api_version.to_string(), opaque_isv_key.to_string());
         if self.later(move |this, py| this.verify_and_auth_request(py, &name, &version, &key)) { return Ok(()); }
         let (id, code, text) = crate::client_core::VERIFY_AND_AUTH_REQUEST_NO_INTENT;
-        self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
+        self.cb(py).call_method1(py, "error", (id, code, text, ""))?;
         Ok(())
     }
 
@@ -327,13 +327,13 @@ impl EClient {
         let shared = self.shared_state()?;
         if !shared.reference.fa_session() {
             let (id, code, text) = crate::client_core::REQUEST_FA_NOT_FA;
-            self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
+            self.cb(py).call_method1(py, "error", (id, code, text, ""))?;
             return Ok(());
         }
         // From the session's FA data (ibx#507).
         match crate::client_core::fa_request(&shared, fa_data_type) {
-            Ok(xml) => { self.wrapper.call_method1(py, "receive_fa", (fa_data_type, xml))?; }
-            Err((id, code, text)) => { self.wrapper.call_method1(py, "error", (id, code, text, ""))?; }
+            Ok(xml) => { self.cb(py).call_method1(py, "receive_fa", (fa_data_type, xml))?; }
+            Err((id, code, text)) => { self.cb(py).call_method1(py, "error", (id, code, text, ""))?; }
         }
         Ok(())
     }
@@ -351,7 +351,7 @@ impl EClient {
         let shared = self.shared_state()?;
         if !shared.reference.fa_session() {
             let (code, text) = crate::client_core::REPLACE_FA_NOT_FA;
-            self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?;
+            self.cb(py).call_method1(py, "error", (req_id, code, text, ""))?;
             return Ok(());
         }
         // Checked, replaced and saved; `replace_fa_end` when the saves are
@@ -362,7 +362,7 @@ impl EClient {
                 super::send_cmd(py, &tx, save)?;
             }
             Ok(None) => {}
-            Err((code, text)) => { self.wrapper.call_method1(py, "error", (req_id, code, text, ""))?; }
+            Err((code, text)) => { self.cb(py).call_method1(py, "error", (req_id, code, text, ""))?; }
         }
         Ok(())
     }
@@ -377,7 +377,7 @@ impl EClient {
         if !crate::client_core::ClientCore::ids_fit("query_display_groups", &[req_id]) { return Ok(()); }
         // The fixed list of groups, as the reference (ibx#424).
         match crate::client_core::ClientCore::query_display_groups(req_id) {
-            Ok(groups) => { self.wrapper.call_method1(py, "display_group_list", (req_id, groups))?; }
+            Ok(groups) => { self.cb(py).call_method1(py, "display_group_list", (req_id, groups))?; }
             Err(text) => self.display_group_refused(py, &text)?,
         }
         Ok(())
@@ -393,7 +393,7 @@ impl EClient {
         if self.later(move |this, py| this.subscribe_to_group_events(py, req_id, group_id)) { return Ok(()); }
         if !crate::client_core::ClientCore::ids_fit("subscribe_to_group_events", &[req_id]) { return Ok(()); }
         match self.core.subscribe_to_group_events(req_id, group_id) {
-            Ok(contract_info) => { self.wrapper.call_method1(py, "display_group_updated", (req_id, contract_info))?; }
+            Ok(contract_info) => { self.cb(py).call_method1(py, "display_group_updated", (req_id, contract_info))?; }
             Err(text) => self.display_group_refused(py, &text)?,
         }
         Ok(())
@@ -468,7 +468,7 @@ impl EClient {
             providers.push(Py::new(py, obj)?);
         }
         let py_list = pyo3::types::PyList::new(py, providers)?;
-        self.wrapper.call_method1(py, "news_providers", (py_list.as_any(),))?;
+        self.cb(py).call_method1(py, "news_providers", (py_list.as_any(),))?;
         Ok(())
     }
 
@@ -492,7 +492,7 @@ impl EClient {
             objs.push(Py::new(py, obj)?);
         }
         let py_list = pyo3::types::PyList::new(py, objs)?;
-        self.wrapper.call_method1(py, "soft_dollar_tiers", (req_id, py_list.as_any()))?;
+        self.cb(py).call_method1(py, "soft_dollar_tiers", (req_id, py_list.as_any()))?;
         Ok(())
     }
 
@@ -505,13 +505,12 @@ impl EClient {
         if self.later(move |this, py| this.req_family_codes(py)) { return Ok(()); }
         let shared = self.shared_state()?;
         let codes = shared.reference.family_codes();
-        let py_list = pyo3::types::PyList::new(py, codes.iter().map(|fc| {
-            pyo3::types::PyTuple::new(py, &[
-                fc.account_id.as_str().into_pyobject(py).unwrap().into_any(),
-                fc.family_code_str.as_str().into_pyobject(py).unwrap().into_any(),
-            ]).unwrap()
-        }))?;
-        self.wrapper.call_method1(py, "family_codes", (py_list.as_any(),))?;
+        // Each with the official attributes, and still a pair (ibx#725).
+        let entries = codes.iter()
+            .map(|fc| super::super::named::family_code(py, &fc.account_id, &fc.family_code_str))
+            .collect::<PyResult<Vec<_>>>()?;
+        let py_list = pyo3::types::PyList::new(py, entries)?;
+        self.cb(py).call_method1(py, "family_codes", (py_list.as_any(),))?;
         Ok(())
     }
 
@@ -544,7 +543,7 @@ impl EClient {
         if !crate::client_core::ClientCore::ids_fit("req_user_info", &[req_id]) { return Ok(()); }
         let shared = self.shared_state()?;
         let id = shared.reference.white_branding_id();
-        self.wrapper.call_method1(py, "user_info", (req_id, id))?;
+        self.cb(py).call_method1(py, "user_info", (req_id, id))?;
         Ok(())
     }
 
@@ -615,8 +614,8 @@ impl EClient {
     fn wsh_step(&self, py: Python<'_>, req_id: i64, meta: bool, step: crate::client_core::WshStep) -> PyResult<()> {
         use crate::client_core::WshStep;
         match step {
-            WshStep::Refused(code, text) => { self.wrapper.call_method1(py, "error", (req_id, code, text.as_str(), ""))?; }
-            WshStep::Answer(json) => { self.wrapper.call_method1(py, "wsh_meta_data", (req_id, json.as_str()))?; }
+            WshStep::Refused(code, text) => { self.cb(py).call_method1(py, "error", (req_id, code, text.as_str(), ""))?; }
+            WshStep::Answer(json) => { self.cb(py).call_method1(py, "wsh_meta_data", (req_id, json.as_str()))?; }
             WshStep::Send(body) => {
                 let tx = self.tx()?;
                 super::send_cmd(py, &tx, crate::types::ControlCommand::WshRequest { req_id, meta, body })?;
@@ -633,7 +632,7 @@ impl EClient {
             Err((id, code, text)) if level < crate::client_core::LEVEL_CONFIG => {
                 // The official client library's own check, on the caller's
                 // thread before anything is sent: never put off (ibx#532).
-                self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
+                self.cb(py).call_method1(py, "error", (id, code, text, ""))?;
             }
             Err((id, code, text)) => shared.orders.push_order_error(id, code, text.to_string()),
             Ok(response) => self.give_config(py, response)?,
@@ -649,7 +648,7 @@ impl EClient {
         match self.core.update_config_answer(level, request, &shared.reference.logon_features()) {
             Err((id, code, text)) if level < crate::client_core::LEVEL_UPDATE_CONFIG => {
                 // The official client library's own check, as above.
-                self.wrapper.call_method1(py, "error", (id, code, text, ""))?;
+                self.cb(py).call_method1(py, "error", (id, code, text, ""))?;
             }
             Err((id, code, text)) => shared.orders.push_order_error(id, code, text.to_string()),
             Ok(response) => self.give_update_config(py, response)?,
@@ -662,7 +661,7 @@ impl EClient {
         let again = response.clone();
         if self.later(move |this, py| this.give_config(py, again)) { return Ok(()); }
         let object = super::super::config::config_response(py, &response)?;
-        self.wrapper.call_method1(py, "config_response_proto_buf", (object,))?;
+        self.cb(py).call_method1(py, "config_response_proto_buf", (object,))?;
         Ok(())
     }
 
@@ -671,7 +670,7 @@ impl EClient {
         let again = response.clone();
         if self.later(move |this, py| this.give_update_config(py, again)) { return Ok(()); }
         let object = super::super::config::update_config_response(py, &response)?;
-        self.wrapper.call_method1(py, "update_config_response_proto_buf", (object,))?;
+        self.cb(py).call_method1(py, "update_config_response_proto_buf", (object,))?;
         Ok(())
     }
 }

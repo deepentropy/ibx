@@ -72,6 +72,10 @@ pub struct EClient {
     /// the paced requests; the event loop answers them (ibx#565), at their
     /// place among the answers (ibx#532).
     pub(crate) local_calls: Mutex<std::collections::VecDeque<PendingCall>>,
+    /// What the callbacks are made on: the wrapper, or the layer that
+    /// gives it its protobuf callbacks (ibx#725). Decided at the first
+    /// callback, when the wrapper is fully set up.
+    pub(crate) callbacks: pyo3::sync::PyOnceLock<Py<PyAny>>,
 }
 
 /// A request the client answers itself: its turn when the requests are
@@ -141,6 +145,7 @@ impl EClient {
             core: ClientCore::new(),
             connection_time: Mutex::new(None),
             local_calls: Mutex::new(std::collections::VecDeque::new()),
+            callbacks: pyo3::sync::PyOnceLock::new(),
         }
     }
 
@@ -264,8 +269,8 @@ impl EClient {
 
         // Fire initial callbacks synchronously, matching official Python ibapi
         // where connect_ack signals "socket ready" before run() is called.
-        self.wrapper.call_method0(py, "connect_ack")?;
-        self.wrapper.call_method1(py, "managed_accounts", (self.managed_accounts_text().as_str(),))?;
+        self.cb(py).call_method0(py, "connect_ack")?;
+        self.cb(py).call_method1(py, "managed_accounts", (self.managed_accounts_text().as_str(),))?;
         // nextValidId once the orders of the logon are known, as the
         // reference sends it (ibx#466).
         // The lock is let go before the wait (see `req_completed_orders`).
@@ -277,7 +282,7 @@ impl EClient {
             }),
             None => 1,
         };
-        self.wrapper.call_method1(py, "next_valid_id", (next_id,))?;
+        self.cb(py).call_method1(py, "next_valid_id", (next_id,))?;
 
         Ok(())
     }
@@ -353,7 +358,7 @@ impl EClient {
         }
 
         // Signal disconnection to wrapper
-        self.wrapper.call_method0(py, "connection_closed")?;
+        self.cb(py).call_method0(py, "connection_closed")?;
 
         Ok(())
     }
@@ -365,6 +370,19 @@ impl EClient {
 }
 
 impl EClient {
+    /// What the callbacks are made on: the wrapper, or the layer that gives
+    /// it each protobuf callback before the plain one when it defines any
+    /// (ibx#725).
+    pub(crate) fn cb(&self, py: Python<'_>) -> &Py<PyAny> {
+        self.callbacks.get_or_init(py, || super::proto_forms::callbacks(py, &self.wrapper))
+    }
+
+    /// The layer of the protobuf callbacks, when the wrapper defines any.
+    pub(crate) fn proto(&self, py: Python<'_>) -> Option<&Py<PyAny>> {
+        let callbacks = self.cb(py);
+        (!callbacks.is(&self.wrapper)).then_some(callbacks)
+    }
+
     /// A request on a client that is not connected: the reference reports
     /// error 504 "Not connected" through `error()` and returns, it does not
     /// raise. `id` is the request's id, or -1 when it has none. Returns the
@@ -377,7 +395,7 @@ impl EClient {
             return self.core.requests_ignored().then_some(Ok(()));
         }
         Some(Python::attach(|py| {
-            match self.wrapper.call_method1(py, "error", (id, 504i64, "Not connected", "")) {
+            match self.cb(py).call_method1(py, "error", (id, 504i64, "Not connected", "")) {
                 Ok(_) => Ok(()),
                 Err(e) => dispatch::callback_raised(py, "error", e),
             }

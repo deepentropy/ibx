@@ -28,7 +28,7 @@ def official():
 
 
 def names(cls):
-    return {n for n in dir(cls) if not n.startswith("_") and callable(getattr(cls, n)) and not n.endswith("ProtoBuf")}
+    return {n for n in dir(cls) if not n.startswith("_") and callable(getattr(cls, n))}
 
 
 def parameters(f):
@@ -108,6 +108,7 @@ CALLBACK_OBJECTS = {
     "TimeCondition": "ibapi.order_condition", "MarginCondition": "ibapi.order_condition",
     "ExecutionCondition": "ibapi.order_condition", "VolumeCondition": "ibapi.order_condition",
     "PercentChangeCondition": "ibapi.order_condition",
+    "FamilyCode": "ibapi.common", "PriceIncrement": "ibapi.common", "HistoricalSession": "ibapi.common",
 }
 CONDITION_TYPES = {"Price", "Time", "Margin", "Execution", "Volume", "PercentChange"}
 # None left: BarData's timezone went with ibx#654.
