@@ -319,6 +319,8 @@ impl EClient {
             exec.order_id = shown;
             // The contract in full, on the exchange of the execution (ibx#543).
             let c = self.core.execution_contract(&self.shared, fill.order_id, c, &exec.exchange);
+            // Its time in the zone of its contract.
+            self.core.execution_time_in_zone(&self.shared, c.con_id, &mut exec.time);
             // A combo's report shows the combo or the leg (ibx#470).
             let mut c = c;
             ClientCore::apply_combo_exec(&fill_exec, &mut c, &mut exec);
@@ -789,6 +791,9 @@ impl EClient {
         for (req_id, result) in items {
             for (rank, entry) in result.entries.iter().enumerate() {
                 let mut contract = Contract { con_id: entry.con_id, ..Default::default() };
+                // The row's market name is its trading class (the reference
+                // 10.51, paper, 13/11/2026: "SCM" for both).
+                let mut market_name = String::new();
                 if let Some(ac) = self.core.get_contract(entry.con_id, &self.shared) {
                     contract.symbol = ac.symbol;
                     contract.sec_type = ac.sec_type;
@@ -796,9 +801,11 @@ impl EClient {
                     contract.currency = ac.currency;
                     contract.local_symbol = ac.local_symbol;
                     contract.primary_exchange = ac.primary_exchange;
+                    market_name = ac.trading_class.clone();
+                    contract.strike = ac.strike;
                     contract.trading_class = ac.trading_class;
                 }
-                let details = ContractDetails { contract, ..Default::default() };
+                let details = ContractDetails { contract, market_name, ..Default::default() };
                 wrapper.scanner_data(req_id, rank as i32, &details,
                     &entry.distance, &entry.benchmark, &entry.projection, &entry.legs);
             }

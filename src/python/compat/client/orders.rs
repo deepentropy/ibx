@@ -409,7 +409,8 @@ impl EClient {
 
         // No lock is held during the callbacks (ibx#265). As the reference:
         // every execution, then the commission reports, then the end.
-        let execs = self.core.matching_executions(&filter);
+        let shared = self.shared_state()?;
+        let execs = self.core.executions_for(&filter, &shared);
         for se in &execs {
             let c_py = Py::new(py, Contract::from_api(py, &se.contract)?)?.into_any();
 

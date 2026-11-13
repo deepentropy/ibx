@@ -1788,6 +1788,8 @@ pub struct ReferenceState {
     /// gave for a contract already known from a trade report of the day:
     /// what a position row shows (the contract cache keeps the report's).
     position_venues: Mutex<HashMap<i64, (String, String)>>,
+    /// The local symbol of each contract whose definition was read.
+    definition_symbols: Mutex<HashMap<i64, String>>,
     /// Market names from contract details, by conId.
     market_names: Mutex<HashMap<i64, String>>,
     /// Zone of the trading hours from contract details, by conId (ibx#335).
@@ -1928,6 +1930,7 @@ impl ReferenceState {
             depth_exchanges_pending: Mutex::new(false),
             contract_cache: Mutex::new(HashMap::new()),
             position_venues: Mutex::new(HashMap::new()),
+            definition_symbols: Mutex::new(HashMap::new()),
             market_names: Mutex::new(HashMap::new()),
             time_zone_ids: Mutex::new(HashMap::new()),
             exchange_maps: Mutex::new(Vec::new()),
@@ -2283,6 +2286,21 @@ impl ReferenceState {
     /// gave for `con_id`, when the contract cache holds another view of it.
     pub fn position_venue(&self, con_id: i64) -> Option<(String, String)> {
         self.position_venues.lock().unwrap().get(&con_id).cloned()
+    }
+
+    /// The local symbol a contract's definition gives (engine side).
+    #[doc(hidden)] pub fn note_definition_symbol(&self, con_id: i64, local_symbol: &str) {
+        if con_id != 0 && !local_symbol.is_empty() {
+            self.definition_symbols.lock().unwrap().insert(con_id, local_symbol.to_string());
+        }
+    }
+
+    /// The local symbol of a contract's definition, once it was read: the
+    /// one a position and an execution show, where a trade report of a
+    /// stock of another market carries another code (the reference 10.51,
+    /// paper, 13/11/2026: "BMW" for BMW on IBIS).
+    pub fn definition_local_symbol(&self, con_id: i64) -> Option<String> {
+        self.definition_symbols.lock().unwrap().get(&con_id).cloned()
     }
 
     #[doc(hidden)] pub fn cache_contract(&self, con_id: i64, contract: api::Contract) {

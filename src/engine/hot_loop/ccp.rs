@@ -316,11 +316,30 @@ fn completed_row(parsed: &fix::FieldMap<'_>, account_id: &str) -> CompletedOrder
         // The quantity not filled: 0 for a filled order (the reference's
         // answer of 07/10/2026: two filled orders of 1 share show 0, the
         // cancelled ones their quantity).
-        total_quantity: (num(38).unwrap_or(0.0) - num(14).unwrap_or(0.0)).max(0.0),
+        // An order given as a cash amount shows the amount and no quantity
+        // (the reference 10.51, paper, 13/11/2026: two refused fund orders
+        // of 100 USD).
+        total_quantity: if parsed.contains_key(&152) { 0.0 } else { (num(38).unwrap_or(0.0) - num(14).unwrap_or(0.0)).max(0.0) },
+        cash_qty: num(152).unwrap_or(f64::MAX),
         order_type,
         lmt_price: num(44).unwrap_or(0.0),
         aux_price: num(99).unwrap_or(0.0),
         tif: decode_tif(super::report_tif(parsed)).to_string(),
+        // The two flags of the opening, the kind of its OCA group and the
+        // date a GTC order is cancelled at, in the machine's zone (the
+        // reference 10.51, paper, 13/11/2026, 63 orders of the day).
+        allow_pre_open: flag(6524),
+        ignore_open_auction: flag(6562),
+        oca_type: match get(6209).as_str() {
+            "CancelOnFillWBlock" => 1,
+            "ReduceOnFillWBlock" => 2,
+            "ReduceOnFillNonBlock" => 3,
+            "ReduceOnFillWBlockFromTotal" => 4,
+            _ => 0,
+        },
+        auto_cancel_date: parsed.get(&6596)
+            .and_then(|raw| crate::client_core::auto_cancel_date_view(raw, &crate::gateway::machine_tz()))
+            .unwrap_or_default(),
         account: { let a = get(1); if a.is_empty() { account_id.to_string() } else { a } },
         perm_id: perm_id_of(parsed),
         filled_quantity: num(14).unwrap_or(0.0),
@@ -361,8 +380,16 @@ fn completed_row(parsed: &fix::FieldMap<'_>, account_id: &str) -> CompletedOrder
         _ => "Cancelled",
     };
     let completed_status = match get(39).as_str() {
-        "2" => "Filled".to_string(),
-        "8" => format!("Rejected by System:\n{}", reworded_reject(&get(58))),
+        // With the size filled (the reference 10.51: "Filled Size: 1" and
+        // "Filled Size: 300" in the recordings of 07/10 to 19/10/2026,
+        // "Filled Size: 6" on paper on 13/11/2026).
+        "2" => format!("Filled Size: {}", num(14).unwrap_or(0.0)),
+        // With the server's text, or its reason code when it gives no
+        // text (the reference 10.51, paper, 13/11/2026: "-1").
+        "8" => format!("Rejected by System:\n{}", match get(58) {
+            text if !text.is_empty() => reworded_reject(&text),
+            _ => get(103),
+        }),
         // Cancelled with a restatement reason (a bracket's children when
         // the parent ends): by the system (five orders on 15/10/2026).
         _ if parsed.contains_key(&378) => "Cancelled by System:\n".to_string(),
@@ -863,10 +890,15 @@ pub(crate) struct CompletedOrders {
     /// `deadline`.
     ended: bool,
     defs: HashSet<i64>,
-    /// Definitions to ask at the next sweep, which has the connection.
-    to_ask: Vec<i64>,
-    /// The request ids of those lookups, until their answer.
-    lookups: HashSet<ReqId>,
+    /// Definitions to ask at the next sweep, which has the connection:
+    /// the contract and the exchange of its order.
+    to_ask: Vec<(i64, String)>,
+    /// The request ids of those lookups and their contract, until their
+    /// answer.
+    lookups: HashMap<ReqId, i64>,
+    /// The trading hours asked for those contracts, by schedule key: the
+    /// answer waits for them too, their zone is the one of the times.
+    hours: HashSet<String>,
     deadline: Option<Instant>,
     /// The apiOnly flags of the requests waiting for the answer.
     waiting: Vec<bool>,
@@ -1911,7 +1943,12 @@ impl CcpState {
                 // asked before the end of the answer).
                 let con_id = row.0.con_id;
                 if con_id != 0 && shared.reference.get_contract(con_id).is_none() && self.completed.defs.insert(con_id) {
-                    self.completed.to_ask.push(con_id);
+                    // On the exchange of its order (the reference 10.51,
+                    // the session start recorded on 19/10/2026: a currency
+                    // pair asked on its own exchange): a fund is not found
+                    // on the smart route.
+                    let exchange = parsed.get(&6004).or_else(|| parsed.get(&6210)).copied().filter(|e| !e.is_empty()).unwrap_or("BEST");
+                    self.completed.to_ask.push((con_id, exchange.to_string()));
                 }
                 if let Some(rows) = self.completed.reading.as_mut() {
                     rows.push(row);
@@ -2678,7 +2715,11 @@ impl CcpState {
                     if !sec_type_str.is_empty() { cached.sec_type = sec_type_str.to_string(); }
                     if !exchange.is_empty() { cached.exchange = exchange.clone(); }
                     if !currency.is_empty() { cached.currency = currency.clone(); }
-                    if !local_symbol.is_empty() { cached.local_symbol = local_symbol.clone(); }
+                    // The local symbol is the definition's: the report of
+                    // a stock of another market carries another code (the
+                    // reference 10.51, paper, 13/11/2026: BMW on IBIS is
+                    // "BMW" in its position and execution rows).
+                    if cached.local_symbol.is_empty() && !local_symbol.is_empty() { cached.local_symbol = local_symbol.clone(); }
                     cached
                 } else {
                     api::Contract {
@@ -3453,6 +3494,7 @@ impl CcpState {
             if let Some(zone) = &zone { shared.reference.cache_time_zone_id(*con_id, zone); }
             false
         });
+        self.completed.hours.remove(&join_key);
         let waited = self.pending_schedule_pair.iter().any(|p| !p.ready && p.join_key == join_key);
         // Kept for the session: the next row with this key does not wait.
         self.schedules.insert(join_key.clone(), (utc_day(), sched.clone()));
@@ -3931,6 +3973,9 @@ impl CcpState {
             if records[..i].iter().any(|d| d.con_id == def.con_id) {
                 continue;
             }
+            // The local symbol of the definition: a trade report of a stock
+            // of another market carries another code.
+            shared.reference.note_definition_symbol(def.con_id, &def.local_symbol);
             if batch && shared.reference.get_contract(def.con_id).is_some() {
                 // Its position row still shows the definition's primary
                 // exchange and trading class (the reference 10.51, paper,
@@ -4056,8 +4101,25 @@ impl CcpState {
             // The definition of a completed order's contract: its trading
             // hours are asked next, as the reference (07/10/2026: IBM's
             // right after its definition; ibx#695).
-            if self.completed.lookups.remove(&req_id) {
-                self.ask_order_schedule(records.first(), shared, ccp_conn, hb);
+            if let Some(con_id) = self.completed.lookups.remove(&req_id) {
+                let def = records.iter().find(|d| d.con_id == con_id).or(records.first());
+                // Its zone is not known yet: the answer waits for these
+                // hours, the times of its rows are written in their zone.
+                if self.ask_order_schedule(def, shared, ccp_conn, hb).is_some() && let Some(def) = def {
+                    self.completed.hours.insert(def.join_key.clone());
+                }
+                // No record: nothing to wait for.
+                self.completed.defs.remove(&con_id);
+            } else {
+                // A contract of another market looked up for the portfolio:
+                // its trading hours give the zone the times of its
+                // executions are written in (the reference 10.51, paper,
+                // 13/11/2026: a BMW execution of the day in MET).
+                for def in records.iter().filter(|d| !d.join_key.is_empty() && !d.join_key.starts_with("1/")) {
+                    if shared.reference.time_zone_id(def.con_id).is_none() {
+                        self.ask_order_schedule(Some(def), shared, ccp_conn, hb);
+                    }
+                }
             }
             return;
         }
@@ -4084,6 +4146,15 @@ impl CcpState {
         // 3 of 3, the class 0 to 3 ms after the future's answer, the
         // preferred definition 4 to 15 ms after it, the trading hours 4 to
         // 13 ms after its answer).
+        // The company of a contract that is no derivative is known from its
+        // own answer: a derivative of it asked later in the session takes
+        // it at once (the reference 10.51, paper, 13/11/2026: AAPL's
+        // contract details, then those of an AAPL option, whose only row
+        // has the industry, the category and the subcategory).
+        for d in records.iter().filter(|d| d.under_con_id <= 0 && !d.industry.is_empty()) {
+            self.company_by_underlying.entry(d.con_id)
+                .or_insert_with(|| (d.industry.clone(), d.category.clone(), d.subcategory.clone()));
+        }
         let mut futures_preferred: Vec<i64> = Vec::new();
         for def in records.iter_mut().filter(|d| d.under_con_id > 0 && d.industry.is_empty()) {
             let under = def.under_con_id;
@@ -4528,9 +4599,9 @@ impl CcpState {
         // (ibx#486).
         shared.reference.cache_market_name(def.con_id, &def.primary_suffix);
         self.try_release_scanner_enrichments(def.con_id, shared);
-        if self.completed.defs.remove(&def.con_id) && self.completed.defs.is_empty() && self.completed.ended {
-            self.completed_deliver(shared);
-        }
+        // The answer is given at the next sweep, once the trading hours
+        // asked for its contracts came too.
+        self.completed.defs.remove(&def.con_id);
     }
 
     /// reqCompletedOrders (ibx#695): answered from the session's answer
@@ -4577,7 +4648,7 @@ impl CcpState {
     /// wait for them (at most `COMPLETED_DEFS_WAIT`).
     fn completed_end(&mut self, shared: &SharedState) {
         self.completed.ended = true;
-        if self.completed.defs.is_empty() {
+        if self.completed.defs.is_empty() && self.completed.hours.is_empty() {
             self.completed_deliver(shared);
             return;
         }
@@ -4589,8 +4660,19 @@ impl CcpState {
     fn completed_deliver(&mut self, shared: &SharedState) {
         let mut rows = self.completed.reading.take().unwrap_or_default();
         for row in &mut rows {
-            if let Some(known) = shared.reference.get_contract(row.0.con_id) {
-                row.0.trading_class = known.trading_class;
+            // The trading class of its definition, also for a contract the
+            // cache holds from a trade report of the day (the reference
+            // 10.51, paper, 13/11/2026: XETRA for BMW, traded that day).
+            let class = shared.reference.get_contract(row.0.con_id).map(|k| k.trading_class).filter(|c| !c.is_empty())
+                .or_else(|| shared.reference.position_venue(row.0.con_id).map(|(_, class)| class).filter(|c| !c.is_empty()));
+            if let Some(class) = class {
+                row.0.trading_class = class;
+            }
+            // Its time in the zone of its contract.
+            if let Some(time) = shared.reference.time_zone_id(row.0.con_id)
+                .and_then(|zone| crate::client_core::exec_time_rezoned(&row.2.completed_time, &zone))
+            {
+                row.2.completed_time = time;
             }
         }
         for api_only in std::mem::take(&mut self.completed.waiting) {
@@ -4601,13 +4683,14 @@ impl CcpState {
         self.completed.ended = false;
         self.completed.defs.clear();
         self.completed.to_ask.clear();
+        self.completed.hours.clear();
         self.completed.deadline = None;
     }
 
     /// An answer whose definitions did not all come in time is given as it
     /// is.
     pub(crate) fn sweep_completed_orders(&mut self, shared: &SharedState, ccp_conn: &mut Option<Connection>, hb: &mut HeartbeatState) {
-        for con_id in std::mem::take(&mut self.completed.to_ask) {
+        for (con_id, exchange) in std::mem::take(&mut self.completed.to_ask) {
             let req_id = self.next_internal_secdef_id;
             self.next_internal_secdef_id = self.next_internal_secdef_id.wrapping_add(1).max(0xF000_0000);
             if let Some(conn) = ccp_conn.as_mut() {
@@ -4618,15 +4701,21 @@ impl CcpState {
                 let ts = chrono_free_timestamp();
                 let _ = conn.send_fix(&[
                     (fix::TAG_MSG_TYPE, "c"), (fix::TAG_SENDING_TIME, &ts), (320, &name), (321, "2"), (146, "1"),
-                    (6008, &con_id_str), (6004, "BEST"),
+                    (6008, &con_id_str), (6004, &exchange),
                 ]);
                 hb.last_ccp_sent = Instant::now();
             }
             self.pending_secdef.push((ReqId::from(req_id), true, Instant::now() + SECDEF_TIMEOUT));
-            self.completed.lookups.insert(ReqId::from(req_id));
+            self.completed.lookups.insert(ReqId::from(req_id), con_id);
         }
-        if self.completed.ended && self.completed.deadline.is_some_and(|d| Instant::now() >= d) {
-            log::warn!("Completed orders: {} definitions did not come in time", self.completed.defs.len());
+        if !self.completed.ended || self.completed.reading.is_none() {
+            return;
+        }
+        if self.completed.defs.is_empty() && self.completed.hours.is_empty() {
+            self.completed_deliver(shared);
+        } else if self.completed.deadline.is_some_and(|d| Instant::now() >= d) {
+            log::warn!("Completed orders: {} definitions and {} trading hours did not come in time",
+                self.completed.defs.len(), self.completed.hours.len());
             self.completed_deliver(shared);
         }
     }
@@ -6598,6 +6687,41 @@ mod tests {
 
     fn pipe_frame(text: &str) -> Vec<u8> {
         text.replace('|', "\x01").into_bytes()
+    }
+
+    // The rows of reqCompletedOrders (the reference 10.51, paper,
+    // 13/11/2026, the 63 orders of the day on both sides): an order given
+    // as a cash amount shows the amount and no quantity, a refusal without
+    // text its reason code, and a row the two flags of the opening, the
+    // kind of its OCA group and the date a GTC order is cancelled at.
+    #[test]
+    fn a_completed_row_shows_the_cash_amount_the_opening_flags_the_oca_kind_and_the_cancel_date() {
+        let row = |fields: &[(u32, &str)]| {
+            let mut map = std::collections::HashMap::new();
+            for (t, v) in fields {
+                map.insert(*t, v.to_string());
+            }
+            completed_row(&fix::field_view(&map), "DU1")
+        };
+        let (contract, order, state, api) = row(&[(11, "598155790.0"), (39, "8"), (103, "-1"), (167, "FUND"), (55, "VFIAX"),
+            (38, "1"), (152, "100"), (54, "1"), (40, "1"), (59, "0"), (6008, "48013549"), (15, "USD"), (6004, "FUNDSERV"),
+            (6088, "Socket")]);
+        assert!(api);
+        assert_eq!((contract.con_id, order.cash_qty, order.total_quantity), (48013549, 100.0, 0.0));
+        assert_eq!(state.completed_status, "Rejected by System:\n-1");
+
+        crate::gateway::set_machine_zone_for_test(Some("Europe/Paris"));
+        let (_, order, state, _) = row(&[(11, "17378605.1"), (39, "4"), (167, "CS"), (55, "AXTI"), (38, "1"), (99, "13.05"),
+            (54, "2"), (40, "3"), (59, "1"), (6596, "20270331-20:00:00"), (583, "group"), (6209, "ReduceOnFillWBlock"),
+            (6524, "1"), (6562, "1"), (6008, "4726868"), (15, "USD"), (6004, "BEST")]);
+        crate::gateway::set_machine_zone_for_test(None);
+        assert_eq!((order.oca_type, order.allow_pre_open, order.ignore_open_auction), (2, true, true));
+        assert_eq!(order.auto_cancel_date, "20270331 22:00:00 CET");
+        assert_eq!((order.cash_qty, order.total_quantity), (f64::MAX, 1.0));
+        assert_eq!(state.completed_status, "Cancelled by Trader");
+        let (_, _, state, _) = row(&[(11, "1899552049.0"), (39, "2"), (167, "CS"), (55, "AAPL"), (38, "6"), (14, "6"), (54, "2"),
+            (40, "1"), (59, "0"), (6008, "265598"), (15, "USD"), (6004, "BEST")]);
+        assert_eq!(state.completed_status, "Filled Size: 6");
     }
 
     // ibx#466: an order of this session is held under its API order id and

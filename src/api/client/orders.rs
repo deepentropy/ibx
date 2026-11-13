@@ -379,7 +379,7 @@ impl EClient {
         if !crate::client_core::ClientCore::ids_fit("req_executions", &[req_id]) { return; }
         // No lock is held during the callbacks (ibx#265). As the reference:
         // every execution, then the commission reports, then the end.
-        let execs = self.core.matching_executions(filter);
+        let execs = self.core.executions_for(filter, &self.shared);
         // Given by `process_msgs` at its place among the answers (ibx#532).
         self.later(move |_, wrapper| {
         for se in &execs {

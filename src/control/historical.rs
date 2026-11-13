@@ -1898,7 +1898,21 @@ pub fn parse_schedule_response(xml: &str) -> Option<crate::types::HistoricalSche
 
     let query_id = extract_xml_tag(xml, "id").unwrap_or("").to_string();
     let timezone = extract_xml_tag(xml, "tz").unwrap_or("").to_string();
-    let start_date_time = extract_xml_tag(xml, "derivedStart").unwrap_or("").to_string();
+    // The server's times are in UTC; the reference gives them in the
+    // schedule's zone, and the end of the last session as the end of the
+    // schedule (10.51, paper, 13/11/2026, AAPL: sessions from 09:30 to
+    // 16:00 in US/Eastern, the end "20261113-16:00:00").
+    let zone = jiff::tz::TimeZone::get(&timezone).ok();
+    let local = |text: &str| -> String {
+        zone.as_ref()
+            .and_then(|tz| {
+                let at = jiff::civil::DateTime::strptime("%Y%m%d-%H:%M:%S", text).ok()?
+                    .to_zoned(jiff::tz::TimeZone::UTC).ok()?.timestamp();
+                Some(at.to_zoned(tz.clone()).strftime("%Y%m%d-%H:%M:%S").to_string())
+            })
+            .unwrap_or_else(|| text.to_string())
+    };
+    let start_date_time = local(extract_xml_tag(xml, "derivedStart").unwrap_or(""));
 
     let mut sessions = Vec::new();
     let mut search_start = 0;
@@ -1912,7 +1926,7 @@ pub fn parse_schedule_response(xml: &str) -> Option<crate::types::HistoricalSche
         };
         let open_xml = &xml[abs_open..open_end];
 
-        let open_time = extract_xml_tag(open_xml, "time").unwrap_or("").to_string();
+        let open_time = local(extract_xml_tag(open_xml, "time").unwrap_or(""));
         let ref_date = extract_xml_tag(open_xml, "refDate").unwrap_or("").to_string();
 
         // Find the matching Close
@@ -1924,7 +1938,7 @@ pub fn parse_schedule_response(xml: &str) -> Option<crate::types::HistoricalSche
             };
             let close_xml = &xml[abs_close..close_end];
             search_start = close_end;
-            extract_xml_tag(close_xml, "time").unwrap_or("").to_string()
+            local(extract_xml_tag(close_xml, "time").unwrap_or(""))
         } else {
             search_start = open_end;
             String::new()
@@ -1937,11 +1951,12 @@ pub fn parse_schedule_response(xml: &str) -> Option<crate::types::HistoricalSche
         });
     }
 
+    let end_date_time = sessions.last().map(|s| s.close_time.clone()).unwrap_or_default();
     Some(crate::types::HistoricalScheduleResponse {
         query_id,
         timezone,
         start_date_time,
-        end_date_time: String::new(), // filled by caller from request context
+        end_date_time,
         sessions,
     })
 }
@@ -2608,12 +2623,16 @@ mod tests {
         let resp = parse_schedule_response(xml).unwrap();
         assert_eq!(resp.query_id, "sched_1");
         assert_eq!(resp.timezone, "US/Eastern");
-        assert_eq!(resp.start_date_time, "20260306-14:30:00");
+        // In the schedule's zone (the second session after the change to
+        // summer time), and the end of the last session as the end.
+        assert_eq!(resp.start_date_time, "20260306-09:30:00");
+        assert_eq!(resp.end_date_time, "20260309-17:00:00");
         assert_eq!(resp.sessions.len(), 2);
         assert_eq!(resp.sessions[0].ref_date, "20260306");
-        assert_eq!(resp.sessions[0].open_time, "20260306-14:30:00");
-        assert_eq!(resp.sessions[0].close_time, "20260306-21:00:00");
+        assert_eq!(resp.sessions[0].open_time, "20260306-09:30:00");
+        assert_eq!(resp.sessions[0].close_time, "20260306-16:00:00");
         assert_eq!(resp.sessions[1].ref_date, "20260309");
+        assert_eq!(resp.sessions[1].open_time, "20260309-10:30:00");
     }
 
     #[test]

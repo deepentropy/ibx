@@ -660,6 +660,8 @@ impl EClient {
                         api_exec.order_id = shown;
                         // The contract in full, on the exchange of the execution (ibx#543).
                         let api_contract = self.core.execution_contract(shared, fill.order_id, api_contract, &api_exec.exchange);
+                        // Its time in the zone of its contract.
+                        self.core.execution_time_in_zone(shared, api_contract.con_id, &mut api_exec.time);
                         // A combo's report shows the combo or the leg (ibx#470).
                         let mut api_contract = api_contract;
                         crate::client_core::ClientCore::apply_combo_exec(&fill_exec, &mut api_contract, &mut api_exec);
@@ -1156,6 +1158,12 @@ impl EClient {
                                     contract.currency = ac.currency;
                                     contract.local_symbol = ac.local_symbol;
                                     contract.primary_exchange = ac.primary_exchange;
+                                    // The row's market name is its trading
+                                    // class and its strike is given, 0 for
+                                    // a stock (the reference 10.51, paper,
+                                    // 13/11/2026: "SCM" for both, strike 0).
+                                    cd.market_name = ac.trading_class.clone();
+                                    contract.strike = ac.strike;
                                     contract.trading_class = ac.trading_class;
                                 }
                             }

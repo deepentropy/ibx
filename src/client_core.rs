@@ -247,16 +247,21 @@ fn pnl_rows(shared: &SharedState, single_con_ids: &HashSet<i64>, priced_before: 
         let qty_midnight = seed.map_or(0, |s| s.qty_midnight_fixed) as f64 / QTY_SCALE_F;
         // A contract's multiplier and its currency's rate (ibx#715): the
         // price is per unit and in the contract's currency, the average
-        // cost per contract; the row is in the account's currency. No
-        // rate known for a currency the account lists without one: no
-        // price, rather than a value in the wrong currency.
+        // cost per contract. The row is in the contract's currency, as a
+        // single request gives it; the account's P&L counts it at the
+        // account's rate (the reference 10.51, paper, 13/11/2026, one BMW
+        // on IBIS held: its single answer in EUR, -14.92 a day, -3.00
+        // unrealized, 57.82 of value; the account's values the sum of the
+        // other rows plus those times 1.1035). No rate known for a
+        // currency the account lists without one: no price, rather than a
+        // sum in the wrong currency.
         let mult = pi.map_or(1.0, |p| position_multiplier(&p.multiplier));
         let fx = pi.map_or(Some(1.0), |p| rate_of(&rates, &p.currency));
         let price = prices.get(&con_id).copied().filter(|&p| p != f64::MAX)
             .or_else(|| pi.map(|p| p.market_price).filter(|&p| p != 0).map(|p| p as f64 / PRICE_SCALE_F))
-            .and_then(|p| fx.map(|f| p * mult * f));
+            .and_then(|p| fx.map(|_| p * mult));
         let fx = fx.unwrap_or(1.0);
-        let money = money_traded_today(seed, money_since.get(&con_id).copied(), qty, avg_cost) * fx;
+        let money = money_traded_today(seed, money_since.get(&con_id).copied(), qty, avg_cost);
         let seed_only = pi.is_none();
         let daily = match (price, qty_midnight != 0.0) {
             _ if seed_only && qty_midnight == 0.0 => PnlValue::Valid(money),
@@ -265,7 +270,7 @@ fn pnl_rows(shared: &SharedState, single_con_ids: &HashSet<i64>, priced_before: 
             // have (a Sunday): not valid, with its 2150 (ibx#737; the
             // reference 10.51 at level 225, paper, 18/10/2026).
             (Some(p), true) => match midnight.get(&con_id) {
-                Some(&m) if m.is_finite() => PnlValue::Valid(qty * p - qty_midnight * m * mult * fx + money),
+                Some(&m) if m.is_finite() => PnlValue::Valid(qty * p - qty_midnight * m * mult + money),
                 _ => PnlValue::Invalid,
             },
             (Some(p), false) => PnlValue::Valid(qty * p - 0.0 + money),
@@ -274,18 +279,18 @@ fn pnl_rows(shared: &SharedState, single_con_ids: &HashSet<i64>, priced_before: 
             _ if seed_only => PnlValue::Invalid,
             None => PnlValue::Unset,
             Some(_) if qty != 0.0 && avg_cost == 0.0 => PnlValue::Unset,
-            Some(p) => match qty * p - cost_basis(qty_fixed, avg_cost) * fx {
+            Some(p) => match qty * p - cost_basis(qty_fixed, avg_cost) {
                 0.0 => PnlValue::Invalid,
                 u => PnlValue::Valid(u),
             },
         };
         let realized = match seed.map_or(0.0, |s| s.realized_pnl) + realized_since.get(&con_id).copied().unwrap_or(0.0) {
             0.0 => PnlValue::Unset,
-            v => PnlValue::Valid(v * fx),
+            v => PnlValue::Valid(v),
         };
         let value = if seed_only { PnlValue::Unset } else { price.map_or(PnlValue::Unset, |p| PnlValue::Valid(qty * p)) };
         let in_totals = !seed_only || listed.contains(&con_id) || priced(&con_id);
-        PnlRow { con_id, qty_fixed, daily, unrealized, realized, value, in_totals }
+        PnlRow { con_id, qty_fixed, daily, unrealized, realized, value, in_totals, fx }
     }).collect()
 }
 
@@ -440,6 +445,9 @@ pub struct PnlRow {
     /// Counted in the account's P&L (ibx#737): not a contract only the
     /// seeds carry, asked by a single request alone.
     pub in_totals: bool,
+    /// The account's rate of the row's currency: its values are in that
+    /// currency, the account's P&L counts them times this (ibx#715).
+    pub fx: f64,
 }
 
 /// The P&L is computed at most once in this time (ibx#511; the reference's
@@ -1294,6 +1302,22 @@ pub fn format_exec_time(unix_secs: i64) -> String {
         Ok(tz) => format!("{} US/Eastern", ts.to_zoned(tz).strftime("%Y%m%d %H:%M:%S")),
         Err(_) => format!("{} UTC", ts.to_zoned(jiff::tz::TimeZone::UTC).strftime("%Y%m%d %H:%M:%S")),
     }
+}
+
+/// An execution time written in US/Eastern (`format_exec_time`), in the
+/// zone of its contract: the reference writes the time of an execution and
+/// of a finished order in the zone of the contract's trading hours (10.51,
+/// paper, 13/11/2026: "20261113 15:41:53 MET" for BMW on IBIS, US/Eastern
+/// for AAPL). None when the zone is US/Eastern or cannot be read.
+pub fn exec_time_rezoned(text: &str, zone: &str) -> Option<String> {
+    if zone.is_empty() || zone == "US/Eastern" {
+        return None;
+    }
+    let civil = jiff::civil::DateTime::strptime("%Y%m%d %H:%M:%S", text.strip_suffix(" US/Eastern")?).ok()?;
+    let eastern = jiff::tz::TimeZone::get("US/Eastern").ok()?;
+    let at = civil.to_zoned(eastern).ok()?.timestamp();
+    let tz = jiff::tz::TimeZone::get(zone).ok()?;
+    Some(format!("{} {}", at.to_zoned(tz).strftime("%Y%m%d %H:%M:%S"), zone))
 }
 
 /// A stored execution and its commission report for `req_executions` replay.
@@ -4183,6 +4207,12 @@ impl ClientCore {
             contract.con_id = reported.as_ref().map_or(0, |r| r.con_id);
         }
         let known = (contract.con_id != 0).then(|| self.get_contract(contract.con_id, shared)).flatten();
+        // The local symbol is the one of the contract's definition, also
+        // when the execution's report carried another code (the reference
+        // 10.51, paper, 13/11/2026: BMW on IBIS, "BMW" in execDetails).
+        if let Some(symbol) = shared.reference.definition_local_symbol(contract.con_id) {
+            contract.local_symbol = symbol;
+        }
         for full in [known, reported].into_iter().flatten().filter(|f| f.con_id == contract.con_id) {
             if contract.local_symbol.is_empty() { contract.local_symbol = full.local_symbol; }
             if contract.trading_class.is_empty() { contract.trading_class = full.trading_class; }
@@ -4262,6 +4292,11 @@ impl ClientCore {
             // portfolio's lookup, not the venue of the trade.
             if !primary.is_empty() { contract.exchange = primary; }
             if contract.trading_class.is_empty() { contract.trading_class = class; }
+        }
+        // The local symbol of its definition (the reference 10.51, paper,
+        // 13/11/2026: "BMW" for BMW on IBIS, traded that day).
+        if let Some(symbol) = shared.reference.definition_local_symbol(con_id) {
+            contract.local_symbol = symbol;
         }
         contract
     }
@@ -5157,7 +5192,16 @@ impl ClientCore {
         if !fe.exchange.is_empty() {
             ex.exchange = fe.exchange.clone();
         }
-        ex.client_id = if fe.client_id != 0 { fe.client_id } else { self.client_id.load(Ordering::Relaxed) };
+        // The client the report names; this client for a fill of its own
+        // order whose report names none. An execution of an earlier session
+        // or of another client that names none was placed by client 0 (the
+        // reference 10.51, paper, 13/11/2026: the day's executions of a
+        // client 0, listed with client 0 by a client 197).
+        ex.client_id = if fe.client_id != 0 || fe.replayed || fe.other_client {
+            fe.client_id
+        } else {
+            self.client_id.load(Ordering::Relaxed)
+        };
         if !fe.model_code.is_empty() {
             ex.model_code = fe.model_code.clone();
         }
@@ -5210,6 +5254,34 @@ impl ClientCore {
     /// exactly; the side is read as buy or sell, so `BUY` matches `BOT`;
     /// clientId 0 is every client; the time keeps executions at or after it.
     /// A time that does not parse is logged and not applied.
+    /// The executions of an answer of reqExecutions as they are shown now:
+    /// each with the local symbol of its contract's definition and its time
+    /// in the contract's zone, both known once the contract was looked up
+    /// (the reference 10.51, paper, 13/11/2026: a BMW execution of the day,
+    /// "BMW" and a time in MET).
+    pub fn executions_for(&self, filter: &ExecutionFilter, shared: &SharedState) -> Vec<StoredExecution> {
+        let mut out = self.matching_executions(filter);
+        for se in &mut out {
+            let con_id = se.contract.con_id;
+            if con_id == 0 || se.contract.sec_type.eq_ignore_ascii_case("BAG") {
+                continue;
+            }
+            if let Some(symbol) = shared.reference.definition_local_symbol(con_id) {
+                se.contract.local_symbol = symbol;
+            }
+            self.execution_time_in_zone(shared, con_id, &mut se.execution.time);
+        }
+        out
+    }
+
+    /// The time of an execution of `con_id`, put in the contract's zone
+    /// when it is known and not US/Eastern.
+    pub fn execution_time_in_zone(&self, shared: &SharedState, con_id: i64, time: &mut String) {
+        if let Some(rezoned) = shared.reference.time_zone_id(con_id).and_then(|zone| exec_time_rezoned(time, &zone)) {
+            *time = rezoned;
+        }
+    }
+
     pub fn matching_executions(&self, filter: &ExecutionFilter) -> Vec<StoredExecution> {
         let side = if filter.side.is_empty() { None } else { Some(side_is_buy(&filter.side)) };
         let since = if filter.time.trim().is_empty() {
@@ -5375,6 +5447,15 @@ impl ClientCore {
                     && self.scale_profit_refused.lock().unwrap().contains(&order_id)
                 {
                     order.scale_profit_offset = f64::MAX;
+                }
+                // A filled scale order shows no price adjustment: the
+                // server's report of the filled order has none (ibx#751; the
+                // reference 10.51, paper, 13/11/2026 regular hours: an
+                // order placed with an adjustment of 0.05 every 10 s shows
+                // both until its last fill, and neither once Filled).
+                if status == "Filled" && order.scale_init_level_size != i32::MAX {
+                    order.scale_price_adjust_value = f64::MAX;
+                    order.scale_price_adjust_interval = i32::MAX;
                 }
                 reported_auto_cancel_date(&mut order, info.as_ref().map(|i| &i.order));
                 // The order of this client carries its client id, as the
@@ -6200,6 +6281,8 @@ impl ClientCore {
                 let mut total: Option<f64> = None;
                 for r in q.rows.iter().filter(|r| r.in_totals) {
                     if let PnlValue::Valid(v) = f(r) {
+                        // In the account's currency.
+                        let v = v * r.fx;
                         total = Some(total.map_or(v, |t| t + v));
                     }
                 }
@@ -9836,8 +9919,17 @@ mod tests {
             _ => None,
         };
         assert!((unreal(1).unwrap() - 2.0 * 5.0 * 10.0).abs() < 1e-6, "{:?}", unreal(1));
-        assert!((unreal(2).unwrap() - 10.0 * 10.0 * 0.72).abs() < 1e-6, "{:?}", unreal(2));
+        // The row in its own currency, with the rate the account's P&L counts
+        // it at (the reference 10.51, paper, 13/11/2026: a BMW position).
+        assert!((unreal(2).unwrap() - 10.0 * 10.0).abs() < 1e-6, "{:?}", unreal(2));
+        assert_eq!(rows.iter().find(|r| r.con_id == 2).unwrap().fx, 0.72);
         assert_eq!(unreal(3), None, "no rate for JPY");
+        // The account's unrealized P&L: the future's, plus the CAD row at the rate.
+        let core = ClientCore::new();
+        core.subscribe_pnl(9);
+        pnl_ready(&core);
+        let total = core.poll_pnl(&shared).pop().expect("the account's P&L");
+        assert!((total.unrealized_pnl - (100.0 + 100.0 * 0.72)).abs() < 1e-6, "{}", total.unrealized_pnl);
     }
 
     // The same inputs give the same P&L, whatever the order of the positions
@@ -11806,6 +11898,43 @@ mod session_tests {
         let mut plain = ApiOrder { total_quantity: 2.0, total_quantity_text: "2".into(), lmt_price: 355.61, ..Default::default() };
         reported_scale_quantity(&mut plain, Some(&reported), false);
         assert_eq!((plain.total_quantity, plain.total_quantity_text.as_str(), plain.lmt_price), (2.0, "2", 355.61));
+    }
+
+    // The reference 10.51 (paper, 13/11/2026): the time of an execution
+    // and of a finished order is in the zone of the contract's trading
+    // hours, MET for BMW on IBIS, US/Eastern for AAPL.
+    #[test]
+    fn an_execution_time_is_written_in_the_zone_of_its_contract() {
+        assert_eq!(exec_time_rezoned("20261113 09:41:53 US/Eastern", "MET").as_deref(), Some("20261113 15:41:53 MET"));
+        assert_eq!(exec_time_rezoned("20261113 09:41:53 US/Eastern", "US/Eastern"), None);
+        assert_eq!(exec_time_rezoned("20261113 09:41:53 US/Eastern", ""), None);
+        assert_eq!(exec_time_rezoned("not a time", "MET"), None);
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        shared.reference.cache_time_zone_id(14094, "MET");
+        let mut time = "20261113 09:41:53 US/Eastern".to_string();
+        core.execution_time_in_zone(&shared, 14094, &mut time);
+        assert_eq!(time, "20261113 15:41:53 MET");
+        core.execution_time_in_zone(&shared, 265598, &mut time);
+        assert_eq!(time, "20261113 15:41:53 MET", "a contract whose zone is not known keeps its time");
+    }
+
+    // ibx#751 (the reference 10.51, paper, 13/11/2026, regular hours): a
+    // scale order placed with a price adjustment shows it while it works,
+    // and not once it is filled.
+    #[test]
+    fn a_filled_scale_order_shows_no_price_adjustment() {
+        let (core, shared) = (ClientCore::new(), SharedState::new());
+        let contract = ApiContract { con_id: 265598, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+        let order = ApiOrder { action: "BUY".into(), order_type: "LMT".into(), total_quantity: 3.0, lmt_price: 360.0, tif: "DAY".into(),
+            scale_init_level_size: 1, scale_subs_level_size: 1, scale_price_increment: 0.1, scale_price_adjust_value: 0.05,
+            scale_price_adjust_interval: 10, ..Default::default() };
+        core.track_order(22, contract, order, 0);
+        let adjustment = |status: &str| {
+            let o = core.order_view(22, &shared, status).unwrap().order;
+            (o.scale_price_adjust_value, o.scale_price_adjust_interval, o.scale_price_increment)
+        };
+        assert_eq!(adjustment("Submitted"), (0.05, 10, 0.1));
+        assert_eq!(adjustment("Filled"), (f64::MAX, i32::MAX, 0.1));
     }
 
     // ibx#751 (the reference 10.51, paper, 18/10/2026, market closed: a
