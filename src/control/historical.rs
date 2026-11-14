@@ -378,7 +378,7 @@ pub fn zone_named(name: &str) -> Option<jiff::tz::TimeZone> {
     if name.eq_ignore_ascii_case("UTC") || name.eq_ignore_ascii_case("GMT") {
         return Some(jiff::tz::TimeZone::UTC);
     }
-    jiff::tz::TimeZone::get(crate::config::canonical_zone(name)).ok()
+    crate::config::time_zone(crate::config::canonical_zone(name)).ok()
 }
 
 /// Read a request date (ibx#431, ibx#432), in the forms of
@@ -1902,7 +1902,7 @@ pub fn parse_schedule_response(xml: &str) -> Option<crate::types::HistoricalSche
     // schedule's zone, and the end of the last session as the end of the
     // schedule (10.51, paper, 13/11/2026, AAPL: sessions from 09:30 to
     // 16:00 in US/Eastern, the end "20261113-16:00:00").
-    let zone = jiff::tz::TimeZone::get(&timezone).ok();
+    let zone = crate::config::time_zone(&timezone).ok();
     let local = |text: &str| -> String {
         zone.as_ref()
             .and_then(|tz| {

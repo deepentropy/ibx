@@ -94,7 +94,7 @@ pub fn parse_yyyymmdd(text: &str) -> Option<jiff::civil::Date> {
 }
 
 fn tz(name: &str) -> jiff::tz::TimeZone {
-    jiff::tz::TimeZone::get(name).unwrap_or(jiff::tz::TimeZone::UTC)
+    crate::config::time_zone(name).unwrap_or(jiff::tz::TimeZone::UTC)
 }
 
 /// Midnight of a date in a time zone, in milliseconds.

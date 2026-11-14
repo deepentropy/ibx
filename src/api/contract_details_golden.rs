@@ -46,7 +46,7 @@ pub(crate) fn row_of(fixture: &Value, row: &Value) -> crate::control::contracts:
 /// The instant of a row: its time in the capture log (Paris time).
 pub(crate) fn capture_time(ts: &str) -> jiff::Timestamp {
     jiff::civil::DateTime::strptime("%d/%m/%Y %H:%M:%S%.f", ts).unwrap()
-        .to_zoned(jiff::tz::TimeZone::get("Europe/Paris").unwrap()).unwrap()
+        .to_zoned(crate::config::time_zone("Europe/Paris").unwrap()).unwrap()
         .timestamp()
 }
 

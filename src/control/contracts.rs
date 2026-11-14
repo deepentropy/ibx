@@ -1242,7 +1242,7 @@ fn civil_date(s: &str) -> Option<jiff::civil::Date> {
 
 /// The time zone of a schedule; UTC when the zone is not known.
 pub fn schedule_zone(name: &str) -> jiff::tz::TimeZone {
-    jiff::tz::TimeZone::get(name).unwrap_or(jiff::tz::TimeZone::UTC)
+    crate::config::time_zone(name).unwrap_or(jiff::tz::TimeZone::UTC)
 }
 
 fn schedule_days(sched: &ContractSchedule, today: jiff::civil::Date) -> ScheduleDays {

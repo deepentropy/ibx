@@ -420,7 +420,7 @@ fn last_valid(fields: &[i64; field::COUNT]) -> bool {
 /// the halted state while it is pending.
 /// Saturday or Sunday in New York, now (ibx#494).
 fn new_york_weekend() -> bool {
-    let Ok(tz) = jiff::tz::TimeZone::get("America/New_York") else { return false };
+    let Ok(tz) = crate::config::time_zone("America/New_York") else { return false };
     matches!(jiff::Timestamp::now().to_zoned(tz).weekday(), jiff::civil::Weekday::Saturday | jiff::civil::Weekday::Sunday)
 }
 

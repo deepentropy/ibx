@@ -237,6 +237,15 @@ const LEGACY_ZONES: &[(&str, &str)] = &[
     ("US/Samoa", "Pacific/Pago_Pago"),
 ];
 
+/// A time zone by its name: from the system's zone database, else from the
+/// one built into the library. Some systems no longer install the older
+/// names the servers use ("US/Eastern", "MET"): without the second look a
+/// time was written in UTC there.
+pub fn time_zone(name: &str) -> Result<jiff::tz::TimeZone, jiff::Error> {
+    static BUILT_IN: std::sync::LazyLock<jiff::tz::TimeZoneDatabase> = std::sync::LazyLock::new(jiff::tz::TimeZoneDatabase::bundled);
+    jiff::tz::TimeZone::get(name).or_else(|missing| BUILT_IN.get(name).map_err(|_| missing))
+}
+
 /// The zone a name stands for: a legacy US name gives its current zone,
 /// any other name is itself.
 pub fn canonical_zone(name: &str) -> &str {
@@ -325,7 +334,7 @@ pub fn good_after_dated(input: &str, machine: &str) -> Option<(String, bool)> {
         // A time alone: today's date in its zone.
         let zone = s[first.len()..].trim();
         let (zone, no_zone) = if zone.is_empty() { (machine, true) } else { (zone, false) };
-        let tz = jiff::tz::TimeZone::get(canonical_zone(zone)).ok()?;
+        let tz = time_zone(canonical_zone(zone)).ok()?;
         let today = jiff::Timestamp::now().to_zoned(tz).date();
         (format!("{} {} {}", today.strftime("%Y%m%d"), first, zone), no_zone)
     } else if s.len() > 8 && s.as_bytes()[8] == b'-' {
@@ -478,5 +487,22 @@ mod precaution_tests {
         assert!(!super::bypass_setting(Some("")));
         assert!(super::bypass_setting(Some("TRUE")));
         assert!(super::bypass_setting(Some(" 1 ")));
+    }
+}
+
+#[cfg(test)]
+mod zone_tests {
+    // The older zone names the servers use are known whatever the system
+    // installs, and a name that is no zone is still refused.
+    #[test]
+    fn the_older_zone_names_are_known_on_every_system() {
+        for name in ["US/Eastern", "US/Central", "MET", "America/New_York", "Europe/Paris", "UTC"] {
+            assert!(super::time_zone(name).is_ok(), "{name}");
+        }
+        assert!(super::time_zone("No/Such_Zone").is_err());
+        let eastern = super::time_zone("US/Eastern").unwrap();
+        let new_york = super::time_zone("America/New_York").unwrap();
+        let at = jiff::Timestamp::from_second(1_790_000_000).unwrap();
+        assert_eq!(at.to_zoned(eastern).offset(), at.to_zoned(new_york).offset());
     }
 }

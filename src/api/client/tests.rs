@@ -1676,7 +1676,7 @@ fn place_order_unreadable_good_after_time_is_refused() {
     client.place_order(10, &spy(), &order("09:30:00 US/Eastern")).unwrap();
     match rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
         ControlCommand::Order(OrderRequest::SubmitLimitEx { attrs, .. }) => {
-            let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::get("America/New_York").unwrap()).date();
+            let today = jiff::Timestamp::now().to_zoned(crate::config::time_zone("America/New_York").unwrap()).date();
             let want = today.at(9, 30, 0, 0).in_tz("America/New_York").unwrap().timestamp().as_second();
             assert_eq!(attrs.good_after, want);
         }

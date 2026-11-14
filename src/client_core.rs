@@ -671,7 +671,7 @@ pub fn connection_time_now() -> String {
 pub fn shown_start_time(good_after_time: &str, zone: Option<&str>) -> Option<String> {
     let zone = zone?;
     let secs = crate::config::good_after_secs(good_after_time)?;
-    let tz = jiff::tz::TimeZone::get(crate::config::canonical_zone(zone)).ok()?;
+    let tz = crate::config::time_zone(crate::config::canonical_zone(zone)).ok()?;
     let at = jiff::Timestamp::from_second(secs).ok()?.to_zoned(tz);
     Some(connection_time(&at, zone))
 }
@@ -1298,7 +1298,7 @@ pub fn format_exec_time(unix_secs: i64) -> String {
     let Ok(ts) = jiff::Timestamp::from_second(unix_secs) else {
         return String::new();
     };
-    match jiff::tz::TimeZone::get("US/Eastern") {
+    match crate::config::time_zone("US/Eastern") {
         Ok(tz) => format!("{} US/Eastern", ts.to_zoned(tz).strftime("%Y%m%d %H:%M:%S")),
         Err(_) => format!("{} UTC", ts.to_zoned(jiff::tz::TimeZone::UTC).strftime("%Y%m%d %H:%M:%S")),
     }
@@ -1314,9 +1314,9 @@ pub fn exec_time_rezoned(text: &str, zone: &str) -> Option<String> {
         return None;
     }
     let civil = jiff::civil::DateTime::strptime("%Y%m%d %H:%M:%S", text.strip_suffix(" US/Eastern")?).ok()?;
-    let eastern = jiff::tz::TimeZone::get("US/Eastern").ok()?;
+    let eastern = crate::config::time_zone("US/Eastern").ok()?;
     let at = civil.to_zoned(eastern).ok()?.timestamp();
-    let tz = jiff::tz::TimeZone::get(zone).ok()?;
+    let tz = crate::config::time_zone(zone).ok()?;
     Some(format!("{} {}", at.to_zoned(tz).strftime("%Y%m%d %H:%M:%S"), zone))
 }
 
@@ -2535,7 +2535,7 @@ pub fn parse_condition_time(s: &str, machine_zone: &str) -> Option<ConditionTime
     };
     let implied_zone = zone_words.is_empty();
     let zone = if implied_zone { machine_zone.to_string() } else { zone_words.join(" ") };
-    let tz = jiff::tz::TimeZone::get(crate::config::canonical_zone(&zone)).ok()?;
+    let tz = crate::config::time_zone(crate::config::canonical_zone(&zone)).ok()?;
     let day = match date {
         Some(d) => {
             let (y, m, day): (i16, i8, i64) = (d[0..4].parse().ok()?, d[4..6].parse().ok()?, d[6..8].parse().ok()?);
@@ -9580,7 +9580,7 @@ mod tests {
     // the zone's standard name, its daylight name only for a zone on GMT.
     #[test]
     fn auto_cancel_date_in_the_machine_zone() {
-        let tz = |n: &str| jiff::tz::TimeZone::get(n).unwrap();
+        let tz = |n: &str| crate::config::time_zone(n).unwrap();
         assert_eq!(auto_cancel_date_view("20270331-20:00:00", &tz("Europe/Paris")).as_deref(), Some("20270331 22:00:00 CET"));
         assert_eq!(auto_cancel_date_view("20270131-20:00:00", &tz("Europe/Paris")).as_deref(), Some("20270131 21:00:00 CET"));
         assert_eq!(auto_cancel_date_view("20270630-20:00:00", &tz("Europe/London")).as_deref(), Some("20270630 21:00:00 BST"));
@@ -11370,7 +11370,7 @@ mod tests {
     #[test]
     fn a_good_after_time_is_read_and_shown_as_the_reference() {
         use crate::config::good_after_dated;
-        let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::get("Europe/Paris").unwrap()).date().strftime("%Y%m%d").to_string();
+        let today = jiff::Timestamp::now().to_zoned(crate::config::time_zone("Europe/Paris").unwrap()).date().strftime("%Y%m%d").to_string();
         assert_eq!(good_after_dated("16:00:00", "Europe/Paris"), Some((format!("{today} 16:00:00 Europe/Paris"), true)));
         assert_eq!(good_after_dated("20261012 16:00:00", "Europe/Paris"), Some(("20261012 16:00:00 Europe/Paris".to_string(), true)));
         assert_eq!(good_after_dated("20261012 10:00:00 US/Eastern", "Europe/Paris"), Some(("20261012 10:00:00 US/Eastern".to_string(), false)));
@@ -12405,7 +12405,7 @@ mod session_tests {
     // ibx#426: `yyyyMMdd HH:mm:ss {zone}`, local time.
     #[test]
     fn connection_time_in_the_reference_form() {
-        let tz = jiff::tz::TimeZone::get("Europe/Paris").unwrap();
+        let tz = crate::config::time_zone("Europe/Paris").unwrap();
         let at = jiff::civil::date(2026, 5, 9).at(21, 3, 19, 0).to_zoned(tz).unwrap();
         assert_eq!(connection_time(&at, "Europe/Paris"), "20260509 21:03:19 Europe/Paris");
         let now = connection_time_now();

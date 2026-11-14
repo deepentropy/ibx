@@ -352,7 +352,7 @@ pub(crate) fn machine_time_zone() -> String {
 /// The machine zone as a zone: [`machine_time_zone`], or the system zone
 /// when that name is not known.
 pub(crate) fn machine_tz() -> jiff::tz::TimeZone {
-    jiff::tz::TimeZone::get(&machine_time_zone()).unwrap_or_else(|_| jiff::tz::TimeZone::system())
+    crate::config::time_zone(&machine_time_zone()).unwrap_or_else(|_| jiff::tz::TimeZone::system())
 }
 
 #[cfg(any(test, feature = "test-support"))]

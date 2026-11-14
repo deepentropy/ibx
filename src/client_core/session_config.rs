@@ -93,11 +93,11 @@ pub fn time_shown(text: &str, shown: TimeZoneShown, z: bool, machine_zone: &str)
         return None;
     }
     let civil = jiff::civil::DateTime::strptime("%Y%m%d %H:%M:%S", civil).ok()?;
-    let at = civil.to_zoned(jiff::tz::TimeZone::get(zone).ok()?).ok()?.timestamp();
+    let at = civil.to_zoned(crate::config::time_zone(zone).ok()?).ok()?.timestamp();
     Some(match shown {
         TimeZoneShown::Utc => format!("{}{}", at.to_zoned(jiff::tz::TimeZone::UTC).strftime("%Y%m%d-%H:%M:%S"), if z { "Z" } else { "" }),
         _ => {
-            let tz = jiff::tz::TimeZone::get(machine_zone).ok()?;
+            let tz = crate::config::time_zone(machine_zone).ok()?;
             format!("{} {}", at.to_zoned(tz).strftime("%Y%m%d %H:%M:%S"), machine_zone)
         }
     })
