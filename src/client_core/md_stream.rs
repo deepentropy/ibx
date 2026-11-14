@@ -1610,7 +1610,10 @@ mod tests {
         let (core, shared) = (ClientCore::new(), SharedState::new());
         assert!(core.attach_md_request(&shared, 1, 5, false, "OPT", "SMART", None, false, false));
         let q = Quote { timestamp_ns: 0, ..Default::default() };
-        shared.market.push_test_message(5, &q, &TestMessage { steps: Some(&[MdStep::Time]), ..Default::default() });
+        // The step sets the time, to 0: a test message sets only the fields
+        // that are not 0, so the step is written as the engine writes it.
+        shared.market.push_quote(5, &q);
+        shared.market.md_events.push_message(&[crate::md_events::MdEvent::new(5, MdStep::Time).with_quote(&q, 1 << field::TIME)]);
         let given = poll(&core, &shared).iter().any(|l| l == "string:1:45:0");
         assert_eq!(given, new_york_weekend());
     }
