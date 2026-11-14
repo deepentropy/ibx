@@ -10,6 +10,7 @@
 #include "ibx_proto.h"
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -1018,6 +1019,221 @@ bool orderOf(const protobuf::Order& p, const protobuf::AttachedOrders* attached,
   return true;
 }
 
+// ── The configuration: a message as text records ──
+//
+// The configuration crosses the C entry layer as one record for each
+// field that is set, `path \x1f value \x1e`: the path is made of field
+// names, with an index after the name of a repeated field, whose count is
+// the record `path.#`; a sub-message that is set has a record of its own
+// with an empty value. The messages are walked by their descriptors: a
+// field is found by its name without case and underscores, which is the
+// name the other side has for it.
+
+namespace {
+
+typedef google::protobuf::Message Message;
+typedef google::protobuf::FieldDescriptor Field;
+
+std::string plainName(const std::string& name)
+{
+  std::string out;
+  for (char c : name) {
+    if (c != '_')
+      out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return out;
+}
+
+void record(std::string& out, const std::string& path, const std::string& value)
+{
+  out += path;
+  out += '\x1f';
+  out += value;
+  out += '\x1e';
+}
+
+// The value of a field as a text; `index` is -1 for a field that is not repeated.
+std::string valueText(const Message& m, const Field* f, int index)
+{
+  const google::protobuf::Reflection* r = m.GetReflection();
+  switch (f->cpp_type()) {
+    case Field::CPPTYPE_INT32:
+      return std::to_string(index < 0 ? r->GetInt32(m, f) : r->GetRepeatedInt32(m, f, index));
+    case Field::CPPTYPE_INT64:
+      return std::to_string(index < 0 ? r->GetInt64(m, f) : r->GetRepeatedInt64(m, f, index));
+    case Field::CPPTYPE_BOOL:
+      return (index < 0 ? r->GetBool(m, f) : r->GetRepeatedBool(m, f, index)) ? "true" : "false";
+    case Field::CPPTYPE_DOUBLE:
+      return floatText(index < 0 ? r->GetDouble(m, f) : r->GetRepeatedDouble(m, f, index));
+    case Field::CPPTYPE_STRING:
+      return index < 0 ? r->GetString(m, f) : r->GetRepeatedString(m, f, index);
+    default:
+      return std::string();
+  }
+}
+
+void writeRecords(const Message& m, const std::string& path, std::string& out)
+{
+  const google::protobuf::Reflection* r = m.GetReflection();
+  std::vector<const Field*> set;
+  r->ListFields(m, &set);
+  for (const Field* f : set) {
+    std::string at = (path.empty() ? std::string() : path + ".") + std::string(f->name());
+    bool message = f->cpp_type() == Field::CPPTYPE_MESSAGE;
+    if (f->is_repeated()) {
+      int count = r->FieldSize(m, f);
+      record(out, at + ".#", std::to_string(count));
+      for (int k = 0; k < count; ++k) {
+        std::string item = at + "." + std::to_string(k);
+        record(out, item, message ? std::string() : valueText(m, f, k));
+        if (message)
+          writeRecords(r->GetRepeatedMessage(m, f, k), item, out);
+      }
+    } else if (message) {
+      record(out, at, "");
+      writeRecords(r->GetMessage(m, f), at, out);
+    } else {
+      record(out, at, valueText(m, f, -1));
+    }
+  }
+}
+
+const Field* fieldOf(const Message& m, const std::string& name)
+{
+  const google::protobuf::Descriptor* d = m.GetDescriptor();
+  std::string wanted = plainName(name);
+  for (int k = 0; k < d->field_count(); ++k) {
+    if (plainName(std::string(d->field(k)->name())) == wanted)
+      return d->field(k);
+  }
+  return nullptr;
+}
+
+// Sets a field from its text, or adds it to a repeated one.
+void takeValue(Message& m, const Field* f, const std::string& value, bool add)
+{
+  const google::protobuf::Reflection* r = m.GetReflection();
+  switch (f->cpp_type()) {
+    case Field::CPPTYPE_INT32: {
+      int v = static_cast<int>(std::strtol(value.c_str(), nullptr, 10));
+      add ? r->AddInt32(&m, f, v) : r->SetInt32(&m, f, v);
+      break;
+    }
+    case Field::CPPTYPE_INT64: {
+      long long v = std::strtoll(value.c_str(), nullptr, 10);
+      add ? r->AddInt64(&m, f, v) : r->SetInt64(&m, f, v);
+      break;
+    }
+    case Field::CPPTYPE_BOOL:
+      add ? r->AddBool(&m, f, value == "true") : r->SetBool(&m, f, value == "true");
+      break;
+    case Field::CPPTYPE_DOUBLE: {
+      double v = std::strtod(value.c_str(), nullptr);
+      add ? r->AddDouble(&m, f, v) : r->SetDouble(&m, f, v);
+      break;
+    }
+    case Field::CPPTYPE_STRING:
+      add ? r->AddString(&m, f, value) : r->SetString(&m, f, value);
+      break;
+    default:
+      break;
+  }
+}
+
+// One record: the message it names is reached field by field, made on
+// the way, and its last name is the field set. A name the message does
+// not have is left out.
+void takeRecord(Message& root, const std::string& path, const std::string& value)
+{
+  std::vector<std::string> names;
+  for (size_t at = 0; at <= path.size();) {
+    size_t dot = path.find('.', at);
+    if (dot == std::string::npos)
+      dot = path.size();
+    names.push_back(path.substr(at, dot - at));
+    at = dot + 1;
+  }
+  Message* m = &root;
+  for (size_t k = 0; k < names.size(); ++k) {
+    const Field* f = fieldOf(*m, names[k]);
+    if (!f)
+      return;
+    const google::protobuf::Reflection* r = m->GetReflection();
+    bool last = k + 1 == names.size();
+    bool message = f->cpp_type() == Field::CPPTYPE_MESSAGE;
+    if (f->is_repeated()) {
+      if (last)
+        return;
+      const std::string& next = names[k + 1];
+      if (!message) {
+        // The items of a repeated text come in their order.
+        if (next != "#")
+          takeValue(*m, f, value, true);
+        return;
+      }
+      // The count makes the items; an index names one of them.
+      int wanted = next == "#" ? std::atoi(value.c_str()) : std::atoi(next.c_str()) + 1;
+      while (r->FieldSize(*m, f) < wanted)
+        r->AddMessage(m, f);
+      if (next == "#" || k + 2 == names.size())
+        return;
+      m = r->MutableRepeatedMessage(m, f, std::atoi(next.c_str()));
+      ++k;
+    } else if (message) {
+      m = r->MutableMessage(m, f);
+    } else {
+      if (last)
+        takeValue(*m, f, value, false);
+      return;
+    }
+  }
+}
+
+}  // namespace
+
+std::string recordsOf(const google::protobuf::Message& m)
+{
+  std::string out;
+  writeRecords(m, std::string(), out);
+  return out;
+}
+
+void fromRecords(ibx_str records, google::protobuf::Message& m)
+{
+  std::string text = ibx::str(records);
+  for (size_t at = 0; at < text.size();) {
+    size_t end = text.find('\x1e', at);
+    if (end == std::string::npos)
+      end = text.size();
+    size_t mid = text.find('\x1f', at);
+    if (mid != std::string::npos && mid < end)
+      takeRecord(m, text.substr(at, mid - at), text.substr(mid + 1, end - mid - 1));
+    at = end + 1;
+  }
+}
+
+// The answers of the two configuration requests have no plain callback:
+// the protobuf callback is all there is.
+void configResponse(Sink& s, ibx_str fields)
+{
+  s.flush();
+  if (!s.wants(PB_configResponse))
+    return;
+  protobuf::ConfigResponse m;
+  fromRecords(fields, m);
+  IBX_GIVE(s, configResponseProtoBuf, m);
+}
+
+void updateConfigResponse(Sink& s, ibx_str fields)
+{
+  s.flush();
+  if (!s.wants(PB_updateConfigResponse))
+    return;
+  protobuf::UpdateConfigResponse m;
+  fromRecords(fields, m);
+  IBX_GIVE(s, updateConfigResponseProtoBuf, m);
+}
+
 }  // namespace pb
 }  // namespace ibx
 
@@ -1099,9 +1315,23 @@ void EClient::exerciseOptionsProtoBuf(const protobuf::ExerciseOptionsRequest& p)
 // The session is started by eConnect.
 void EClient::startApiProtoBuf(const protobuf::StartApiRequest&) {}
 
-// The configuration of the session is not reached through this library:
-// the two requests are declared, as the official client has them, and do
-// nothing; their answers never come.
-void EClient::reqConfigProtoBuf(const protobuf::ConfigRequest&) {}
+// The two configuration requests: the fields of the message that are set
+// go to the client as records; the answer is the protobuf callback of the
+// request, or an error callback.
+void EClient::reqConfigProtoBuf(const protobuf::ConfigRequest& p)
+{
+  int id = p.has_reqid() ? p.reqid() : NO_VALID_ID;
+  if (!ibxReady(id))
+    return;
+  std::string fields = ibx::pb::recordsOf(p);
+  ibxDone(id, ibx_req_config(m_handle, ibx::view(fields)));
+}
 
-void EClient::updateConfigProtoBuf(const protobuf::UpdateConfigRequest&) {}
+void EClient::updateConfigProtoBuf(const protobuf::UpdateConfigRequest& p)
+{
+  int id = p.has_reqid() ? p.reqid() : NO_VALID_ID;
+  if (!ibxReady(id))
+    return;
+  std::string fields = ibx::pb::recordsOf(p);
+  ibxDone(id, ibx_update_config(m_handle, ibx::view(fields)));
+}

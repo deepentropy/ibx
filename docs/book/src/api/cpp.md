@@ -66,13 +66,14 @@ cmake --build build/cpp
 
 What a program gets:
 
-- **The 81 protobuf requests.** Each reads its message and makes the plain request: same checks, same answers. A field that is not set has the value that stands for none (-1 for a request id, 0 for an order id, the unset value of a number, an empty text, no). `startApiProtoBuf` does nothing: the session is started by `eConnect`. `reqConfigProtoBuf` and `updateConfigProtoBuf` are declared and do nothing.
+- **The 81 protobuf requests.** Each reads its message and makes the plain request: same checks, same answers. A field that is not set has the value that stands for none (-1 for a request id, 0 for an order id, the unset value of a number, an empty text, no). `startApiProtoBuf` does nothing: the session is started by `eConnect`.
+- **The configuration.** `reqConfigProtoBuf` asks for the configuration of the session and `updateConfigProtoBuf` changes it; they exist in the protobuf form only, as in the official client. Their answers are `configResponseProtoBuf` and `updateConfigResponseProtoBuf`, which have no plain callback, or an error callback: when the level of the session has no configuration requests, when the login does not allow them, or when a setting cannot be changed. Only the fields that are set in a message are sent and given.
 - **The 81 protobuf callbacks.** Each plain callback is preceded by the protobuf callback of its answer, with the fields set as the Python client sets them, which is how the reference sets them: a number an answer gives is set, a text when not empty, a flag when yes; a field of an object (a contract, an order, an execution...) is left out when it has the value the object starts with.
   - A price whose size follows it has one `tickPriceProtoBuf` message that carries the size; that size has no message of its own.
   - The bars of an answer come in one `historicalDataProtoBuf` message before the `historicalData` callback of each bar, the rows of a scan in one `scannerDataProtoBuf` message before their `scannerData` callbacks.
   - The message of `tickReqParamsProtoBuf` carries the last price and last size precisions of the contract, which the plain callback does not have.
   - An error the client makes itself (not connected, already connected...) has no message, as in the official client; an error of the servers has its `errorProtoBuf`.
-  - `orderBoundProtoBuf`, `rerouteMarketDataRequestProtoBuf`, `rerouteMarketDepthRequestProtoBuf`, `configResponseProtoBuf` and `updateConfigResponseProtoBuf` are declared and never called.
+  - `orderBoundProtoBuf`, `rerouteMarketDataRequestProtoBuf` and `rerouteMarketDepthRequestProtoBuf` are declared and never called.
 - **Refusals.** What the client has no counterpart for is refused with an error callback (code 321) and nothing is sent: `exerciseOptionsProtoBuf` with a manual order time, a customer account or the professional customer flag, and an order with a condition of a kind the official client does not have.
 
 It costs nothing when it is not used. Without the option nothing of it is compiled. With it, the protobuf callbacks of `EWrapper` are pure virtual, as in the official header, and a class that derives from `EWrapper` gets every message. `DefaultEWrapper` implements them empty and notes each one that reaches it: the message of a protobuf callback a program does not override is built once, then no more, and a callback costs one test more (about half a nanosecond on a tick). An override must therefore not call the `DefaultEWrapper` callback it replaces.
@@ -86,7 +87,7 @@ ctest --test-dir build/cpp
 ```
 
 - `ibx_tests`: every field of every structure and every parameter of every callback crosses to the right place, and the scenarios recorded from the reference gateway are replayed through the C++ client (no network).
-- `ibx_proto_tests` (with `IBX_PROTOBUF`): each protobuf callback comes before its plain callback with its fields set, no message is built for a callback that is not used, and each protobuf request makes the plain request of its message. With the option, `ibx_tests` replays the recorded scenarios a second time with every request made through its protobuf form.
+- `ibx_proto_tests` (with `IBX_PROTOBUF`): each protobuf callback comes before its plain callback with its fields set, no message is built for a callback that is not used, each protobuf request makes the plain request of its message, and the configuration requests and their answers cross with every field. With the option, `ibx_tests` replays the recorded scenarios a second time with every request made through its protobuf form.
 - `live_paper`: a session of about 45 requests on the paper account, every callback written as a row; with `IBX_PROTOBUF`, every protobuf callback too, with its message as JSON.
 
 ## The C entry layer

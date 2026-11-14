@@ -423,6 +423,15 @@ int main(int argc, char** argv)
   c.reqWshMetaData(37);
   pause(3);
 
+#if defined(IBX_PROTOBUF)
+  // The configuration has a protobuf form only: read it, change nothing.
+  app.note("A17 the configuration");
+  protobuf::ConfigRequest configRequest;
+  configRequest.set_reqid(42);
+  c.reqConfigProtoBuf(configRequest);
+  app.wait("configResponseProtoBuf\t", 1, 10);
+#endif
+
   pause(2.0);  // an answer that follows the last request is lost without this wait
   bool ok = cancelled && app.count("contractDetails\t") >= 2 && app.count("historicalData\t") >= 1 && app.count("accountSummary\t") >= 1
          && app.count("positionEnd") >= 1 && app.count("openOrder\t") >= 1 && app.count("securityDefinitionOptionalParameter\t") >= 1

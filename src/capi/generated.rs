@@ -753,6 +753,8 @@ pub struct IbxCallbacks {
     pub user_info: unsafe extern "C" fn(*mut c_void, i64, IbxStr),
     pub current_time_in_millis: unsafe extern "C" fn(*mut c_void, i64),
     pub fundamental_data: unsafe extern "C" fn(*mut c_void, i64, IbxStr),
+    pub config_response: unsafe extern "C" fn(*mut c_void, IbxStr),
+    pub update_config_response: unsafe extern "C" fn(*mut c_void, IbxStr),
 }
 
 /// The wrapper that hands each callback to the caller's table.
@@ -1157,6 +1159,18 @@ impl Wrapper for CWrapper<'_> {
 
     fn fundamental_data(&mut self, req_id: i64, data: &str) {
         unsafe { (self.cb.fundamental_data)(self.user, req_id as i64, IbxStr::of(data)) }
+    }
+
+    fn config_response(&mut self, response: &crate::api::config::ConfigResponse) {
+        let s = &mut self.s;
+        s.b0.clear(); s.b0.extend_from_slice(crate::capi::config::records(response).as_bytes());
+        unsafe { (self.cb.config_response)(self.user, IbxStr::of_bytes(&s.b0)) }
+    }
+
+    fn update_config_response(&mut self, response: &crate::api::config::UpdateConfigResponse) {
+        let s = &mut self.s;
+        s.b0.clear(); s.b0.extend_from_slice(crate::capi::config::records(response).as_bytes());
+        unsafe { (self.cb.update_config_response)(self.user, IbxStr::of_bytes(&s.b0)) }
     }
 }
 
@@ -2735,5 +2749,7 @@ pub(crate) mod checks {
         w.user_info(tv_i("req_id", 0) as i64, &tv_s("white_branding_id", 0));
         w.current_time_in_millis(tv_i("time_in_millis", 0) as i64);
         w.fundamental_data(tv_i("req_id", 0) as i64, &tv_s("data", 0));
+        w.config_response(&<crate::api::config::ConfigResponse as crate::capi::config::Records>::filled(1));
+        w.update_config_response(&<crate::api::config::UpdateConfigResponse as crate::capi::config::Records>::filled(1));
     }
 }

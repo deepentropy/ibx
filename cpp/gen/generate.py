@@ -342,6 +342,7 @@ def callbacks():
             raw = cb["raw"]
             abi = [tuple(p.rsplit(" ", 1)) for p in split_params(raw["abi"])]
             rargs = [a.strip() for a in raw["rust"].split(",")]
+            pre = list(raw.get("pre", []))
             call = raw["cpp"]
         else:
             bufs, at = 0, 0
@@ -421,7 +422,7 @@ def callbacks():
 
 
 def prototypes():
-    rows = ["  X(%s, (%s))" % (cb["name"], cb["params"]) for cb in spec.CALLBACKS if not cb["ext"]]
+    rows = ["  X(%s, (%s))" % (cb["name"], cb["params"]) for cb in spec.CALLBACKS if not cb["ext"] and cb["plain"]]
     return """// %s
 // The callbacks of the wrapper, as a list a class is declared from:
 //   EWrapper_declare(EWrapper_methods_override)
@@ -582,7 +583,8 @@ def test_callbacks():
         else:
             rname = cb["rust"] or snake(cb["name"])
             rparams = sigs[rname]
-            expected.append(cb["name"])
+            if cb["plain"]:
+                expected.append(cb["name"])
             # The C++ type each Rust parameter is given as, for the small enumerations.
             enum_of = {}
             if not cb["raw"]:
@@ -623,6 +625,8 @@ def test_callbacks():
                 else:
                     raise SystemExit("test of callback %s: no value for %s: %s" % (cb["name"], pname, ptype))
             fire.append("        w.%s(%s);" % (rname, ", ".join(args)))
+            if not cb["plain"]:
+                continue
             if cb["raw"]:
                 body.append('expect(fails, "%s", %s);' % (cb["name"], cb["raw"]["check"]))
             else:
@@ -782,6 +786,8 @@ def log_wrapper():
         dumps.append("inline void dump(Row& r, const %s& x) {\n%s\n}\n" % (st["name"], "\n".join(body)))
     methods = []
     for cb in spec.CALLBACKS:
+        if not cb["plain"]:
+            continue
         params = cpp_params(cb["params"])
         body = ['Row r("%s");' % cb["name"]] + ["r.arg(%s);" % n for _, n in params] + ["row(r.text);"]
         methods.append("  void %s(%s) override { %s }" % (cb["name"], cb["params"], " ".join(body)))
@@ -935,6 +941,14 @@ int32_t ibx_process(ibx_client* h, const ibx_callbacks* callbacks, void* user);
    capacity and its full length is written to its `_length`. */
 bool ibx_precisions(const ibx_client* h, int64_t req_id, char* price, size_t price_capacity, size_t* price_length,
                     char* size, size_t size_capacity, size_t* size_length);
+/* The two configuration requests. The fields of the request that are set
+   are given as text records `path \x1f value \x1e`: the path is made of
+   field names, with an index after the name of a repeated field, whose
+   count is the record `path.#`; a sub-message that is set has a record of
+   its own with an empty value. The answers are the `config_response` and
+   `update_config_response` entries of the table, in the same form. */
+int32_t ibx_req_config(ibx_client* h, ibx_str fields);
+int32_t ibx_update_config(ibx_client* h, ibx_str fields);
 
 /* The requests: 0 when taken, 1 when the session has ended. */
 %s

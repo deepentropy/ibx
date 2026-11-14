@@ -131,6 +131,8 @@ typedef struct ibx_callbacks {
   void (*user_info)(void* user, int64_t req_id, ibx_str white_branding_id);
   void (*current_time_in_millis)(void* user, int64_t time_in_millis);
   void (*fundamental_data)(void* user, int64_t req_id, ibx_str data);
+  void (*config_response)(void* user, ibx_str fields);
+  void (*update_config_response)(void* user, ibx_str fields);
 } ibx_callbacks;
 
 /* Logs in and starts the engine. On failure returns null with the reason in `error`. */
@@ -152,6 +154,14 @@ int32_t ibx_process(ibx_client* h, const ibx_callbacks* callbacks, void* user);
    capacity and its full length is written to its `_length`. */
 bool ibx_precisions(const ibx_client* h, int64_t req_id, char* price, size_t price_capacity, size_t* price_length,
                     char* size, size_t size_capacity, size_t* size_length);
+/* The two configuration requests. The fields of the request that are set
+   are given as text records `path  value `: the path is made of
+   field names, with an index after the name of a repeated field, whose
+   count is the record `path.#`; a sub-message that is set has a record of
+   its own with an empty value. The answers are the `config_response` and
+   `update_config_response` entries of the table, in the same form. */
+int32_t ibx_req_config(ibx_client* h, ibx_str fields);
+int32_t ibx_update_config(ibx_client* h, ibx_str fields);
 
 /* The requests: 0 when taken, 1 when the session has ended. */
 int32_t ibx_req_mkt_data(ibx_client* h, int64_t req_id, ibx_str contract, ibx_str generic_ticks, bool snapshot, bool regulatory_snaphsot);

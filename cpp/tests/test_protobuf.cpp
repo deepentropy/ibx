@@ -5,6 +5,7 @@
 //
 // Needs the Rust client built with its test helpers (IBX_BUILD_TESTS).
 
+#include <cctype>
 #include <functional>
 #include <map>
 #include <memory>
@@ -152,11 +153,10 @@ void everyCallback()
   expect(fails, "one message for the scan, none for its end",
          w.messages["scannerDataProtoBuf"].size() == 1 && w.at("scannerDataEnd") == w.at("scannerData") + 1);
   // The protobuf callbacks the client never gives: their plain callback is not given either.
-  for (const char* never : {"orderBoundProtoBuf", "rerouteMarketDataRequestProtoBuf", "rerouteMarketDepthRequestProtoBuf", "configResponseProtoBuf",
-                            "updateConfigResponseProtoBuf"})
+  for (const char* never : {"orderBoundProtoBuf", "rerouteMarketDataRequestProtoBuf", "rerouteMarketDepthRequestProtoBuf"})
     expect(fails, std::string("not given: ") + never, w.messages.count(never) == 0);
   expect(fails, "every other protobuf callback was given",
-         w.messages.size() == static_cast<size_t>(ibx::PROTO_CALLBACK_COUNT) - 5);
+         w.messages.size() == static_cast<size_t>(ibx::PROTO_CALLBACK_COUNT) - 3);
 
   // Order status: the arguments, a quantity as its text.
   if (const protobuf::OrderStatus* m = w.first<protobuf::OrderStatus>("orderStatusProtoBuf")) {
@@ -412,7 +412,7 @@ void noCostWhenNotUsed()
   unsigned long long first = ibx::protoMessagesBuilt - before;
   // Every protobuf callback the client gives, once: the three tick-by-tick
   // callbacks share theirs.
-  expect(fails, "the first pass builds each message once", first == static_cast<unsigned long long>(ibx::PROTO_CALLBACK_COUNT) - 5);
+  expect(fails, "the first pass builds each message once", first == static_cast<unsigned long long>(ibx::PROTO_CALLBACK_COUNT) - 3);
   for (int pass = 0; pass < 2; ++pass) {
     before = ibx::protoMessagesBuilt;
     ibx::Sink sink{&w, nullptr};
@@ -449,7 +449,7 @@ void noCostWhenNotUsed()
     ibx::Sink s{&every, nullptr};
     ibx_test_fire(&ibx::callbackTable, &s);
     s.flush();
-    expect(fails, "a wrapper derived from EWrapper gets every message", ibx::protoMessagesBuilt - before == static_cast<unsigned long long>(ibx::PROTO_CALLBACK_COUNT) - 3);
+    expect(fails, "a wrapper derived from EWrapper gets every message", ibx::protoMessagesBuilt - before == static_cast<unsigned long long>(ibx::PROTO_CALLBACK_COUNT) - 1);
   }
   report("no message for a callback that is not used", fails);
 }
@@ -503,7 +503,7 @@ void requestsReachTheirPlainRequest()
   }
   IBX_TEST_PROTO_REQUESTS_NO_ID(X)
 #undef X
-  // The start of the session and the two configuration requests do nothing.
+  // The start of the session does nothing: eConnect starts it.
 #define X(request, message) \
   { \
     client.request(protobuf::message()); \
@@ -511,7 +511,7 @@ void requestsReachTheirPlainRequest()
   }
   IBX_TEST_PROTO_REQUESTS_NOTHING(X)
 #undef X
-  expect(fails, "every protobuf request was made", count == 78);
+  expect(fails, "every protobuf request was made", count == 80);
 
   // A message without its id: the id that stands for none.
   size_t before = w.errors.size();
@@ -847,6 +847,236 @@ void requestObjects()
   report("the objects of the request messages", fails);
 }
 
+// ── The configuration ──
+
+// A name as both sides compare it: without case and underscores.
+std::string plainName(const std::string& name)
+{
+  std::string out;
+  for (char c : name) {
+    if (c != '_')
+      out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return out;
+}
+
+// Every field of a message set to the value made from its name: a
+// sub-message with the next seed, two items in a repeated field.
+void fillMessage(google::protobuf::Message& m, int seed)
+{
+  const google::protobuf::Descriptor* d = m.GetDescriptor();
+  const google::protobuf::Reflection* r = m.GetReflection();
+  for (int k = 0; k < d->field_count(); ++k) {
+    const google::protobuf::FieldDescriptor* f = d->field(k);
+    std::string name = plainName(std::string(f->name()));
+    switch (f->cpp_type()) {
+      case google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE:
+        if (f->is_repeated()) {
+          fillMessage(*r->AddMessage(&m, f), seed + 1);
+          fillMessage(*r->AddMessage(&m, f), seed + 2);
+        } else {
+          fillMessage(*r->MutableMessage(&m, f), seed + 1);
+        }
+        break;
+      case google::protobuf::FieldDescriptor::CPPTYPE_STRING:
+        if (f->is_repeated()) {
+          r->AddString(&m, f, tvS(name.c_str(), seed + 1));
+          r->AddString(&m, f, tvS(name.c_str(), seed + 2));
+        } else {
+          r->SetString(&m, f, tvS(name.c_str(), seed));
+        }
+        break;
+      case google::protobuf::FieldDescriptor::CPPTYPE_INT32:
+        r->SetInt32(&m, f, static_cast<int>(tvI(name.c_str(), seed)));
+        break;
+      case google::protobuf::FieldDescriptor::CPPTYPE_BOOL:
+        r->SetBool(&m, f, tvB(name.c_str(), seed));
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+// Every field of a message is set, to the value made from its name.
+void checkMessage(const google::protobuf::Message& m, int seed, const std::string& path, Failures& fails)
+{
+  const google::protobuf::Descriptor* d = m.GetDescriptor();
+  const google::protobuf::Reflection* r = m.GetReflection();
+  for (int k = 0; k < d->field_count(); ++k) {
+    const google::protobuf::FieldDescriptor* f = d->field(k);
+    std::string name = plainName(std::string(f->name()));
+    std::string at = path + "." + std::string(f->name());
+    if (f->is_repeated()) {
+      expect(fails, at + ": two items", r->FieldSize(m, f) == 2);
+      for (int i = 0; i < r->FieldSize(m, f) && i < 2; ++i) {
+        if (f->cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE)
+          checkMessage(r->GetRepeatedMessage(m, f, i), seed + 1 + i, at, fails);
+        else
+          expect(fails, at, r->GetRepeatedString(m, f, i) == tvS(name.c_str(), seed + 1 + i));
+      }
+      continue;
+    }
+    expect(fails, at + ": set", r->HasField(m, f));
+    switch (f->cpp_type()) {
+      case google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE:
+        checkMessage(r->GetMessage(m, f), seed + 1, at, fails);
+        break;
+      case google::protobuf::FieldDescriptor::CPPTYPE_STRING:
+        expect(fails, at, r->GetString(m, f) == tvS(name.c_str(), seed));
+        break;
+      case google::protobuf::FieldDescriptor::CPPTYPE_INT32:
+        expect(fails, at, r->GetInt32(m, f) == tvI(name.c_str(), seed));
+        break;
+      case google::protobuf::FieldDescriptor::CPPTYPE_BOOL:
+        expect(fails, at, r->GetBool(m, f) == tvB(name.c_str(), seed));
+        break;
+      default:
+        fails.push_back(at + ": a kind of field the test does not know");
+    }
+  }
+}
+
+// What the Rust client reads from the records of a request message, as
+// its debug text.
+std::string readByRust(const char* kind, const google::protobuf::Message& m)
+{
+  std::string fields = ibx::pb::recordsOf(m);
+  std::string text;
+  if (!ibx_test_describe(ibx::view(kind), ibx::view(fields), &takeText, &text))
+    text = "unknown kind";
+  return text;
+}
+
+void configuration()
+{
+  Failures fails;
+
+  // The two requests with every field set: a number, a text and a flag,
+  // the sub-messages, the repeated messages, the trusted addresses, the
+  // accepted warnings and the reset flag. The Rust client reads each
+  // field as the same request filled on its side.
+  protobuf::ConfigRequest request;
+  fillMessage(request, 5);
+  std::string expected;
+  expect(fails, "ConfigRequest: the Rust side", ibx_test_config(ibx::view("ConfigRequest"), 5, &takeText, &expected));
+  differences("the configuration request, as the Rust client reads it", readByRust("ConfigRequest", request), expected, fails);
+
+  protobuf::UpdateConfigRequest update;
+  fillMessage(update, 5);
+  expect(fails, "the update has every kind of field", update.has_reqid() && update.messages_size() == 2 && update.acceptedwarnings_size() == 2
+                                                         && update.has_resetapiordersequence() && update.api().settings().trustedips_size() == 2
+                                                         && update.api().settings().has_socketport() && update.lockandexit().has_autologofftime()
+                                                         && update.orders().smartrouting().has_defaultalgorithm()
+                                                         && update.api().precautions().has_bypassorderprecautions());
+  expected.clear();
+  expect(fails, "UpdateConfigRequest: the Rust side", ibx_test_config(ibx::view("UpdateConfigRequest"), 5, &takeText, &expected));
+  std::string read = readByRust("UpdateConfigRequest", update);
+  differences("the update request, as the Rust client reads it", read, expected, fails);
+  expect(fails, "the update request is read with its values", contains(read, "socket_port: Some(") && contains(read, "trusted_ips: [\"trustedips8\", \"trustedips9\"]")
+                                                                && contains(read, "accepted_warnings: [UpdateConfigWarning {") && !contains(read, "None"));
+
+  // Only what is set crosses: a field that is not set stays so, and a
+  // sub-message with no field set is still there.
+  protobuf::UpdateConfigRequest few;
+  few.mutable_api()->mutable_settings()->set_readonlyapi(false);
+  few.mutable_orders();
+  few.add_messages()->set_id(7);
+  read = readByRust("UpdateConfigRequest", few);
+  expect(fails, "an update with a few fields",
+         contains(read, "req_id: None") && contains(read, "lock_and_exit: None") && contains(read, "read_only_api: Some(false)")
+           && contains(read, "socket_port: None") && contains(read, "orders: Some(OrdersConfig { smart_routing: None })")
+           && contains(read, "messages: [MessageConfig { id: Some(7), title: None") && contains(read, "accepted_warnings: []")
+           && contains(read, "reset_api_order_sequence: None") && contains(read, "precautions: None"));
+  expect(fails, "an empty request has no record", ibx::pb::recordsOf(protobuf::ConfigRequest()).empty());
+
+  // The records read back give the message itself.
+  protobuf::UpdateConfigRequest back;
+  std::string fields = ibx::pb::recordsOf(update);
+  ibx::pb::fromRecords(ibx::view(fields), back);
+  expect(fails, "the records of a message give the message back", back.SerializeAsString() == update.SerializeAsString());
+  protobuf::UpdateConfigRequest fewBack;
+  fields = ibx::pb::recordsOf(few);
+  ibx::pb::fromRecords(ibx::view(fields), fewBack);
+  expect(fails, "the records of a message with a few fields give it back", fewBack.SerializeAsString() == few.SerializeAsString() && fewBack.has_orders()
+                                                                              && !fewBack.has_lockandexit());
+
+  // The two answers, given by the Rust client with every field set: each
+  // comes as its protobuf callback, every field with its value.
+  Messages w;
+  ibx::Sink sink{&w, nullptr};
+  ibx_test_fire(&ibx::callbackTable, &sink);
+  sink.flush();
+  if (const protobuf::ConfigResponse* m = w.first<protobuf::ConfigResponse>("configResponseProtoBuf")) {
+    checkMessage(*m, 1, "ConfigResponse", fails);
+    expect(fails, "the configuration has its sections", m->messages_size() == 2 && m->api().settings().trustedips_size() == 2
+                                                          && m->api().precautions().has_bypassbondwarning() && m->orders().smartrouting().has_preopenreroute());
+  } else {
+    fails.push_back("no configResponse message");
+  }
+  if (const protobuf::UpdateConfigResponse* m = w.first<protobuf::UpdateConfigResponse>("updateConfigResponseProtoBuf")) {
+    checkMessage(*m, 1, "UpdateConfigResponse", fails);
+    expect(fails, "the answer of an update has its lists", m->changedfields_size() == 2 && m->errors_size() == 2 && m->warnings_size() == 2
+                                                             && m->warnings(1).has_messageid());
+  } else {
+    fails.push_back("no updateConfigResponse message");
+  }
+  expect(fails, "each answer once", w.messages["configResponseProtoBuf"].size() == 1 && w.messages["updateConfigResponseProtoBuf"].size() == 1);
+
+  // A wrapper that leaves the answers to DefaultEWrapper: their messages
+  // are built once, then no more; one that overrides an answer gets it.
+  struct Config : DefaultEWrapper {
+    int answers = 0;
+    void configResponseProtoBuf(const protobuf::ConfigResponse& m) override { answers += m.has_reqid() ? 1 : 0; }
+  } own;
+  protobuf::ConfigResponse answer;
+  fillMessage(answer, 3);
+  fields = ibx::pb::recordsOf(answer);
+  protobuf::UpdateConfigResponse updated;
+  fillMessage(updated, 3);
+  std::string updatedFields = ibx::pb::recordsOf(updated);
+  ibx::Sink ownSink{&own, nullptr};
+  unsigned long long before = ibx::protoMessagesBuilt;
+  for (int pass = 0; pass < 3; ++pass) {
+    ibx::callbackTable.config_response(&ownSink, ibx::view(fields));
+    ibx::callbackTable.update_config_response(&ownSink, ibx::view(updatedFields));
+  }
+  expect(fails, "an overridden answer comes every time, one left empty is built once", own.answers == 3 && ibx::protoMessagesBuilt - before == 4);
+
+  // From the request to its answer, on a session with no server behind
+  // it: the client answers the configuration itself.
+  {
+    Messages answers;
+    EClientSocket session(&answers);
+    session.ibxAdopt(ibx_test_session());
+    protobuf::ConfigRequest ask;
+    ask.set_reqid(41);
+    session.reqConfigProtoBuf(ask);
+    session.ibxProcess();
+    const protobuf::ConfigResponse* given = answers.first<protobuf::ConfigResponse>("configResponseProtoBuf");
+    expect(fails, "the configuration is answered", given && given->reqid() == 41 && given->has_api() && given->api().has_settings()
+                                                     && given->api().settings().has_readonlyapi() && given->has_lockandexit());
+    // An update of one setting: its answer names the request and has a status.
+    protobuf::UpdateConfigRequest change;
+    change.set_reqid(42);
+    change.mutable_api()->mutable_settings()->set_readonlyapi(given && given->api().settings().readonlyapi());
+    session.updateConfigProtoBuf(change);
+    session.ibxProcess();
+    const protobuf::UpdateConfigResponse* changed = answers.first<protobuf::UpdateConfigResponse>("updateConfigResponseProtoBuf");
+    expect(fails, "the update is answered", changed && changed->reqid() == 42 && changed->has_status() && !changed->status().empty());
+    expect(fails, "no error for either", answers.hits.count("error") == 0);
+  }
+
+  // A client that is not connected answers both requests with the error 504.
+  Errors errors;
+  EClientSocket client(&errors);
+  client.reqConfigProtoBuf(request);
+  client.updateConfigProtoBuf(protobuf::UpdateConfigRequest());
+  expect(fails, "not connected", errors.errors.size() == 2 && errors.errors[0] == std::make_pair(static_cast<int>(tvI("reqid", 5)), 504)
+                                   && errors.errors[1] == std::make_pair(-1, 504));
+  report("the configuration requests and their answers", fails);
+}
+
 }  // namespace
 
 int main()
@@ -857,6 +1087,7 @@ int main()
   noCostWhenNotUsed();
   requestsReachTheirPlainRequest();
   requestObjects();
+  configuration();
   std::printf("%d passed, %d failed\n", passed, failed);
   return failed ? 1 : 0;
 }

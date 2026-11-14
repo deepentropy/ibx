@@ -12,6 +12,7 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+pub(crate) mod config;
 mod generated;
 #[cfg(feature = "test-support")]
 pub(crate) mod testing;

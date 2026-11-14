@@ -5,6 +5,7 @@
 #define IBX_PROTO_H
 
 #include <google/protobuf/map.h>
+#include <google/protobuf/message.h>
 
 #include "TwsSocketClientErrors.h"
 #include "ibx_runtime.h"
@@ -41,6 +42,17 @@ Contract contractOf(const protobuf::Contract& p, Order* order = nullptr);
 bool orderOf(const protobuf::Order& p, const protobuf::AttachedOrders* attached, Order& o, std::string& refused);
 // The options of a request, in the order of their names; null when none.
 TagValueListSPtr tagsOf(const google::protobuf::Map<std::string, std::string>& map);
+
+// ── The configuration ──
+
+// The fields of a message that are set, as the text records the C entry
+// layer takes for the configuration requests.
+std::string recordsOf(const google::protobuf::Message& m);
+// Sets the fields of a message from such records.
+void fromRecords(ibx_str records, google::protobuf::Message& m);
+// The answers of the configuration requests: their protobuf callbacks.
+void configResponse(Sink& s, ibx_str fields);
+void updateConfigResponse(Sink& s, ibx_str fields);
 
 #include "ibx_proto_generated.inc"
 

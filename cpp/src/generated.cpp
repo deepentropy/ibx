@@ -1719,6 +1719,20 @@ static void cb_fundamental_data(void* user, int64_t req_id, ibx_str data) noexce
   } catch (...) { s->failed(); }
 }
 
+static void cb_config_response(void* user, ibx_str fields) noexcept {
+  ibx::Sink* s = static_cast<ibx::Sink*>(user);
+  try {
+    (void)fields;
+  } catch (...) { s->failed(); }
+}
+
+static void cb_update_config_response(void* user, ibx_str fields) noexcept {
+  ibx::Sink* s = static_cast<ibx::Sink*>(user);
+  try {
+    (void)fields;
+  } catch (...) { s->failed(); }
+}
+
 namespace ibx {
 const ibx_callbacks callbackTable = {
   &cb_tick_price,
@@ -1806,6 +1820,8 @@ const ibx_callbacks callbackTable = {
   &cb_user_info,
   &cb_current_time_in_millis,
   &cb_fundamental_data,
+  &cb_config_response,
+  &cb_update_config_response,
 };
 }  // namespace ibx
 

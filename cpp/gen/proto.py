@@ -226,7 +226,8 @@ def trampolines(G, callbacks):
         table.append("  &pb_%s," % rname)
         if cb["raw"] or rname not in proto_of:
             # No message for this callback: what waits is given, then it.
-            call = t["call"]
+            # One with no plain callback has its own statement.
+            call = cb["raw"].get("proto", t["call"]) if cb["raw"] else t["call"]
             out.append(head + "  s->flush();\n  try {\n%s    %s\n  } catch (...) { s->failed(); }\n}\n" % (
                 "".join("    %s\n" % d for d in t["cdecode"]), call))
             continue
@@ -613,6 +614,6 @@ const ibx_callbacks callbackTable = {
     lists = {"REQ_ID": [], "ORDER_ID": [], "NO_ID": [], "NOTHING": []}
     for name, message, short in reqs:
         fields = KINDS[message]
-        kind = "NOTHING" if short not in F._REQUESTS else "REQ_ID" if "reqId" in fields else "ORDER_ID" if "orderId" in fields else "NO_ID"
+        kind = "NOTHING" if short in F.NOT_GIVEN else "REQ_ID" if "reqId" in fields else "ORDER_ID" if "orderId" in fields else "NO_ID"
         lists[kind].append("X(%s, %s)" % (name, message))
     G.PROTO_REQUEST_LISTS = "\n".join("#define IBX_TEST_PROTO_REQUESTS_%s(X) %s" % (kind, " ".join(items)) for kind, items in lists.items())

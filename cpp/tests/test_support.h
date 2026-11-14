@@ -18,6 +18,8 @@ bool ibx_test_make(ibx_str kind, int64_t seed, ibx_test_sink sink, void* user);
 bool ibx_test_check(ibx_str kind, ibx_str data, int64_t seed, ibx_test_sink sink, void* user);
 bool ibx_test_describe(ibx_str kind, ibx_str data, ibx_test_sink sink, void* user);
 bool ibx_test_sample(ibx_str kind, ibx_test_sink sink, void* user);
+bool ibx_test_config(ibx_str kind, int64_t seed, ibx_test_sink sink, void* user);
+ibx_client* ibx_test_session(void);
 void ibx_test_fire(const ibx_callbacks* callbacks, void* user);
 void ibx_test_ticks(const ibx_callbacks* callbacks, void* user, uint64_t count);
 

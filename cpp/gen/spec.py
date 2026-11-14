@@ -783,8 +783,8 @@ Q("cancelFundamentalData", "int reqId", "c.cancel_fundamental_data(req_id)", ext
 CALLBACKS = []
 
 
-def C(name, params, rust="", args=None, ext=False, raw=None):
-    CALLBACKS.append(dict(name=name, params=params, rust=rust, args=args or {}, ext=ext, raw=raw))
+def C(name, params, rust="", args=None, ext=False, raw=None, plain=True):
+    CALLBACKS.append(dict(name=name, params=params, rust=rust, args=args or {}, ext=ext, raw=raw, plain=plain))
 
 
 C("tickPrice", "int reqId, TickType field, double price, const TickAttrib& attrib")
@@ -894,12 +894,29 @@ C("userInfo", "int reqId, const std::string& whiteBrandingId")
 C("currentTimeInMillis", "long long timeInMillis")
 # A callback of the client the official list no longer has.
 C("fundamentalData", "int reqId, const std::string& data", ext=True)
+# The answers of the two configuration requests. The official client has
+# them as protobuf callbacks only (`plain=False`: no plain C++ callback):
+# the structure crosses as text records (src/capi/config.rs) and, with the
+# protobuf forms, becomes the message of the protobuf callback.
+C("configResponse", "", ext=True, plain=False,
+  raw=dict(abi="ibx_str fields", rust="IbxStr::of_bytes(&s.b0)",
+           pre=["s.b0.clear(); s.b0.extend_from_slice(crate::capi::config::records(response).as_bytes());"],
+           cpp="(void)fields;",
+           proto="if (!s->quiet(ibx::PB_configResponse)) ibx::pb::configResponse(*s, fields);"))
+C("updateConfigResponse", "", ext=True, plain=False,
+  raw=dict(abi="ibx_str fields", rust="IbxStr::of_bytes(&s.b0)",
+           pre=["s.b0.clear(); s.b0.extend_from_slice(crate::capi::config::records(response).as_bytes());"],
+           cpp="(void)fields;",
+           proto="if (!s->quiet(ibx::PB_updateConfigResponse)) ibx::pb::updateConfigResponse(*s, fields);"))
 
 # ── Tests ──
 # The value a test gives to a callback parameter whose Rust type has no
 # plain rule: the Rust expression, and the C++ condition on the parameter
 # `v` that must hold.
 FIRE = {
+    # Every field of the configuration set; the C++ side gets it as a protobuf message.
+    "&crate::api::config::ConfigResponse": ("&<crate::api::config::ConfigResponse as crate::capi::config::Records>::filled(1)", ""),
+    "&crate::api::config::UpdateConfigResponse": ("&<crate::api::config::UpdateConfigResponse as crate::capi::config::Records>::filled(1)", ""),
     "&TickAttrib": ("&TickAttrib { can_auto_execute: true, past_limit: false, pre_open: true }",
                     "v.canAutoExecute && !v.pastLimit && v.preOpen"),
     "&TickAttribLast": ("&TickAttribLast { past_limit: false, unreported: true }", "!v.pastLimit && v.unreported"),

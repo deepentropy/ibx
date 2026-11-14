@@ -85,6 +85,9 @@ pub unsafe extern "C" fn ibx_test_describe(kind: IbxStr, data: IbxStr, sink: Ibx
         "ExecutionFilter" => format!("{:?}", r_execution_filter(r)),
         "WshEventData" => format!("{:?}", r_wsh_event_data(r)),
         "Tags" => format!("{:?}", super::read_tags(unsafe { data.bytes() })),
+        // The configuration requests cross as records.
+        "ConfigRequest" => format!("{:?}", super::config::from_records::<crate::api::config::ConfigRequest>(&unsafe { data.text() })),
+        "UpdateConfigRequest" => format!("{:?}", super::config::from_records::<crate::api::config::UpdateConfigRequest>(&unsafe { data.text() })),
         _ => return false,
     };
     let text = match r.refused {
@@ -93,6 +96,33 @@ pub unsafe extern "C" fn ibx_test_describe(kind: IbxStr, data: IbxStr, sink: Ibx
     };
     unsafe { sink(user, IbxStr::of(&text)) };
     true
+}
+
+/// A configuration request with every field set to the value made from its
+/// name and `seed`, as its debug text: what `ibx_test_describe` gives for
+/// the records of the same request made on the other side.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ibx_test_config(kind: IbxStr, seed: i64, sink: IbxTestSink, user: *mut c_void) -> bool {
+    use super::config::Records;
+    let text = match &*unsafe { kind.text() } {
+        "ConfigRequest" => format!("{:?}", crate::api::config::ConfigRequest::filled(seed)),
+        "UpdateConfigRequest" => format!("{:?}", crate::api::config::UpdateConfigRequest::filled(seed)),
+        _ => return false,
+    };
+    unsafe { sink(user, IbxStr::of(&text)) };
+    true
+}
+
+/// A session with no server behind it, for the requests the client
+/// answers itself. The caller releases it with `ibx_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ibx_test_session() -> *mut IbxClient {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    // Nothing reads the commands: the channel stays open all the same.
+    std::mem::forget(rx);
+    let shared = std::sync::Arc::new(crate::bridge::SharedState::new());
+    let client = EClient::from_parts(shared, tx, std::thread::spawn(|| {}), ACCOUNT.into());
+    Box::into_raw(Box::new(IbxClient::new(client, None)))
 }
 
 /// A structure with the fields that have a rule of their own set to known

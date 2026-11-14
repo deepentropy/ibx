@@ -2352,6 +2352,22 @@ static void pb_fundamental_data(void* user, int64_t req_id, ibx_str data) noexce
   } catch (...) { s->failed(); }
 }
 
+static void pb_config_response(void* user, ibx_str fields) noexcept {
+  ibx::Sink* s = static_cast<ibx::Sink*>(user);
+  s->flush();
+  try {
+    if (!s->quiet(ibx::PB_configResponse)) ibx::pb::configResponse(*s, fields);
+  } catch (...) { s->failed(); }
+}
+
+static void pb_update_config_response(void* user, ibx_str fields) noexcept {
+  ibx::Sink* s = static_cast<ibx::Sink*>(user);
+  s->flush();
+  try {
+    if (!s->quiet(ibx::PB_updateConfigResponse)) ibx::pb::updateConfigResponse(*s, fields);
+  } catch (...) { s->failed(); }
+}
+
 namespace ibx {
 const ibx_callbacks callbackTable = {
   &pb_tick_price,
@@ -2439,6 +2455,8 @@ const ibx_callbacks callbackTable = {
   &pb_user_info,
   &pb_current_time_in_millis,
   &pb_fundamental_data,
+  &pb_config_response,
+  &pb_update_config_response,
 };
 }  // namespace ibx
 
