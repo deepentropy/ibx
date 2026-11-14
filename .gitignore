@@ -40,3 +40,6 @@ DEVLOG.md
 .env
 .idea/
 tests/python/__pycache__/
+
+# Compiled Python files
+__pycache__/

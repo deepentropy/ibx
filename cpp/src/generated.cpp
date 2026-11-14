@@ -1089,6 +1089,9 @@ void EClient::cancelFundamentalData(int reqId) {
 }
 
 // ── Callbacks ──
+// With the protobuf forms the table is the one of proto_generated.cpp.
+
+#if !defined(IBX_PROTOBUF)
 
 static void cb_tick_price(void* user, int64_t req_id, int64_t field, double price, uint32_t attrib) noexcept {
   ibx::Sink* s = static_cast<ibx::Sink*>(user);
@@ -1805,3 +1808,5 @@ const ibx_callbacks callbackTable = {
   &cb_fundamental_data,
 };
 }  // namespace ibx
+
+#endif

@@ -931,3 +931,101 @@ FIRE_AT = {
         "&HistoricalTickData::Last(vec![crate::types::HistoricalTickLast { time: 13, tick_attrib_last: TickAttribLast { past_limit: true, unreported: false }, price: 1.5, size: 2.0, exchange: \"EX\".into(), special_conditions: \"SC\".into() }])",
         "v.size() == 1 && v[0].time == 13 && v[0].tickAttribLast.pastLimit && !v[0].tickAttribLast.unreported && v[0].price == 1.5 && ibx::decimalToDoubleOrMax(v[0].size) == 2 && v[0].exchange == \"EX\" && v[0].specialConditions == \"SC\""),
 }
+
+# ── Protobuf forms (IBX_PROTOBUF) ──
+# The protobuf layer of the Python client is the specification: its tables
+# (src/python/compat/proto_table.py) and its rules (proto_forms.py) are read
+# by the generator, and the C++ library gives the same messages. Below is
+# what the C++ side adds to them.
+
+# Names of the official C++ client that differ from the ones of the tables.
+PROTO_NAMES = {
+    "executionDetailsProtoBuf": "execDetailsProtoBuf",
+    "executionDetailsEndProtoBuf": "execDetailsEndProtoBuf",
+    "updateMarketDataTypeProtoBuf": "marketDataTypeProtoBuf",
+    "cancelTickByTickProtoBuf": "cancelTickByTickDataProtoBuf",
+}
+
+# Protobuf callbacks of the official C++ client that are the answer of a
+# protobuf request only: name, message.
+PROTO_CALLBACKS_ONLY = [
+    ("configResponseProtoBuf", "ConfigResponse"),
+    ("updateConfigResponseProtoBuf", "UpdateConfigResponse"),
+]
+
+# The plain callbacks whose protobuf callback has a rule of its own, written
+# by hand in cpp/src/proto.cpp as `bool ibx::pb::<name>(Sink&, arguments)`:
+# a price waits for its size, the bars and the scan rows of an answer come
+# in one message, an error the library makes itself has none, the request
+# parameters carry what the session knows.
+PROTO_CUSTOM = {"tick_price", "tick_size", "tick_req_params", "historical_data", "scanner_data", "scanner_data_end", "error"}
+
+# The objects a message is made from: (the table's reader, its variable) ->
+# the Python class whose start values apply (None: none), the C++
+# structure, the message.
+PROTO_OBJECTS = {
+    ("decodeContract", "contract"): ("Contract", "Contract", "Contract"),
+    ("decodeComboLegs", "comboLeg"): ("ComboLeg", "ComboLeg", "ComboLeg"),
+    ("decodeDeltaNeutralContract", "deltaNeutralContract"): (None, "DeltaNeutralContract", "DeltaNeutralContract"),
+    ("decodeExecution", "execution"): ("Execution", "Execution", "Execution"),
+    ("decodeOrder", "order"): ("Order", "Order", "Order"),
+    ("decodeOrderState", "orderState"): ("OrderState", "OrderState", "OrderState"),
+    ("decodeOrderAllocations", "orderAllocation"): ("OrderAllocation", "OrderAllocation", "OrderAllocation"),
+    ("decodeContractDetails", "contractDetails"): ("ContractDetails", "ContractDetails", "ContractDetails"),
+    ("decodeIneligibilityReasonList", "ineligibilityReason"): ("IneligibilityReason", "IneligibilityReason", "IneligibilityReason"),
+    ("decodeHistoricalTick", "historicalTick"): ("HistoricalTick", "HistoricalTick", "HistoricalTick"),
+    ("decodeHistoricalTickBidAsk", "historicalTickBidAsk"): ("HistoricalTickBidAsk", "HistoricalTickBidAsk", "HistoricalTickBidAsk"),
+    ("decodeHistoricalTickLast", "historicalTickLast"): ("HistoricalTickLast", "HistoricalTickLast", "HistoricalTickLast"),
+    ("decodeHistoricalDataBar", "bar"): ("BarData", "Bar", "HistoricalDataBar"),
+    ("decodeDepthMarketDataDescription", "description"): ("DepthMktDataDescription", "DepthMktDataDescription", "DepthMarketDataDescription"),
+}
+
+# A member of a C++ structure whose name is not the attribute's.
+PROTO_MEMBERS = {
+    ("Bar", "date"): "time",
+    ("Bar", "barCount"): "count",
+    ("IneligibilityReason", "id_"): "id",
+}
+
+# A field whose value is not the member as it is: (message, field) -> the
+# C++ condition for the field to be set ("" for always) and its value; `x`
+# is the structure.
+PROTO_VALUES = {
+    ("Order", "origin"): ("", "static_cast<int>(x.origin)"),
+    # Yes or no when the order says so, as the Python client reports it.
+    ("Order", "usePriceMgmtAlgo"): ("x.usePriceMgmtAlgo != DEFAULT", "x.usePriceMgmtAlgo != DONT_USE ? 1 : 0"),
+    ("Order", "routeMarketableToBbo"): ("x.routeMarketableToBbo != STATE_DEFAULT", "x.routeMarketableToBbo == STATE_YES ? 1 : 0"),
+    ("Order", "seekPriceImprovement"): ("x.seekPriceImprovement != STATE_DEFAULT", "x.seekPriceImprovement == STATE_YES ? 1 : 0"),
+    ("Execution", "optExerciseOrLapseType"): ("", "ibx::pb::exerciseCode(x.optExerciseOrLapseType)"),
+    ("ContractDetails", "fundDistributionPolicyIndicator"): ("x.fundDistributionPolicyIndicator != FundDistributionPolicyIndicator::None",
+                                                             "ibx::pb::fundPolicyCode(x.fundDistributionPolicyIndicator)"),
+    ("ContractDetails", "fundAssetType"): ("x.fundAssetType != FundAssetType::None", "ibx::pb::fundAssetCode(x.fundAssetType)"),
+}
+
+# The objects a request message is read into: (the table's writer, its
+# variable) -> the Python class whose start values apply (None: the
+# table's own), the C++ structure, the message.
+PROTO_CREATORS = {
+    ("createContractProto", "contract"): ("Contract", "Contract", "Contract"),
+    ("createComboLegProto", "comboLeg"): ("ComboLeg", "ComboLeg", "ComboLeg"),
+    ("createOrderProto", "order"): ("Order", "Order", "Order"),
+    ("createAttachedOrdersProto", "order"): ("Order", "Order", "AttachedOrders"),
+    ("createExecutionRequestProto", "execFilter"): (None, "ExecutionFilter", "ExecutionFilter"),
+    ("createWshEventDataRequestProto", "wshEventData"): ("WshEventData", "WshEventData", "WshEventDataRequest"),
+    ("createScannerSubscriptionProto", "subscription"): (None, "ScannerSubscription", "ScannerSubscription"),
+    ("createOrderCancelProto", "orderCancel"): (None, "OrderCancel", "OrderCancel"),
+}
+
+# A member read from a request message in a way of its own: (structure,
+# member) -> its value; `v` is the field's value.
+PROTO_READS = {
+    ("Order", "origin"): "static_cast<Origin>(v)",
+    ("Order", "usePriceMgmtAlgo"): "v ? USE : DONT_USE",
+    ("Order", "routeMarketableToBbo"): "v ? STATE_YES : STATE_NO",
+    ("Order", "seekPriceImprovement"): "v ? STATE_YES : STATE_NO",
+    ("ScannerSubscription", "excludeConvertible"): "v ? 1 : 0",
+}
+
+# A plain request of the Python client whose C++ twin is not found by the
+# name of its call on the Rust client.
+PROTO_PLAIN = {"req_completed_orders": "reqCompletedOrders"}

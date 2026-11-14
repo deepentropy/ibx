@@ -689,4 +689,91 @@ public:
   void userInfo(int reqId, const std::string& whiteBrandingId) override { Row r("userInfo"); r.arg(reqId); r.arg(whiteBrandingId); row(r.text); }
   void currentTimeInMillis(long long timeInMillis) override { Row r("currentTimeInMillis"); r.arg(timeInMillis); row(r.text); }
   void fundamentalData(int reqId, const std::string& data) override { Row r("fundamentalData"); r.arg(reqId); r.arg(data); row(r.text); }
+
+#if defined(IBX_PROTOBUF)
+  // One protobuf callback, with its message.
+  virtual void protoRow(const char* name, const google::protobuf::Message& m) = 0;
+
+  void tickPriceProtoBuf(const protobuf::TickPrice& m) override { protoRow("tickPriceProtoBuf", m); }
+  void tickSizeProtoBuf(const protobuf::TickSize& m) override { protoRow("tickSizeProtoBuf", m); }
+  void orderStatusProtoBuf(const protobuf::OrderStatus& m) override { protoRow("orderStatusProtoBuf", m); }
+  void openOrderProtoBuf(const protobuf::OpenOrder& m) override { protoRow("openOrderProtoBuf", m); }
+  void openOrdersEndProtoBuf(const protobuf::OpenOrdersEnd& m) override { protoRow("openOrdersEndProtoBuf", m); }
+  void updatePortfolioProtoBuf(const protobuf::PortfolioValue& m) override { protoRow("updatePortfolioProtoBuf", m); }
+  void contractDataProtoBuf(const protobuf::ContractData& m) override { protoRow("contractDataProtoBuf", m); }
+  void bondContractDataProtoBuf(const protobuf::ContractData& m) override { protoRow("bondContractDataProtoBuf", m); }
+  void contractDataEndProtoBuf(const protobuf::ContractDataEnd& m) override { protoRow("contractDataEndProtoBuf", m); }
+  void scannerDataProtoBuf(const protobuf::ScannerData& m) override { protoRow("scannerDataProtoBuf", m); }
+  void execDetailsEndProtoBuf(const protobuf::ExecutionDetailsEnd& m) override { protoRow("execDetailsEndProtoBuf", m); }
+  void execDetailsProtoBuf(const protobuf::ExecutionDetails& m) override { protoRow("execDetailsProtoBuf", m); }
+  void historicalDataProtoBuf(const protobuf::HistoricalData& m) override { protoRow("historicalDataProtoBuf", m); }
+  void historicalDataEndProtoBuf(const protobuf::HistoricalDataEnd& m) override { protoRow("historicalDataEndProtoBuf", m); }
+  void historicalDataUpdateProtoBuf(const protobuf::HistoricalDataUpdate& m) override { protoRow("historicalDataUpdateProtoBuf", m); }
+  void realTimeBarTickProtoBuf(const protobuf::RealTimeBarTick& m) override { protoRow("realTimeBarTickProtoBuf", m); }
+  void tickOptionComputationProtoBuf(const protobuf::TickOptionComputation& m) override { protoRow("tickOptionComputationProtoBuf", m); }
+  void marketDataTypeProtoBuf(const protobuf::MarketDataType& m) override { protoRow("marketDataTypeProtoBuf", m); }
+  void commissionAndFeesReportProtoBuf(const protobuf::CommissionAndFeesReport& m) override { protoRow("commissionAndFeesReportProtoBuf", m); }
+  void positionProtoBuf(const protobuf::Position& m) override { protoRow("positionProtoBuf", m); }
+  void positionMultiProtoBuf(const protobuf::PositionMulti& m) override { protoRow("positionMultiProtoBuf", m); }
+  void secDefOptParameterProtoBuf(const protobuf::SecDefOptParameter& m) override { protoRow("secDefOptParameterProtoBuf", m); }
+  void secDefOptParameterEndProtoBuf(const protobuf::SecDefOptParameterEnd& m) override { protoRow("secDefOptParameterEndProtoBuf", m); }
+  void softDollarTiersProtoBuf(const protobuf::SoftDollarTiers& m) override { protoRow("softDollarTiersProtoBuf", m); }
+  void familyCodesProtoBuf(const protobuf::FamilyCodes& m) override { protoRow("familyCodesProtoBuf", m); }
+  void symbolSamplesProtoBuf(const protobuf::SymbolSamples& m) override { protoRow("symbolSamplesProtoBuf", m); }
+  void smartComponentsProtoBuf(const protobuf::SmartComponents& m) override { protoRow("smartComponentsProtoBuf", m); }
+  void tickReqParamsProtoBuf(const protobuf::TickReqParams& m) override { protoRow("tickReqParamsProtoBuf", m); }
+  void marketDepthExchangesProtoBuf(const protobuf::MarketDepthExchanges& m) override { protoRow("marketDepthExchangesProtoBuf", m); }
+  void headTimestampProtoBuf(const protobuf::HeadTimestamp& m) override { protoRow("headTimestampProtoBuf", m); }
+  void tickNewsProtoBuf(const protobuf::TickNews& m) override { protoRow("tickNewsProtoBuf", m); }
+  void newsProvidersProtoBuf(const protobuf::NewsProviders& m) override { protoRow("newsProvidersProtoBuf", m); }
+  void newsArticleProtoBuf(const protobuf::NewsArticle& m) override { protoRow("newsArticleProtoBuf", m); }
+  void historicalNewsProtoBuf(const protobuf::HistoricalNews& m) override { protoRow("historicalNewsProtoBuf", m); }
+  void historicalNewsEndProtoBuf(const protobuf::HistoricalNewsEnd& m) override { protoRow("historicalNewsEndProtoBuf", m); }
+  void histogramDataProtoBuf(const protobuf::HistogramData& m) override { protoRow("histogramDataProtoBuf", m); }
+  void rerouteMarketDataRequestProtoBuf(const protobuf::RerouteMarketDataRequest& m) override { protoRow("rerouteMarketDataRequestProtoBuf", m); }
+  void rerouteMarketDepthRequestProtoBuf(const protobuf::RerouteMarketDepthRequest& m) override { protoRow("rerouteMarketDepthRequestProtoBuf", m); }
+  void marketRuleProtoBuf(const protobuf::MarketRule& m) override { protoRow("marketRuleProtoBuf", m); }
+  void pnlProtoBuf(const protobuf::PnL& m) override { protoRow("pnlProtoBuf", m); }
+  void pnlSingleProtoBuf(const protobuf::PnLSingle& m) override { protoRow("pnlSingleProtoBuf", m); }
+  void historicalTicksProtoBuf(const protobuf::HistoricalTicks& m) override { protoRow("historicalTicksProtoBuf", m); }
+  void historicalTicksBidAskProtoBuf(const protobuf::HistoricalTicksBidAsk& m) override { protoRow("historicalTicksBidAskProtoBuf", m); }
+  void historicalTicksLastProtoBuf(const protobuf::HistoricalTicksLast& m) override { protoRow("historicalTicksLastProtoBuf", m); }
+  void tickByTickDataProtoBuf(const protobuf::TickByTickData& m) override { protoRow("tickByTickDataProtoBuf", m); }
+  void orderBoundProtoBuf(const protobuf::OrderBound& m) override { protoRow("orderBoundProtoBuf", m); }
+  void updateMarketDepthProtoBuf(const protobuf::MarketDepth& m) override { protoRow("updateMarketDepthProtoBuf", m); }
+  void updateMarketDepthL2ProtoBuf(const protobuf::MarketDepthL2& m) override { protoRow("updateMarketDepthL2ProtoBuf", m); }
+  void completedOrderProtoBuf(const protobuf::CompletedOrder& m) override { protoRow("completedOrderProtoBuf", m); }
+  void completedOrdersEndProtoBuf(const protobuf::CompletedOrdersEnd& m) override { protoRow("completedOrdersEndProtoBuf", m); }
+  void replaceFAEndProtoBuf(const protobuf::ReplaceFAEnd& m) override { protoRow("replaceFAEndProtoBuf", m); }
+  void wshMetaDataProtoBuf(const protobuf::WshMetaData& m) override { protoRow("wshMetaDataProtoBuf", m); }
+  void wshEventDataProtoBuf(const protobuf::WshEventData& m) override { protoRow("wshEventDataProtoBuf", m); }
+  void historicalScheduleProtoBuf(const protobuf::HistoricalSchedule& m) override { protoRow("historicalScheduleProtoBuf", m); }
+  void userInfoProtoBuf(const protobuf::UserInfo& m) override { protoRow("userInfoProtoBuf", m); }
+  void currentTimeInMillisProtoBuf(const protobuf::CurrentTimeInMillis& m) override { protoRow("currentTimeInMillisProtoBuf", m); }
+  void errorProtoBuf(const protobuf::ErrorMessage& m) override { protoRow("errorProtoBuf", m); }
+  void tickStringProtoBuf(const protobuf::TickString& m) override { protoRow("tickStringProtoBuf", m); }
+  void tickGenericProtoBuf(const protobuf::TickGeneric& m) override { protoRow("tickGenericProtoBuf", m); }
+  void tickSnapshotEndProtoBuf(const protobuf::TickSnapshotEnd& m) override { protoRow("tickSnapshotEndProtoBuf", m); }
+  void updateAccountValueProtoBuf(const protobuf::AccountValue& m) override { protoRow("updateAccountValueProtoBuf", m); }
+  void updateAccountTimeProtoBuf(const protobuf::AccountUpdateTime& m) override { protoRow("updateAccountTimeProtoBuf", m); }
+  void accountDataEndProtoBuf(const protobuf::AccountDataEnd& m) override { protoRow("accountDataEndProtoBuf", m); }
+  void managedAccountsProtoBuf(const protobuf::ManagedAccounts& m) override { protoRow("managedAccountsProtoBuf", m); }
+  void positionEndProtoBuf(const protobuf::PositionEnd& m) override { protoRow("positionEndProtoBuf", m); }
+  void accountSummaryProtoBuf(const protobuf::AccountSummary& m) override { protoRow("accountSummaryProtoBuf", m); }
+  void accountSummaryEndProtoBuf(const protobuf::AccountSummaryEnd& m) override { protoRow("accountSummaryEndProtoBuf", m); }
+  void positionMultiEndProtoBuf(const protobuf::PositionMultiEnd& m) override { protoRow("positionMultiEndProtoBuf", m); }
+  void accountUpdateMultiProtoBuf(const protobuf::AccountUpdateMulti& m) override { protoRow("accountUpdateMultiProtoBuf", m); }
+  void accountUpdateMultiEndProtoBuf(const protobuf::AccountUpdateMultiEnd& m) override { protoRow("accountUpdateMultiEndProtoBuf", m); }
+  void updateNewsBulletinProtoBuf(const protobuf::NewsBulletin& m) override { protoRow("updateNewsBulletinProtoBuf", m); }
+  void scannerParametersProtoBuf(const protobuf::ScannerParameters& m) override { protoRow("scannerParametersProtoBuf", m); }
+  void receiveFAProtoBuf(const protobuf::ReceiveFA& m) override { protoRow("receiveFAProtoBuf", m); }
+  void nextValidIdProtoBuf(const protobuf::NextValidId& m) override { protoRow("nextValidIdProtoBuf", m); }
+  void currentTimeProtoBuf(const protobuf::CurrentTime& m) override { protoRow("currentTimeProtoBuf", m); }
+  void verifyMessageApiProtoBuf(const protobuf::VerifyMessageApi& m) override { protoRow("verifyMessageApiProtoBuf", m); }
+  void verifyCompletedProtoBuf(const protobuf::VerifyCompleted& m) override { protoRow("verifyCompletedProtoBuf", m); }
+  void displayGroupListProtoBuf(const protobuf::DisplayGroupList& m) override { protoRow("displayGroupListProtoBuf", m); }
+  void displayGroupUpdatedProtoBuf(const protobuf::DisplayGroupUpdated& m) override { protoRow("displayGroupUpdatedProtoBuf", m); }
+  void configResponseProtoBuf(const protobuf::ConfigResponse& m) override { protoRow("configResponseProtoBuf", m); }
+  void updateConfigResponseProtoBuf(const protobuf::UpdateConfigResponse& m) override { protoRow("updateConfigResponseProtoBuf", m); }
+#endif
 };

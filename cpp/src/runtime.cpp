@@ -559,6 +559,7 @@ OptionExerciseType Utils::getOptionExerciseType(int val)
 }
 
 // ── The wrapper that does nothing ──
+// Its protobuf callbacks are in proto_generated.cpp.
 
 #define IBX_EMPTY_CALLBACK(name, args) void DefaultEWrapper::name args {}
 #if defined(_MSC_VER)
@@ -568,7 +569,7 @@ OptionExerciseType Utils::getOptionExerciseType(int val)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #endif
-EWrapper_declare(IBX_EMPTY_CALLBACK)
+EWrapper_methods_regular(IBX_EMPTY_CALLBACK, EWrapper_methods_def_value)
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #elif defined(__GNUC__)

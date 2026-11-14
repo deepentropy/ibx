@@ -107,6 +107,51 @@ struct Buf {
 inline ibx_str view(const std::string& s) { return ibx_str{s.data(), s.size()}; }
 inline std::string str(ibx_str s) { return s.n ? std::string(s.p, s.n) : std::string(); }
 
+#if defined(IBX_PROTOBUF)
+struct Sink;
+
+// What the protobuf callbacks of a pass need beside the wrapper.
+struct ProtoState {
+  // The session, for what a message carries and its plain callback does
+  // not; may be null.
+  ibx_client* session = nullptr;
+  // The protobuf callbacks the wrapper leaves empty: its own set (null
+  // when it keeps none), and a copy the callbacks of the pass read.
+  const ProtoCallbackSet* source = nullptr;
+  ProtoCallbackSet unused;
+  // The callbacks with nothing to do before their plain callback: the
+  // unused ones while nothing waits, none while something does.
+  ProtoCallbackSet quiet;
+
+  // What waits for the next callback: a price whose size may follow, the
+  // bars of an answer, the rows of a scan.
+  enum Held { NOTHING, PRICE, BARS, ROWS };
+  struct Row {
+    int rank;
+    ContractDetails details;
+    std::string distance, benchmark, projection, legsStr;
+  };
+
+  Held held = NOTHING;
+  int reqId = 0;
+  TickType field = NOT_SET;
+  double price = 0;
+  TickAttrib attrib;
+  std::vector<Bar> bars;
+  std::vector<Row> rows;
+};
+
+namespace pb {
+// Gives what waits: the protobuf callback, then the plain ones.
+void flush(Sink& s);
+// Takes the set of the protobuf callbacks the wrapper leaves empty.
+void bind(Sink& s);
+}  // namespace pb
+
+// The messages built since the start, for the tests.
+extern unsigned long long protoMessagesBuilt;
+#endif
+
 // Where the callbacks of a pass go. The first exception a callback throws
 // is kept, and thrown again when the pass has ended.
 struct Sink {
@@ -118,6 +163,44 @@ struct Sink {
     if (!error)
       error = std::current_exception();
   }
+
+#if defined(IBX_PROTOBUF)
+  ProtoState proto;
+
+  Sink(EWrapper* wrapper, std::exception_ptr first) : w(wrapper), error(first) { pb::bind(*this); }
+
+  // Whether the message of a protobuf callback is to be built: not when
+  // the wrapper is known to leave that callback empty.
+  bool wants(ProtoCallback c) const { return !proto.unused.has(c); }
+
+  // Nothing waits and the message of this callback is not to be built:
+  // its plain callback is all there is to give. One test on the path of
+  // a wrapper that does not use the protobuf callback.
+  bool quiet(ProtoCallback c) const { return proto.quiet.has(c); }
+
+  // A protobuf callback was given: the wrapper may have noted that it
+  // leaves it empty.
+  void given()
+  {
+    if (proto.source)
+      proto.unused = *proto.source;
+    hold(proto.held);
+  }
+
+  // Something starts or ends its wait for the next callback.
+  void hold(ProtoState::Held what)
+  {
+    proto.held = what;
+    proto.quiet = what == ProtoState::NOTHING ? proto.unused : ProtoCallbackSet();
+  }
+
+  // What waits is given before the next callback, and when the pass ends.
+  void flush()
+  {
+    if (proto.held != ProtoState::NOTHING)
+      pb::flush(*this);
+  }
+#endif
 };
 
 extern const ibx_callbacks callbackTable;

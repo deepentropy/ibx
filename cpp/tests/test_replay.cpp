@@ -16,9 +16,130 @@
 #include "EClientSocket.h"
 #include "test_support.h"
 
+#if defined(IBX_PROTOBUF)
+#include "ExecutionCondition.h"
+#include "MarginCondition.h"
+#include "PercentChangeCondition.h"
+#include "PriceCondition.h"
+#include "TimeCondition.h"
+#include "VolumeCondition.h"
+
+namespace ibxtest {
+#include "generated_proto_twins.inc"
+}  // namespace ibxtest
+#endif
+
 using namespace ibxtest;
 
 namespace {
+
+#if defined(IBX_PROTOBUF)
+// A client whose plain requests go out through their protobuf form: the
+// message is filled from the objects of the plain request, as a program
+// written for the protobuf requests fills it.
+class ProtoTwinClient : public ProtoTwinRequests {
+public:
+  using ProtoTwinRequests::ProtoTwinRequests;
+
+  static void conditionToProto(OrderCondition& c, protobuf::OrderCondition& p)
+  {
+    p.set_type(static_cast<int>(c.type()));
+    p.set_isconjunctionconnection(c.conjunctionConnection());
+    if (OperatorCondition* op = dynamic_cast<OperatorCondition*>(&c))
+      p.set_ismore(op->isMore());
+    if (ContractCondition* cc = dynamic_cast<ContractCondition*>(&c)) {
+      p.set_conid(cc->conId());
+      p.set_exchange(cc->exchange());
+    }
+    if (PriceCondition* pc = dynamic_cast<PriceCondition*>(&c)) {
+      p.set_price(pc->price());
+      p.set_triggermethod(pc->triggerMethod());
+    } else if (TimeCondition* tc = dynamic_cast<TimeCondition*>(&c)) {
+      p.set_time(tc->time());
+    } else if (MarginCondition* mc = dynamic_cast<MarginCondition*>(&c)) {
+      p.set_percent(mc->percent());
+    } else if (ExecutionCondition* ec = dynamic_cast<ExecutionCondition*>(&c)) {
+      p.set_sectype(ec->secType());
+      p.set_exchange(ec->exchange());
+      p.set_symbol(ec->symbol());
+    } else if (VolumeCondition* vc = dynamic_cast<VolumeCondition*>(&c)) {
+      p.set_volume(vc->volume());
+    } else if (PercentChangeCondition* pcc = dynamic_cast<PercentChangeCondition*>(&c)) {
+      p.set_changepercent(pcc->changePercent());
+    }
+  }
+
+  // An order with its options, its conditions and its tier.
+  static void orderToProto(const Order& o, protobuf::Order& p)
+  {
+    toProto(o, p);
+    toProto(o.algoParams, *p.mutable_algoparams());
+    toProto(o.smartComboRoutingParams, *p.mutable_smartcomboroutingparams());
+    toProto(o.orderMiscOptions, *p.mutable_ordermiscoptions());
+    for (const std::shared_ptr<OrderCondition>& c : o.conditions) {
+      if (c)
+        conditionToProto(*c, *p.add_conditions());
+    }
+    if (o.conditionsIncludeOvernight)
+      p.set_conditionsincludeovernight(true);
+    const SoftDollarTier& tier = o.softDollarTier;
+    if (!tier.name().empty() || !tier.val().empty() || !tier.displayName().empty()) {
+      p.mutable_softdollartier()->set_name(tier.name());
+      p.mutable_softdollartier()->set_value(tier.val());
+      p.mutable_softdollartier()->set_displayname(tier.displayName());
+    }
+  }
+
+  void placeOrder(int id, const Contract& contract, const Order& order)
+  {
+    protobuf::PlaceOrderRequest p;
+    p.set_orderid(id);
+    toProto(contract, *p.mutable_contract(), &order);
+    orderToProto(order, *p.mutable_order());
+    protobuf::AttachedOrders attached;
+    toProto(order, attached);
+    if (attached.ByteSizeLong() > 0)
+      *p.mutable_attachedorders() = attached;
+    placeOrderProtoBuf(p);
+  }
+  void cancelOrder(int id, const OrderCancel& orderCancel)
+  {
+    protobuf::CancelOrderRequest p;
+    p.set_orderid(id);
+    toProto(orderCancel, *p.mutable_ordercancel());
+    cancelOrderProtoBuf(p);
+  }
+  void reqGlobalCancel(const OrderCancel& orderCancel)
+  {
+    protobuf::GlobalCancelRequest p;
+    toProto(orderCancel, *p.mutable_ordercancel());
+    reqGlobalCancelProtoBuf(p);
+  }
+  void reqExecutions(int reqId, const ExecutionFilter& filter)
+  {
+    protobuf::ExecutionRequest p;
+    p.set_reqid(reqId);
+    toProto(filter, *p.mutable_executionfilter());
+    reqExecutionsProtoBuf(p);
+  }
+  void reqScannerSubscription(int reqId, const ScannerSubscription& subscription, const TagValueListSPtr& options, const TagValueListSPtr& filterOptions)
+  {
+    protobuf::ScannerSubscriptionRequest p;
+    p.set_reqid(reqId);
+    toProto(subscription, *p.mutable_scannersubscription());
+    toProto(options, *p.mutable_scannersubscription()->mutable_scannersubscriptionoptions());
+    toProto(filterOptions, *p.mutable_scannersubscription()->mutable_scannersubscriptionfilteroptions());
+    reqScannerSubscriptionProtoBuf(p);
+  }
+  void reqWshEventData(int reqId, const WshEventData& data)
+  {
+    protobuf::WshEventDataRequest p;
+    toProto(data, p);
+    p.set_reqid(reqId);
+    reqWshEventDataProtoBuf(p);
+  }
+};
+#endif
 
 // ── The callbacks as a JSON list, in the form of the official client ──
 
@@ -83,6 +204,16 @@ std::string barJson(const Bar& b)
 class Recorder : public DefaultEWrapper {
 public:
   std::vector<std::string> calls;
+
+#if defined(IBX_PROTOBUF)
+  // A replay may ask for every protobuf message, as a wrapper that
+  // overrides every protobuf callback: the plain callbacks come the same.
+  bool everyMessage = false;
+  const ibx::ProtoCallbackSet* ibxUnusedProtoCallbacks() const override
+  {
+    return everyMessage ? nullptr : DefaultEWrapper::ibxUnusedProtoCallbacks();
+  }
+#endif
 
   void add(const char* name, std::initializer_list<std::string> args)
   {
@@ -281,10 +412,12 @@ struct Request {
   }
 };
 
-class Driver {
+// `Client` is the client the requests are made on: EClientSocket, or one
+// whose requests go out through their protobuf form.
+template <class Client> class Driver {
 public:
   Recorder wrapper;
-  EClientSocket client;
+  Client client;
   std::vector<std::string> problems;
 
   Driver() : client(&wrapper) {}
@@ -382,7 +515,7 @@ public:
   {
     Request q{fields};
     int rid = q.integer("reqId");
-    EClientSocket& c = client;
+    Client& c = client;
     TagValueListSPtr none;
     if (name == "PLACE_ORDER") {
       c.placeOrder(q.integer("orderId"), contract(q, "contract."), order(q, "order."));
@@ -474,11 +607,11 @@ public:
   }
 };
 
-void adopt(void* user, ibx_client* session) { static_cast<Driver*>(user)->client.ibxAdopt(session); }
+template <class Client> void adopt(void* user, ibx_client* session) { static_cast<Driver<Client>*>(user)->client.ibxAdopt(session); }
 
-bool request(void* user, ibx_str name, ibx_str fields)
+template <class Client> bool request(void* user, ibx_str name, ibx_str fields)
 {
-  Driver* d = static_cast<Driver*>(user);
+  Driver<Client>* d = static_cast<Driver<Client>*>(user);
   try {
     return d->request(ibx::str(name), parse(fields));
   } catch (const std::exception& e) {
@@ -487,9 +620,9 @@ bool request(void* user, ibx_str name, ibx_str fields)
   }
 }
 
-void dispatch(void* user, ibx_test_sink sink, void* sinkUser)
+template <class Client> void dispatch(void* user, ibx_test_sink sink, void* sinkUser)
 {
-  Driver* d = static_cast<Driver*>(user);
+  Driver<Client>* d = static_cast<Driver<Client>*>(user);
   d->client.ibxProcess();
   std::string calls = "[";
   for (size_t k = 0; k < d->wrapper.calls.size(); ++k)
@@ -509,15 +642,22 @@ const Scenario scenarios[] = {
 #include "replays.inc"
 };
 
-}  // namespace
-
-int runReplays()
+// Every scenario with the requests made on a `Client`; `label` names the run.
+template <class Client> int replayAll(const char* label, bool everyMessage)
 {
   int failures = 0;
   int count = 0;
+#if defined(IBX_PROTOBUF)
+  unsigned long long built = ibx::protoMessagesBuilt;
+#endif
   for (const Scenario& s : scenarios) {
-    Driver driver;
-    ibx_test_driver hooks = {&driver, &adopt, &request, &dispatch};
+    Driver<Client> driver;
+#if defined(IBX_PROTOBUF)
+    driver.wrapper.everyMessage = everyMessage;
+#else
+    (void)everyMessage;
+#endif
+    ibx_test_driver hooks = {&driver, &adopt<Client>, &request<Client>, &dispatch<Client>};
     std::string report;
     bool ran = ibx_test_replay(ibx::view(s.name), ibx::view(s.options), &hooks, &takeText, &report);
     for (const std::string& p : driver.problems)
@@ -525,9 +665,30 @@ int runReplays()
     ++count;
     if (!ran || !report.empty()) {
       ++failures;
-      std::printf("FAILED replay %s [%s]\n%s\n", s.name, s.options, report.c_str());
+      std::printf("FAILED replay %s%s [%s]\n%s\n", s.name, label, s.options, report.c_str());
     }
   }
-  std::printf("%d replays, %d failed\n", count, failures);
+  std::printf("%d replays%s, %d failed\n", count, label, failures);
+#if defined(IBX_PROTOBUF)
+  // A run that asks for every message must have built some.
+  if (everyMessage && ibx::protoMessagesBuilt - built < 1000) {
+    std::printf("FAILED replays%s: %llu protobuf messages built\n", label, ibx::protoMessagesBuilt - built);
+    ++failures;
+  }
+#endif
+  return failures;
+}
+
+}  // namespace
+
+int runReplays()
+{
+  int failures = replayAll<EClientSocket>("", false);
+#if defined(IBX_PROTOBUF)
+  // The same scenarios with every request made through its protobuf form
+  // and every protobuf message built: the frames sent and the plain
+  // callbacks are the ones of the recordings all the same.
+  failures += replayAll<ProtoTwinClient>(" (protobuf forms)", true);
+#endif
   return failures;
 }

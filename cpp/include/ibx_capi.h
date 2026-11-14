@@ -147,6 +147,11 @@ bool ibx_wait(const ibx_client* h, uint32_t timeout_ms);
 void ibx_notify(const ibx_client* h);
 /* Gives every ready answer to the table, on the calling thread. */
 int32_t ibx_process(ibx_client* h, const ibx_callbacks* callbacks, void* user);
+/* The last price and last size precisions of the contract of a market data
+   request, as texts: true when they are known. Each text is cut to its
+   capacity and its full length is written to its `_length`. */
+bool ibx_precisions(const ibx_client* h, int64_t req_id, char* price, size_t price_capacity, size_t* price_length,
+                    char* size, size_t size_capacity, size_t* size_length);
 
 /* The requests: 0 when taken, 1 when the session has ended. */
 int32_t ibx_req_mkt_data(ibx_client* h, int64_t req_id, ibx_str contract, ibx_str generic_ticks, bool snapshot, bool regulatory_snaphsot);

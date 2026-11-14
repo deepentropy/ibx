@@ -171,6 +171,13 @@ public:
 
   EWrapper_declare(EWrapper_methods_pure_virtual)
 
+#if defined(IBX_PROTOBUF)
+  // The protobuf callbacks this wrapper leaves empty, when it keeps track
+  // of them (DefaultEWrapper does): their messages are not built. Null:
+  // every message is built.
+  virtual const ibx::ProtoCallbackSet* ibxUnusedProtoCallbacks() const { return nullptr; }
+#endif
+
   // The answer of reqFundamentalData, a request of this client the official
   // list no longer has. Not part of the list above: a class declared from
   // it need not define this one.

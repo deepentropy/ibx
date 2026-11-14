@@ -14,6 +14,22 @@ endif()
 ibx_copy_core(ibx_tests)
 add_test(NAME library COMMAND ibx_tests)
 
+# The protobuf forms: each protobuf callback before its plain callback,
+# with its fields; no message built for a callback left empty; each
+# protobuf request as its plain twin.
+if(IBX_PROTOBUF)
+  add_executable(ibx_proto_tests test_protobuf.cpp)
+  target_link_libraries(ibx_proto_tests PRIVATE ibx)
+  target_include_directories(ibx_proto_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+  if(MSVC)
+    target_compile_options(ibx_proto_tests PRIVATE /W4 /utf-8)
+  else()
+    target_compile_options(ibx_proto_tests PRIVATE -Wall -Wextra)
+  endif()
+  ibx_copy_core(ibx_proto_tests)
+  add_test(NAME protobuf COMMAND ibx_proto_tests)
+endif()
+
 # A session on the paper account, every callback written as a row. Not run
 # by ctest: it needs the login of the environment (IB_USERNAME, IB_PASSWORD).
 add_executable(live_paper live_paper.cpp)

@@ -530,6 +530,29 @@ pub unsafe extern "C" fn ibx_notify(h: *const IbxClient) {
     }
 }
 
+/// The last price and last size precisions of the contract of a market
+/// data request, as texts: what the protobuf form of the request
+/// parameters carries and the plain callback does not. True when they are
+/// known. Each text is cut to its capacity; its full length is written to
+/// its `_length`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ibx_precisions(
+    h: *const IbxClient, req_id: i64,
+    price: *mut u8, price_capacity: usize, price_length: *mut usize,
+    size: *mut u8, size_capacity: usize, size_length: *mut usize,
+) -> bool {
+    let Some(h) = (unsafe { h.as_ref() }) else { return false };
+    let found = catch_unwind(AssertUnwindSafe(|| h.client.core.precisions_of(req_id, &h.client.shared))).ok().flatten();
+    let Some((price_text, size_text)) = found else { return false };
+    for (text, out, capacity, length) in [(&price_text, price, price_capacity, price_length), (&size_text, size, size_capacity, size_length)] {
+        let n = unsafe { copy_out(text, out, capacity) };
+        if !length.is_null() {
+            unsafe { *length = n };
+        }
+    }
+    true
+}
+
 /// One pass: what the session starts with, then every ready answer.
 fn pass(h: &IbxClient, wrapper: &mut impl Wrapper) {
     let start = h.start.lock().ok().and_then(|mut start| start.take());

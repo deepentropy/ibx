@@ -214,7 +214,7 @@ cmake -S cpp -B build/cpp -DCMAKE_BUILD_TYPE=Release
 cmake --build build/cpp
 ```
 
-Needs CMake, a C++14 compiler (MSVC, GCC, Clang) and a Rust toolchain. In a CMake project: `add_subdirectory(ibx/cpp)` then `target_link_libraries(my_program PRIVATE ibx)`.
+Needs CMake, a C++14 compiler (MSVC, GCC, Clang) and a Rust toolchain. In a CMake project: `add_subdirectory(ibx/cpp)` then `target_link_libraries(my_program PRIVATE ibx)`. Add `-DIBX_PROTOBUF=ON -DIBX_PROTO_DIR=<folder of the official .proto files>` for the protobuf forms of the requests and callbacks (needs protobuf and C++17).
 
 ### Connect and trade
 

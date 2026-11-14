@@ -28,6 +28,10 @@
 #include "ibx_runtime.h"
 #include "log_support.h"
 
+#if defined(IBX_PROTOBUF)
+#include <google/protobuf/util/json_util.h>
+#endif
+
 namespace {
 
 typedef std::chrono::steady_clock Clock;
@@ -54,6 +58,20 @@ public:
   }
 
   void note(const std::string& text) { row("-- " + text); }
+
+#if defined(IBX_PROTOBUF)
+  // A protobuf callback as a row: its name, then its message as JSON with
+  // the field names of the .proto files.
+  void protoRow(const char* name, const google::protobuf::Message& m) override
+  {
+    google::protobuf::util::JsonPrintOptions options;
+    options.preserve_proto_field_names = true;
+    std::string json;
+    if (!google::protobuf::util::MessageToJsonString(m, &json, options).ok())
+      json = "?";
+    row(std::string(name) + "\t" + json);
+  }
+#endif
 
   int count(const std::string& prefix)
   {

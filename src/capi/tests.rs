@@ -178,6 +178,23 @@ fn null_handles_are_refused() {
     }
 }
 
+// The precisions of a request the session does not know are not known,
+// and nothing is written.
+#[test]
+fn the_precisions_of_an_unknown_request_are_not_known() {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let shared = std::sync::Arc::new(crate::bridge::SharedState::new());
+    let client = EClient::from_parts(shared, tx, std::thread::spawn(|| {}), "A1".into());
+    let session = IbxClient::new(client, None);
+    let (mut price, mut size) = ([0u8; 8], [0u8; 8]);
+    let (mut price_length, mut size_length) = (99usize, 99usize);
+    unsafe {
+        assert!(!ibx_precisions(&session, 7, price.as_mut_ptr(), price.len(), &mut price_length, size.as_mut_ptr(), size.len(), &mut size_length));
+        assert!(!ibx_precisions(std::ptr::null(), 7, price.as_mut_ptr(), price.len(), &mut price_length, size.as_mut_ptr(), size.len(), &mut size_length));
+    }
+    assert_eq!((price_length, size_length), (99, 99));
+}
+
 // The first pass gives the managed accounts and the next valid id before
 // anything else, as a session of the reference starts.
 #[test]

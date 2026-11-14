@@ -41,8 +41,9 @@ public:
   void setConnectOptions(const std::string& connectOptions);
   void disableUseV100Plus();
   bool usingV100Plus();
-  // Whether a request goes out in its protobuf form: never, the client
-  // has its own link to the servers.
+  // Whether the requests have their protobuf form: when the library is
+  // built with it (IBX_PROTOBUF). The client has its own link to the
+  // servers, so the form of a request changes nothing on the way.
   bool useProtoBuf(int msgId);
 
   enum ConnState { CS_DISCONNECTED, CS_CONNECTING, CS_CONNECTED };

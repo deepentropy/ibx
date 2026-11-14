@@ -873,8 +873,14 @@ class CheckWrapper : public EWrapper {
 public:
   Failures fails;
   std::multiset<std::string> hits;
+  // The callbacks in the order they came.
+  std::vector<std::string> sequence;
 
-  void hit(const char* name) { hits.insert(name); }
+  void hit(const char* name)
+  {
+    hits.insert(name);
+    sequence.push_back(name);
+  }
 
   void tickPrice(int reqId, TickType field, double price, const TickAttrib& attrib) override {
     hit("tickPrice");
@@ -1420,4 +1426,107 @@ public:
     expect(fails, "fundamentalData.reqId", (long long)reqId == tvI("req_id", 0));
     expect(fails, "fundamentalData.data", data == tvS("data", 0));
   }
+
+#if defined(IBX_PROTOBUF)
+  // A protobuf callback: noted in its place; a test takes its message here.
+  virtual void proto(const char* name, const google::protobuf::Message& m)
+  {
+    (void)m;
+    sequence.push_back(name);
+  }
+
+  void tickPriceProtoBuf(const protobuf::TickPrice& m) override { proto("tickPriceProtoBuf", m); }
+  void tickSizeProtoBuf(const protobuf::TickSize& m) override { proto("tickSizeProtoBuf", m); }
+  void orderStatusProtoBuf(const protobuf::OrderStatus& m) override { proto("orderStatusProtoBuf", m); }
+  void openOrderProtoBuf(const protobuf::OpenOrder& m) override { proto("openOrderProtoBuf", m); }
+  void openOrdersEndProtoBuf(const protobuf::OpenOrdersEnd& m) override { proto("openOrdersEndProtoBuf", m); }
+  void updatePortfolioProtoBuf(const protobuf::PortfolioValue& m) override { proto("updatePortfolioProtoBuf", m); }
+  void contractDataProtoBuf(const protobuf::ContractData& m) override { proto("contractDataProtoBuf", m); }
+  void bondContractDataProtoBuf(const protobuf::ContractData& m) override { proto("bondContractDataProtoBuf", m); }
+  void contractDataEndProtoBuf(const protobuf::ContractDataEnd& m) override { proto("contractDataEndProtoBuf", m); }
+  void scannerDataProtoBuf(const protobuf::ScannerData& m) override { proto("scannerDataProtoBuf", m); }
+  void execDetailsEndProtoBuf(const protobuf::ExecutionDetailsEnd& m) override { proto("execDetailsEndProtoBuf", m); }
+  void execDetailsProtoBuf(const protobuf::ExecutionDetails& m) override { proto("execDetailsProtoBuf", m); }
+  void historicalDataProtoBuf(const protobuf::HistoricalData& m) override { proto("historicalDataProtoBuf", m); }
+  void historicalDataEndProtoBuf(const protobuf::HistoricalDataEnd& m) override { proto("historicalDataEndProtoBuf", m); }
+  void historicalDataUpdateProtoBuf(const protobuf::HistoricalDataUpdate& m) override { proto("historicalDataUpdateProtoBuf", m); }
+  void realTimeBarTickProtoBuf(const protobuf::RealTimeBarTick& m) override { proto("realTimeBarTickProtoBuf", m); }
+  void tickOptionComputationProtoBuf(const protobuf::TickOptionComputation& m) override { proto("tickOptionComputationProtoBuf", m); }
+  void marketDataTypeProtoBuf(const protobuf::MarketDataType& m) override { proto("marketDataTypeProtoBuf", m); }
+  void commissionAndFeesReportProtoBuf(const protobuf::CommissionAndFeesReport& m) override { proto("commissionAndFeesReportProtoBuf", m); }
+  void positionProtoBuf(const protobuf::Position& m) override { proto("positionProtoBuf", m); }
+  void positionMultiProtoBuf(const protobuf::PositionMulti& m) override { proto("positionMultiProtoBuf", m); }
+  void secDefOptParameterProtoBuf(const protobuf::SecDefOptParameter& m) override { proto("secDefOptParameterProtoBuf", m); }
+  void secDefOptParameterEndProtoBuf(const protobuf::SecDefOptParameterEnd& m) override { proto("secDefOptParameterEndProtoBuf", m); }
+  void softDollarTiersProtoBuf(const protobuf::SoftDollarTiers& m) override { proto("softDollarTiersProtoBuf", m); }
+  void familyCodesProtoBuf(const protobuf::FamilyCodes& m) override { proto("familyCodesProtoBuf", m); }
+  void symbolSamplesProtoBuf(const protobuf::SymbolSamples& m) override { proto("symbolSamplesProtoBuf", m); }
+  void smartComponentsProtoBuf(const protobuf::SmartComponents& m) override { proto("smartComponentsProtoBuf", m); }
+  void tickReqParamsProtoBuf(const protobuf::TickReqParams& m) override { proto("tickReqParamsProtoBuf", m); }
+  void marketDepthExchangesProtoBuf(const protobuf::MarketDepthExchanges& m) override { proto("marketDepthExchangesProtoBuf", m); }
+  void headTimestampProtoBuf(const protobuf::HeadTimestamp& m) override { proto("headTimestampProtoBuf", m); }
+  void tickNewsProtoBuf(const protobuf::TickNews& m) override { proto("tickNewsProtoBuf", m); }
+  void newsProvidersProtoBuf(const protobuf::NewsProviders& m) override { proto("newsProvidersProtoBuf", m); }
+  void newsArticleProtoBuf(const protobuf::NewsArticle& m) override { proto("newsArticleProtoBuf", m); }
+  void historicalNewsProtoBuf(const protobuf::HistoricalNews& m) override { proto("historicalNewsProtoBuf", m); }
+  void historicalNewsEndProtoBuf(const protobuf::HistoricalNewsEnd& m) override { proto("historicalNewsEndProtoBuf", m); }
+  void histogramDataProtoBuf(const protobuf::HistogramData& m) override { proto("histogramDataProtoBuf", m); }
+  void rerouteMarketDataRequestProtoBuf(const protobuf::RerouteMarketDataRequest& m) override { proto("rerouteMarketDataRequestProtoBuf", m); }
+  void rerouteMarketDepthRequestProtoBuf(const protobuf::RerouteMarketDepthRequest& m) override { proto("rerouteMarketDepthRequestProtoBuf", m); }
+  void marketRuleProtoBuf(const protobuf::MarketRule& m) override { proto("marketRuleProtoBuf", m); }
+  void pnlProtoBuf(const protobuf::PnL& m) override { proto("pnlProtoBuf", m); }
+  void pnlSingleProtoBuf(const protobuf::PnLSingle& m) override { proto("pnlSingleProtoBuf", m); }
+  void historicalTicksProtoBuf(const protobuf::HistoricalTicks& m) override { proto("historicalTicksProtoBuf", m); }
+  void historicalTicksBidAskProtoBuf(const protobuf::HistoricalTicksBidAsk& m) override { proto("historicalTicksBidAskProtoBuf", m); }
+  void historicalTicksLastProtoBuf(const protobuf::HistoricalTicksLast& m) override { proto("historicalTicksLastProtoBuf", m); }
+  void tickByTickDataProtoBuf(const protobuf::TickByTickData& m) override { proto("tickByTickDataProtoBuf", m); }
+  void orderBoundProtoBuf(const protobuf::OrderBound& m) override { proto("orderBoundProtoBuf", m); }
+  void updateMarketDepthProtoBuf(const protobuf::MarketDepth& m) override { proto("updateMarketDepthProtoBuf", m); }
+  void updateMarketDepthL2ProtoBuf(const protobuf::MarketDepthL2& m) override { proto("updateMarketDepthL2ProtoBuf", m); }
+  void completedOrderProtoBuf(const protobuf::CompletedOrder& m) override { proto("completedOrderProtoBuf", m); }
+  void completedOrdersEndProtoBuf(const protobuf::CompletedOrdersEnd& m) override { proto("completedOrdersEndProtoBuf", m); }
+  void replaceFAEndProtoBuf(const protobuf::ReplaceFAEnd& m) override { proto("replaceFAEndProtoBuf", m); }
+  void wshMetaDataProtoBuf(const protobuf::WshMetaData& m) override { proto("wshMetaDataProtoBuf", m); }
+  void wshEventDataProtoBuf(const protobuf::WshEventData& m) override { proto("wshEventDataProtoBuf", m); }
+  void historicalScheduleProtoBuf(const protobuf::HistoricalSchedule& m) override { proto("historicalScheduleProtoBuf", m); }
+  void userInfoProtoBuf(const protobuf::UserInfo& m) override { proto("userInfoProtoBuf", m); }
+  void currentTimeInMillisProtoBuf(const protobuf::CurrentTimeInMillis& m) override { proto("currentTimeInMillisProtoBuf", m); }
+  void errorProtoBuf(const protobuf::ErrorMessage& m) override { proto("errorProtoBuf", m); }
+  void tickStringProtoBuf(const protobuf::TickString& m) override { proto("tickStringProtoBuf", m); }
+  void tickGenericProtoBuf(const protobuf::TickGeneric& m) override { proto("tickGenericProtoBuf", m); }
+  void tickSnapshotEndProtoBuf(const protobuf::TickSnapshotEnd& m) override { proto("tickSnapshotEndProtoBuf", m); }
+  void updateAccountValueProtoBuf(const protobuf::AccountValue& m) override { proto("updateAccountValueProtoBuf", m); }
+  void updateAccountTimeProtoBuf(const protobuf::AccountUpdateTime& m) override { proto("updateAccountTimeProtoBuf", m); }
+  void accountDataEndProtoBuf(const protobuf::AccountDataEnd& m) override { proto("accountDataEndProtoBuf", m); }
+  void managedAccountsProtoBuf(const protobuf::ManagedAccounts& m) override { proto("managedAccountsProtoBuf", m); }
+  void positionEndProtoBuf(const protobuf::PositionEnd& m) override { proto("positionEndProtoBuf", m); }
+  void accountSummaryProtoBuf(const protobuf::AccountSummary& m) override { proto("accountSummaryProtoBuf", m); }
+  void accountSummaryEndProtoBuf(const protobuf::AccountSummaryEnd& m) override { proto("accountSummaryEndProtoBuf", m); }
+  void positionMultiEndProtoBuf(const protobuf::PositionMultiEnd& m) override { proto("positionMultiEndProtoBuf", m); }
+  void accountUpdateMultiProtoBuf(const protobuf::AccountUpdateMulti& m) override { proto("accountUpdateMultiProtoBuf", m); }
+  void accountUpdateMultiEndProtoBuf(const protobuf::AccountUpdateMultiEnd& m) override { proto("accountUpdateMultiEndProtoBuf", m); }
+  void updateNewsBulletinProtoBuf(const protobuf::NewsBulletin& m) override { proto("updateNewsBulletinProtoBuf", m); }
+  void scannerParametersProtoBuf(const protobuf::ScannerParameters& m) override { proto("scannerParametersProtoBuf", m); }
+  void receiveFAProtoBuf(const protobuf::ReceiveFA& m) override { proto("receiveFAProtoBuf", m); }
+  void nextValidIdProtoBuf(const protobuf::NextValidId& m) override { proto("nextValidIdProtoBuf", m); }
+  void currentTimeProtoBuf(const protobuf::CurrentTime& m) override { proto("currentTimeProtoBuf", m); }
+  void verifyMessageApiProtoBuf(const protobuf::VerifyMessageApi& m) override { proto("verifyMessageApiProtoBuf", m); }
+  void verifyCompletedProtoBuf(const protobuf::VerifyCompleted& m) override { proto("verifyCompletedProtoBuf", m); }
+  void displayGroupListProtoBuf(const protobuf::DisplayGroupList& m) override { proto("displayGroupListProtoBuf", m); }
+  void displayGroupUpdatedProtoBuf(const protobuf::DisplayGroupUpdated& m) override { proto("displayGroupUpdatedProtoBuf", m); }
+  void configResponseProtoBuf(const protobuf::ConfigResponse& m) override { proto("configResponseProtoBuf", m); }
+  void updateConfigResponseProtoBuf(const protobuf::UpdateConfigResponse& m) override { proto("updateConfigResponseProtoBuf", m); }
+#endif
 };
+
+#if defined(IBX_PROTOBUF)
+// A plain callback and the protobuf callback that comes before it.
+static const char* const protoPairs[][2] = {{"tickOptionComputation", "tickOptionComputationProtoBuf"}, {"tickGeneric", "tickGenericProtoBuf"}, {"tickString", "tickStringProtoBuf"}, {"orderStatus", "orderStatusProtoBuf"}, {"openOrder", "openOrderProtoBuf"}, {"openOrderEnd", "openOrdersEndProtoBuf"}, {"updateAccountValue", "updateAccountValueProtoBuf"}, {"updatePortfolio", "updatePortfolioProtoBuf"}, {"updateAccountTime", "updateAccountTimeProtoBuf"}, {"accountDownloadEnd", "accountDataEndProtoBuf"}, {"nextValidId", "nextValidIdProtoBuf"}, {"contractDetails", "contractDataProtoBuf"}, {"bondContractDetails", "bondContractDataProtoBuf"}, {"contractDetailsEnd", "contractDataEndProtoBuf"}, {"execDetails", "execDetailsProtoBuf"}, {"execDetailsEnd", "execDetailsEndProtoBuf"}, {"updateMktDepth", "updateMarketDepthProtoBuf"}, {"updateMktDepthL2", "updateMarketDepthL2ProtoBuf"}, {"updateNewsBulletin", "updateNewsBulletinProtoBuf"}, {"managedAccounts", "managedAccountsProtoBuf"}, {"receiveFA", "receiveFAProtoBuf"}, {"historicalDataEnd", "historicalDataEndProtoBuf"}, {"scannerParameters", "scannerParametersProtoBuf"}, {"realtimeBar", "realTimeBarTickProtoBuf"}, {"currentTime", "currentTimeProtoBuf"}, {"tickSnapshotEnd", "tickSnapshotEndProtoBuf"}, {"marketDataType", "marketDataTypeProtoBuf"}, {"commissionAndFeesReport", "commissionAndFeesReportProtoBuf"}, {"position", "positionProtoBuf"}, {"positionEnd", "positionEndProtoBuf"}, {"accountSummary", "accountSummaryProtoBuf"}, {"accountSummaryEnd", "accountSummaryEndProtoBuf"}, {"verifyMessageAPI", "verifyMessageApiProtoBuf"}, {"verifyCompleted", "verifyCompletedProtoBuf"}, {"displayGroupList", "displayGroupListProtoBuf"}, {"displayGroupUpdated", "displayGroupUpdatedProtoBuf"}, {"positionMulti", "positionMultiProtoBuf"}, {"positionMultiEnd", "positionMultiEndProtoBuf"}, {"accountUpdateMulti", "accountUpdateMultiProtoBuf"}, {"accountUpdateMultiEnd", "accountUpdateMultiEndProtoBuf"}, {"securityDefinitionOptionalParameter", "secDefOptParameterProtoBuf"}, {"securityDefinitionOptionalParameterEnd", "secDefOptParameterEndProtoBuf"}, {"softDollarTiers", "softDollarTiersProtoBuf"}, {"familyCodes", "familyCodesProtoBuf"}, {"symbolSamples", "symbolSamplesProtoBuf"}, {"mktDepthExchanges", "marketDepthExchangesProtoBuf"}, {"tickNews", "tickNewsProtoBuf"}, {"smartComponents", "smartComponentsProtoBuf"}, {"newsProviders", "newsProvidersProtoBuf"}, {"newsArticle", "newsArticleProtoBuf"}, {"historicalNews", "historicalNewsProtoBuf"}, {"historicalNewsEnd", "historicalNewsEndProtoBuf"}, {"headTimestamp", "headTimestampProtoBuf"}, {"histogramData", "histogramDataProtoBuf"}, {"historicalDataUpdate", "historicalDataUpdateProtoBuf"}, {"marketRule", "marketRuleProtoBuf"}, {"pnl", "pnlProtoBuf"}, {"pnlSingle", "pnlSingleProtoBuf"}, {"historicalTicks", "historicalTicksProtoBuf"}, {"historicalTicksBidAsk", "historicalTicksBidAskProtoBuf"}, {"historicalTicksLast", "historicalTicksLastProtoBuf"}, {"tickByTickAllLast", "tickByTickDataProtoBuf"}, {"tickByTickBidAsk", "tickByTickDataProtoBuf"}, {"tickByTickMidPoint", "tickByTickDataProtoBuf"}, {"completedOrder", "completedOrderProtoBuf"}, {"completedOrdersEnd", "completedOrdersEndProtoBuf"}, {"replaceFAEnd", "replaceFAEndProtoBuf"}, {"wshMetaData", "wshMetaDataProtoBuf"}, {"wshEventData", "wshEventDataProtoBuf"}, {"historicalSchedule", "historicalScheduleProtoBuf"}, {"userInfo", "userInfoProtoBuf"}, {"currentTimeInMillis", "currentTimeInMillisProtoBuf"}};
+
+// The protobuf requests, by the field of their message that names the
+// request or the order, and the ones that do nothing: X(request, message).
+#define IBX_TEST_PROTO_REQUESTS_REQ_ID(X) X(reqMarketDataProtoBuf, MarketDataRequest) X(cancelMarketDataProtoBuf, CancelMarketData) X(reqExecutionsProtoBuf, ExecutionRequest) X(reqContractDataProtoBuf, ContractDataRequest) X(reqMarketDepthProtoBuf, MarketDepthRequest) X(cancelMarketDepthProtoBuf, CancelMarketDepth) X(replaceFAProtoBuf, FAReplace) X(reqHistoricalDataProtoBuf, HistoricalDataRequest) X(reqScannerSubscriptionProtoBuf, ScannerSubscriptionRequest) X(cancelScannerSubscriptionProtoBuf, CancelScannerSubscription) X(cancelHistoricalDataProtoBuf, CancelHistoricalData) X(reqRealTimeBarsProtoBuf, RealTimeBarsRequest) X(cancelRealTimeBarsProtoBuf, CancelRealTimeBars) X(calculateImpliedVolatilityProtoBuf, CalculateImpliedVolatilityRequest) X(calculateOptionPriceProtoBuf, CalculateOptionPriceRequest) X(cancelCalculateImpliedVolatilityProtoBuf, CancelCalculateImpliedVolatility) X(cancelCalculateOptionPriceProtoBuf, CancelCalculateOptionPrice) X(reqAccountSummaryProtoBuf, AccountSummaryRequest) X(cancelAccountSummaryProtoBuf, CancelAccountSummary) X(queryDisplayGroupsProtoBuf, QueryDisplayGroupsRequest) X(subscribeToGroupEventsProtoBuf, SubscribeToGroupEventsRequest) X(updateDisplayGroupProtoBuf, UpdateDisplayGroupRequest) X(unsubscribeFromGroupEventsProtoBuf, UnsubscribeFromGroupEventsRequest) X(reqPositionsMultiProtoBuf, PositionsMultiRequest) X(cancelPositionsMultiProtoBuf, CancelPositionsMulti) X(reqAccountUpdatesMultiProtoBuf, AccountUpdatesMultiRequest) X(cancelAccountUpdatesMultiProtoBuf, CancelAccountUpdatesMulti) X(reqSecDefOptParamsProtoBuf, SecDefOptParamsRequest) X(reqSoftDollarTiersProtoBuf, SoftDollarTiersRequest) X(reqMatchingSymbolsProtoBuf, MatchingSymbolsRequest) X(reqSmartComponentsProtoBuf, SmartComponentsRequest) X(reqNewsArticleProtoBuf, NewsArticleRequest) X(reqHistoricalNewsProtoBuf, HistoricalNewsRequest) X(reqHeadTimestampProtoBuf, HeadTimestampRequest) X(reqHistogramDataProtoBuf, HistogramDataRequest) X(cancelHistogramDataProtoBuf, CancelHistogramData) X(cancelHeadTimestampProtoBuf, CancelHeadTimestamp) X(reqPnLProtoBuf, PnLRequest) X(cancelPnLProtoBuf, CancelPnL) X(reqPnLSingleProtoBuf, PnLSingleRequest) X(cancelPnLSingleProtoBuf, CancelPnLSingle) X(reqHistoricalTicksProtoBuf, HistoricalTicksRequest) X(reqTickByTickDataProtoBuf, TickByTickRequest) X(cancelTickByTickDataProtoBuf, CancelTickByTick) X(reqWshMetaDataProtoBuf, WshMetaDataRequest) X(cancelWshMetaDataProtoBuf, CancelWshMetaData) X(reqWshEventDataProtoBuf, WshEventDataRequest) X(cancelWshEventDataProtoBuf, CancelWshEventData) X(reqUserInfoProtoBuf, UserInfoRequest) X(cancelContractDataProtoBuf, CancelContractData) X(cancelHistoricalTicksProtoBuf, CancelHistoricalTicks)
+#define IBX_TEST_PROTO_REQUESTS_ORDER_ID(X) X(placeOrderProtoBuf, PlaceOrderRequest) X(cancelOrderProtoBuf, CancelOrderRequest) X(exerciseOptionsProtoBuf, ExerciseOptionsRequest)
+#define IBX_TEST_PROTO_REQUESTS_NO_ID(X) X(reqOpenOrdersProtoBuf, OpenOrdersRequest) X(reqAccountUpdatesProtoBuf, AccountDataRequest) X(reqIdsProtoBuf, IdsRequest) X(reqNewsBulletinsProtoBuf, NewsBulletinsRequest) X(cancelNewsBulletinsProtoBuf, CancelNewsBulletins) X(setServerLogLevelProtoBuf, SetServerLogLevelRequest) X(reqAutoOpenOrdersProtoBuf, AutoOpenOrdersRequest) X(reqAllOpenOrdersProtoBuf, AllOpenOrdersRequest) X(reqManagedAcctsProtoBuf, ManagedAccountsRequest) X(reqFAProtoBuf, FARequest) X(reqScannerParametersProtoBuf, ScannerParametersRequest) X(reqCurrentTimeProtoBuf, CurrentTimeRequest) X(reqGlobalCancelProtoBuf, GlobalCancelRequest) X(reqMarketDataTypeProtoBuf, MarketDataTypeRequest) X(reqPositionsProtoBuf, PositionsRequest) X(cancelPositionsProtoBuf, CancelPositions) X(verifyRequestProtoBuf, VerifyRequest) X(verifyMessageProtoBuf, VerifyMessageRequest) X(reqFamilyCodesProtoBuf, FamilyCodesRequest) X(reqMarketDepthExchangesProtoBuf, MarketDepthExchangesRequest) X(reqNewsProvidersProtoBuf, NewsProvidersRequest) X(reqMarketRuleProtoBuf, MarketRuleRequest) X(reqCompletedOrdersProtoBuf, CompletedOrdersRequest) X(reqCurrentTimeInMillisProtoBuf, CurrentTimeInMillisRequest)
+#define IBX_TEST_PROTO_REQUESTS_NOTHING(X) X(startApiProtoBuf, StartApiRequest) X(reqConfigProtoBuf, ConfigRequest) X(updateConfigProtoBuf, UpdateConfigRequest)
+#endif

@@ -99,7 +99,14 @@ void EClient::ibxProcess()
   if (!m_handle || m_connState != CS_CONNECTED)
     return;
   ibx::Sink sink{m_pEWrapper, nullptr};
+#if defined(IBX_PROTOBUF)
+  sink.proto.session = m_handle;
+#endif
   ibx_process(m_handle, &ibx::callbackTable, &sink);
+#if defined(IBX_PROTOBUF)
+  // The pass has ended: what waited for a next callback is given.
+  sink.flush();
+#endif
   // The servers ended the session: the pass gave connectionClosed.
   if (!ibx_is_connected(m_handle))
     m_connState = CS_DISCONNECTED;
