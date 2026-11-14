@@ -1,4 +1,4 @@
-# API Coverage Matrix (v0.8.0)
+# API Coverage Matrix (v0.9.0)
 
 *Auto-generated from source — do not edit.*
 
@@ -12,7 +12,7 @@ Canonical official API methods vs ibx implementation status.
 
 | | Official API | Rust | Python |
 |---|:---:|:---:|:---:|
-| **EClient methods** | 79 | 69 impl, 9 stub | 69 impl, 10 stub |
+| **EClient methods** | 79 | 69 impl, 10 stub | 69 impl, 10 stub |
 | **EWrapper callbacks** | 81 | 72 impl, 8 stub | 72 impl, 9 stub |
 
 ## EClient Methods
@@ -83,7 +83,7 @@ Canonical official API methods vs ibx implementation status.
 |  | `cancel_calculate_implied_volatility` | `cancelCalculateImpliedVolatility` | STUB | STUB |
 |  | `calculate_option_price` | `calculateOptionPrice` | STUB | STUB |
 |  | `cancel_calculate_option_price` | `cancelCalculateOptionPrice` | STUB | STUB |
-|  | `exercise_options` | `exerciseOptions` | - | STUB |
+|  | `exercise_options` | `exerciseOptions` | STUB | STUB |
 |  | `req_sec_def_opt_params` | `reqSecDefOptParams` | STUB | STUB |
 | Reference | `req_soft_dollar_tiers` | `reqSoftDollarTiers` | Y | Y |
 |  | `req_family_codes` | `reqFamilyCodes` | Y | Y |

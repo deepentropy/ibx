@@ -1,4 +1,4 @@
-# Rust API Reference (v0.8.0)
+# Rust API Reference (v0.9.0)
 
 *Auto-generated from source — do not edit.*
 
@@ -94,6 +94,20 @@ pub fn track_order_for_test( &self, order_id: OrderId, contract: ApiContract, or
 | `contract` | `ApiContract` | Contract specification (symbol, secType, exchange, currency, etc.). |
 | `order` | `ApiOrder` | Order parameters (action, quantity, type, price, TIF, etc.). |
 | `instrument` | `InstrumentId` | Instrument type for scanner (e.g. `"STK"`, `"FUT"`). |
+
+---
+
+#### `order_answered_for_test`
+
+Mark a tracked order as answered by the server (for testing without a server answer): placed again, it is a modify (ibx#688).
+
+```rust
+pub fn order_answered_for_test(&self, order_id: OrderId)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `order_id` | `OrderId` | Order identifier. Must be unique per session. |
 
 ---
 
@@ -1381,6 +1395,25 @@ pub fn req_current_time_in_millis(&self, _wrapper: &mut impl Wrapper)
 
 ---
 
+#### `exercise_options`
+
+Exercise or lapse an option. Nothing is sent yet: the request counts for the pacing and is logged, as in the Python client.
+
+```rust
+pub fn exercise_options( &self, req_id: i64, contract: &crate::api::types::Contract, exercise_action: i32, exercise_quantity: i32, account: &str, override_: i32, )
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `req_id` | `i64` | Request identifier. Used to match responses to requests. |
+| `contract` | `&crate::api::types::Contract` | Contract specification (symbol, secType, exchange, currency, etc.). |
+| `exercise_action` | `i32` | 1=exercise, 2=lapse. |
+| `exercise_quantity` | `i32` | Number of contracts to exercise. |
+| `account` | `&str` | Account ID. |
+| `override_` | `i32` |  |
+
+---
+
 #### `cancel_contract_data`
 
  Below session level 215, error 503 for the request; from 215 nothing (ibx#557). A running contract details request goes on in both cases, as on the reference.
@@ -1409,9 +1442,23 @@ pub fn cancel_historical_ticks(&self, req_id: i64)
 
 ---
 
+#### `set_extra_auth`
+
+The intent to verify, as the official client's `extraAuth`: set before the connect, the verify requests are sent (ibx#556).
+
+```rust
+pub fn set_extra_auth(&self, on: bool)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `on` | `bool` |  |
+
+---
+
 #### `verify_request`
 
- A session opened without the intent to verify: error 544, nothing sent.
+ A session opened without the intent to verify: error 544, nothing sent. With it, sent: the session then answers no more request, as the reference 10.51 (ibx#556).
 
 ```rust
 pub fn verify_request(&self, _api_name: &str, _api_version: &str)
@@ -1426,7 +1473,7 @@ pub fn verify_request(&self, _api_name: &str, _api_version: &str)
 
 #### `verify_message`
 
- No verification is in progress: error 10095 as the reference.
+ No answer, and the session answers no more request, as the reference 10.51 (ibx#556); error 10095 as the reference 10.40 in its replays.
 
 ```rust
 pub fn verify_message(&self, _api_data: &str)
@@ -1440,7 +1487,7 @@ pub fn verify_message(&self, _api_data: &str)
 
 #### `verify_and_auth_request`
 
- A session opened without the intent to verify: error 551, nothing sent.
+ A session opened without the intent to verify: error 551, nothing sent. With it, sent: the session then answers no more request, as the reference 10.51 (ibx#556).
 
 ```rust
 pub fn verify_and_auth_request(&self, _api_name: &str, _api_version: &str, _opaque_isv_key: &str)
@@ -1456,7 +1503,7 @@ pub fn verify_and_auth_request(&self, _api_name: &str, _api_version: &str, _opaq
 
 #### `verify_and_auth_message`
 
- The reference gives no answer: nothing happens.
+ No answer, and the session answers no more request, as the reference 10.51 (ibx#556).
 
 ```rust
 pub fn verify_and_auth_message(&self, _api_data: &str, _xyz_response: &str)
@@ -1469,12 +1516,40 @@ pub fn verify_and_auth_message(&self, _api_data: &str, _xyz_response: &str)
 
 ---
 
-#### `request_fa`
+#### `req_config`
 
-Request FA data. On a session that is not FA, error 321 as the reference (ibx#481); the FA data exchange itself is not implemented.
+Request the configuration. (session level 219); the answer is `config_response`, the paper installation's configuration with the changes kept from `update_config` (ibx#610). Below level 219, error 503 for the request, as the official client library answers, and nothing sent. From 219 a logon that forbids configuration access gets 321.
 
 ```rust
-pub fn request_fa(&self, _fa_data_type: i32)
+pub fn req_config(&self, request: &crate::api::config::ConfigRequest)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `request` | `&crate::api::config::ConfigRequest` |  |
+
+---
+
+#### `update_config`
+
+Update the configuration. (session level 221); the answer is `update_config_response`. Below level 221, error 503 for the request, as the official client library answers, and nothing sent (ibx#612). From 221 a logon that forbids configuration access gets 321; otherwise the update is checked as the reference checks it, then a value ibx cannot follow is refused with the field named, and the rest is kept (decision of 18/10/2026 on ibx#610).
+
+```rust
+pub fn update_config(&self, request: &crate::api::config::UpdateConfigRequest)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `request` | `&crate::api::config::UpdateConfigRequest` |  |
+
+---
+
+#### `request_fa`
+
+Request FA data. On a session that is not FA, error 321 as the reference (ibx#481). On an FA session, `receive_fa` from the session's FA data, or the reference's errors (ibx#507).
+
+```rust
+pub fn request_fa(&self, fa_data_type: i32)
 ```
 
 | Parameter | Type | Description |
@@ -1485,10 +1560,10 @@ pub fn request_fa(&self, _fa_data_type: i32)
 
 #### `replace_fa`
 
-Replace FA data. On a session that is not FA, error 321 for the request as the reference (ibx#481); the FA data exchange itself is not implemented.
+Replace FA data. On a session that is not FA, error 321 for the request as the reference (ibx#481). On an FA session, the document is checked, the session's data replaced and saved to the server; `replace_fa_end` when the saves are answered, or the reference's errors (ibx#507).
 
 ```rust
-pub fn replace_fa(&self, req_id: i64, _fa_data_type: i32, _cxml: &str)
+pub fn replace_fa(&self, req_id: i64, fa_data_type: i32, cxml: &str)
 ```
 
 | Parameter | Type | Description |
@@ -1619,7 +1694,7 @@ pub fn req_user_info(&self, req_id: i64, _wrapper: &mut impl Wrapper)
 
 #### `req_wsh_meta_data`
 
-Request WSH meta data. The permission check of the reference (ibx#443): error 10276 when the session has no WSH news source, 10277 when it is not subscribed. The data request itself is not implemented: with the permission, error 10279.
+Request WSH meta data. As the reference (ibx#443): error 10276 when the session has no WSH news source, 10277 when it is not subscribed; the meta data held is given at once; 10278 while a request is on its way; else the request goes to the server and its answer comes as `wsh_meta_data`.
 
 ```rust
 pub fn req_wsh_meta_data(&self, req_id: i64)
@@ -1633,7 +1708,7 @@ pub fn req_wsh_meta_data(&self, req_id: i64)
 
 #### `cancel_wsh_meta_data`
 
-Cancel a WSH meta data request. No answer, as the reference (ibx#443).
+Cancel a WSH meta data request. The request on its way is let go; no answer, as the reference (ibx#443).
 
 ```rust
 pub fn cancel_wsh_meta_data(&self, _req_id: i64)
@@ -1647,10 +1722,10 @@ pub fn cancel_wsh_meta_data(&self, _req_id: i64)
 
 #### `req_wsh_event_data`
 
-Request WSH event data. The permission check of the reference (ibx#443): error 10276 when the session has no WSH news source, 10277 when it is not subscribed. The data request itself is not implemented: with the permission, error 10282, since no meta data is held.
+Request WSH event data. As the reference (ibx#443): the permission errors; 10282 before the meta data is held; 10309 unless exactly one of a contract and a filter is given; 10283 for a filter that is not a JSON object; nothing at all for a date that is not `yyyyMMdd`; 10281 while a request is on its way; else the events come as `wsh_event_data`.
 
 ```rust
-pub fn req_wsh_event_data(&self, req_id: i64, _wsh_event_data: &crate::api::types::WshEventData)
+pub fn req_wsh_event_data(&self, req_id: i64, wsh_event_data: &crate::api::types::WshEventData)
 ```
 
 | Parameter | Type | Description |
@@ -1662,7 +1737,7 @@ pub fn req_wsh_event_data(&self, req_id: i64, _wsh_event_data: &crate::api::type
 
 #### `cancel_wsh_event_data`
 
-Cancel a WSH event data request. No answer, as the reference (ibx#443).
+Cancel a WSH event data request. As the reference (ibx#443): the meta data request on its way is let go, the event request goes on; no answer.
 
 ```rust
 pub fn cancel_wsh_event_data(&self, _req_id: i64)
@@ -2671,5 +2746,25 @@ WSH event data, as `wshEventData` (ibx#443).
 |-----------|------|-------------|
 | `req_id` | `i64` | Request identifier. Used to match responses to requests. |
 | `data_json` | `&str` |  |
+
+---
+
+#### `config_response`
+
+The configuration, as `configResponseProtoBuf` (ibx#610). It comes from session level 219.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `response` | `&crate::api::config::ConfigResponse` |  |
+
+---
+
+#### `update_config_response`
+
+The answer to an update of the configuration, as `updateConfigResponseProtoBuf` (ibx#612). It comes from session level 221.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `response` | `&crate::api::config::UpdateConfigResponse` |  |
 
 ---

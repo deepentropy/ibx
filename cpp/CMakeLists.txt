@@ -7,7 +7,7 @@
 # Targets: `ibx` (static library, link it), `ibx_core` (the Rust client as
 # a shared library, built here with cargo).
 cmake_minimum_required(VERSION 3.16)
-project(ibx_cpp VERSION 0.8.0 LANGUAGES CXX)
+project(ibx_cpp VERSION 0.9.0 LANGUAGES CXX)
 
 option(IBX_BUILD_EXAMPLES "Build the examples" ON)
 option(IBX_BUILD_TESTS "Build the tests (the Rust client is then built with its test helpers)" OFF)

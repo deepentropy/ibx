@@ -1,4 +1,4 @@
-# Python API Reference (v0.8.0)
+# Python API Reference (v0.9.0)
 
 *Auto-generated from source — do not edit.*
 
@@ -13,6 +13,26 @@
 - [EWrapper Callbacks](#ewrapper-callbacks)
 
 ## Connection
+
+#### `get_extra_auth`
+
+```python
+def get_extra_auth()
+```
+
+---
+
+#### `set_extra_auth`
+
+```python
+def set_extra_auth(on)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `on` | `bool` |  |
+
+---
 
 #### `new`
 
@@ -30,10 +50,10 @@ def new(wrapper))
 
 #### `connect`
 
-Connect to the broker and start the engine.  Live logins (``paper=False``) enter a second-factor approval window and **block** until the factor is approved (mobile push) or the server ends the wait. As in the reference there is no client timeout by default: the server closes the login after about 18 min. The keepalives of the server are answered during the whole wait. This is a human approval gate, not a hang. To bound or avoid it: use ``paper=True``, pass an ``ib_key_timeout_secs``, or run ``connect()`` on a worker thread with your own timeout. Paper logins skip the gate entirely. Set ``RUST_LOG=info`` to see a log line when the wait begins.  ``code_provider``: a callable used for the typed-code variant of the second factor. When the server sends the challenge it is called once, during ``connect()``, with a dict ``{"display_id": str, "avth_url": str}``, and must return the code as a ``str``; an exception it raises ends the login. It runs on its own thread while the login keeps answering the keepalives. ``None`` (default): wait for the mobile push approval.  Multiple ``EClient`` instances can run concurrently in one process; each owns its own state, sockets, and engine thread, and ``connect()`` does not serialize across instances. If you pin engines via ``core_id``, give each a distinct value. See ibx#203 / ibx#207.  An engine pinned with ``core_id`` polls without pause and keeps that core busy; without it the engine thread rests while there is nothing to do and is woken by the first byte received or the first request (ibx#530).
+Connect to the broker and start the engine.  Live logins (``paper=False``) enter a second-factor approval window and **block** until the factor is approved (mobile push) or the server ends the wait. As in the reference there is no client timeout by default: the server closes the login after about 18 min. The keepalives of the server are answered during the whole wait. This is a human approval gate, not a hang. To bound or avoid it: use ``paper=True``, pass an ``ib_key_timeout_secs``, or run ``connect()`` on a worker thread with your own timeout. Paper logins skip the gate entirely. Set ``RUST_LOG=info`` to see a log line when the wait begins.  ``code_provider``: a callable used for the typed-code variant of the second factor. When the server sends the challenge it is called once, during ``connect()``, with a dict ``{"display_id": str, "avth_url": str, "kind": str, "message": str, "image": bytes, "delivery": str}``, and must return the code as a ``str``; an exception it raises ends the login. It runs on its own thread while the login keeps answering the keepalives. ``None`` (default): wait for the mobile push approval. An account whose second factor is a security code card (``kind`` "3", ``image`` the card indexes to look up), an authenticator app or a passcode ("4", "4.1", "4.2", ``delivery`` how it was sent) or a temporary code ("6") needs one (ibx#350).  Multiple ``EClient`` instances can run concurrently in one process; each owns its own state, sockets, and engine thread, and ``connect()`` does not serialize across instances. If you pin engines via ``core_id``, give each a distinct value. See ibx#203 / ibx#207.  An engine pinned with ``core_id`` polls without pause and keeps that core busy; without it the engine thread rests while there is nothing to do and is woken by the first byte received or the first request (ibx#530).  ``copied_waits``: copy the reference's own waits, which change nothing the client receives nor what the server answers (the market data messages sent in passes, the scanner parameters delay and the gaps after it, the gaps and the contract records a stock's first order waits for). ``False`` (default): left out, for the lowest latency; ``True``: a session's timing comparable with the reference's. The pacing of requests stays on either way (ibx#564).
 
 ```python
-def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None, code_provider=None))
+def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None, code_provider=None, copied_waits=false))
 ```
 
 | Parameter | Type | Description |
@@ -48,6 +68,7 @@ def connect(host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".
 | `ib_key_timeout_secs` | `int or None` | Live second-factor approval timeout in seconds. Default: no client timeout, the wait ends when the server answers or closes the login (about 18 min). Set it to fail fast on unattended live logins; ignored for paper. |
 | `ib_key_token_sub_type` | `str or None` | Override of the second-factor token sub-type. Default: the value the server lists for the session. Ignored for paper. |
 | `code_provider` | `Py<PyAny> or None` | Callable for the typed-code second factor: called once during `connect()` with a dict `{"display_id", "avth_url"}`, returns the code as `str`. Default: wait for the mobile push approval. Ignored for paper. |
+| `copied_waits` | `bool` |  |
 
 ---
 
@@ -1140,7 +1161,7 @@ def verify_request(api_name, api_version))
 
 #### `verify_message`
 
-No verification is in progress: error 10095 as the reference.
+No verification is in progress: no answer, as the reference 10.51 (ibx#556; paper, 17/10/2026, a client at level 214); error 10095 as the reference 10.40 in its replays.
 
 ```python
 def verify_message(api_data))
@@ -1183,12 +1204,40 @@ def verify_and_auth_message(api_data, xyz_response))
 
 ---
 
+#### `req_config_proto_buf`
+
+Request the configuration, as the official `reqConfigProtoBuf` (session level 219): a `ConfigRequest` of the official library, or an object with its attributes; None does nothing. The answer is `config_response_proto_buf`: the paper installation's configuration with the changes kept from `update_config_proto_buf` (ibx#610). Below level 219, error 503 for the request, as the official client library answers, and nothing sent. From 219 a logon that forbids configuration access gets 321.
+
+```python
+def req_config_proto_buf(config_request_proto))
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `config_request_proto` | `Bound<'_, PyAny> or None` |  |
+
+---
+
+#### `update_config_proto_buf`
+
+Update the configuration, as the official `updateConfigProtoBuf` (session level 221): an `UpdateConfigRequest` of the official library, or an object with its attributes; None does nothing. The answer is `update_config_response_proto_buf`. Below level 221, error 503 for the request, as the official client library answers, and nothing sent (ibx#612). From 221 a logon that forbids configuration access gets 321; otherwise the update is checked as the reference checks it, then a value ibx cannot follow is refused with the field named, and the rest is kept (decision of 18/10/2026 on ibx#610).
+
+```python
+def update_config_proto_buf(update_config_request_proto))
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `update_config_request_proto` | `Bound<'_, PyAny> or None` |  |
+
+---
+
 #### `request_fa`
 
 Request FA data. Not yet implemented.
 
 ```python
-def request_fa(_fa_data_type)
+def request_fa(fa_data_type)
 ```
 
 | Parameter | Type | Description |
@@ -1350,7 +1399,7 @@ def req_user_info(req_id)
 
 #### `req_wsh_meta_data`
 
-The permission check of the reference (ibx#443): error 10276 when the session has no WSH news source, 10277 when it is not subscribed. The data request itself is not implemented: with the permission, error 10279.
+As the reference (ibx#443): error 10276 when the session has no WSH news source, 10277 when it is not subscribed; the meta data held is given at once; 10278 while a request is on its way; else the request goes to the server and its answer comes as `wsh_meta_data`.
 
 ```python
 def req_wsh_meta_data(req_id)
@@ -1364,7 +1413,7 @@ def req_wsh_meta_data(req_id)
 
 #### `cancel_wsh_meta_data`
 
-No answer, as the reference (ibx#443).
+The request on its way is let go; no answer, as the reference (ibx#443).
 
 ```python
 def cancel_wsh_meta_data(req_id)
@@ -1378,7 +1427,7 @@ def cancel_wsh_meta_data(req_id)
 
 #### `req_wsh_event_data`
 
-The permission check of the reference (ibx#443), as `req_wsh_meta_data`. The data request itself is not implemented: with the permission, error 10282, since no meta data is held.
+As the reference (ibx#443): the permission errors; 10282 before the meta data is held; 10309 unless exactly one of a contract and a filter is given; 10283 for a filter that is not a JSON object; nothing at all for a date that is not `yyyyMMdd`; 10281 while a request is on its way; else the events come as `wsh_event_data`.
 
 ```python
 def req_wsh_event_data(req_id, wsh_event_data=None))
@@ -1393,7 +1442,7 @@ def req_wsh_event_data(req_id, wsh_event_data=None))
 
 #### `cancel_wsh_event_data`
 
-No answer, as the reference (ibx#443).
+As the reference (ibx#443): the meta data request on its way is let go, the event request goes on; no answer.
 
 ```python
 def cancel_wsh_event_data(req_id)
@@ -2342,6 +2391,26 @@ Wall Street Horizon event data.
 |-----------|------|-------------|
 | `req_id` | `int` | Request identifier. Used to match responses to requests. |
 | `data_json` | `str` |  |
+
+---
+
+#### `config_response_proto_buf`
+
+The answer to `req_config_proto_buf`, as the official `configResponseProtoBuf`: its `ConfigResponse` object (ibx#610). It comes from session level 219.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `config_response_proto` | `Py<PyAny>` |  |
+
+---
+
+#### `update_config_response_proto_buf`
+
+The answer to `update_config_proto_buf`, as the official `updateConfigResponseProtoBuf`: its `UpdateConfigResponse` object (ibx#612). It comes from session level 221.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `update_config_response_proto` | `Py<PyAny>` |  |
 
 ---
 
