@@ -20,6 +20,8 @@ required-features = ["test-support"]
 [features]
 default = []
 python = ["pyo3"]
+# The C entry layer the C++ library of `cpp/` sits on (ibx#235).
+capi = []
 # Test helpers (in-memory transport, scripted peer, normaliser, injection
 # hooks). Never enabled by a release build; the test targets turn it on
 # through the dev-dependency on this crate below.
@@ -94,7 +96,8 @@ windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 # Property tests of the network decoders (ibx#488).
 proptest = { version = "1", default-features = false, features = ["std"] }
-ibx = { path = ".", features = ["test-support"] }
+# With the C entry layer, so the offline suite builds and tests it (ibx#235).
+ibx = { path = ".", features = ["test-support", "capi"] }
 
 [profile.release]
 lto = "fat"

@@ -2100,6 +2100,7 @@ eclient,calculate_implied_volatility,,no test
 eclient,calculate_option_price,,no test
 eclient,cancel_calculate_implied_volatility,,no test
 eclient,cancel_calculate_option_price,,no test
+eclient,exercise_options,,src/api/client/tests.rs::exercise_options_sends_nothing
 eclient,cancel_mkt_data,,tests/scenario_replay.rs::rth_order_types ; src/api/client/tests.rs::cancel_mkt_data_sends_unsubscribe ; src/api/client/tests.rs::cancel_mkt_data_unknown_req_id_no_panic
 eclient,req_tick_by_tick_data,,src/api/client/tests.rs::req_tick_by_tick_data_sends_subscribe_tbt ; src/api/client/tests.rs::req_tick_by_tick_data_types_and_local_refusals
 eclient,cancel_tick_by_tick_data,,src/api/client/tests.rs::tick_by_tick_reports_by_request_type ; src/api/client/tests.rs::cancel_tick_by_tick_data_sends_unsubscribe_tbt ; src/api/client/tests.rs::cancel_tick_by_tick_unknown_req_id_no_panic

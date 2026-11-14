@@ -726,7 +726,7 @@ impl Order {
 // ── TagValue ──
 
 /// ibapi-compatible TagValue for algo parameters.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct TagValue {
     pub tag: String,
     pub value: String,
@@ -1390,7 +1390,7 @@ pub struct ContractDescription {
 // ── PriceIncrement (for market rules) ──
 
 /// ibapi-compatible PriceIncrement for market_rule callback.
-#[derive(Clone, Debug)]
+#[derive(Default, Clone, Debug)]
 pub struct PriceIncrement {
     pub low_edge: f64,
     pub increment: f64,

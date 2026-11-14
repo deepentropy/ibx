@@ -72,3 +72,30 @@ jobs:
         run: |
           . .venv/bin/activate
           python -m pytest tests/python -q -rs -p no:cacheprovider
+
+  cpp:
+    name: C++ library build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> build/cpp/cargo"
+
+      - name: The generated sources are the ones the tables give
+        run: python3 cpp/gen/generate.py --check
+
+      - name: Build the library, the examples and the tests
+        run: |
+          cmake -S cpp -B build/cpp -DCMAKE_BUILD_TYPE=Debug -DIBX_BUILD_TESTS=ON
+          cmake --build build/cpp -j 4
+
+      # Offline: every field and callback parameter, and the recorded
+      # scenarios replayed through the C++ client. The live session
+      # (live_paper) needs a login and is not run here.
+      - name: Run the tests
+        run: ctest --test-dir build/cpp --output-on-failure

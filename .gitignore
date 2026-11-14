@@ -24,6 +24,9 @@ target
 # Temporary files
 .tmp/
 
+# CMake builds of the C++ library
+/build/
+
 # Test data captures (ground truth from official API)
 test_data/
 

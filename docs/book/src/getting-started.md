@@ -17,6 +17,16 @@ pip install git+https://github.com/deepentropy/ibx
 
 > Python wheels are built from the same Rust core via [PyO3](https://pyo3.rs) / [maturin](https://www.maturin.rs/). You need a working Rust toolchain to install from source.
 
+### C++
+
+```bash
+git clone https://github.com/deepentropy/ibx
+cmake -S ibx/cpp -B build/cpp -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpp
+```
+
+> The C++ library has the classes of the official C++ client (`EClientSocket`, `EWrapper`, `EReader`, ...). It needs CMake, a C++14 compiler and a Rust toolchain. See the [C++ API](./api/cpp.md).
+
 ## Credentials
 
 IBX connects directly to the broker's servers — there is no separate gateway process. Set your account credentials via environment variables:

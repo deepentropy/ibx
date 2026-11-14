@@ -1974,7 +1974,7 @@ pub struct DepthUpdate {
 }
 
 /// Exchange metadata for market depth availability.
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct DepthMktDataDescription {
     pub exchange: String,
     pub sec_type: String,
@@ -2011,7 +2011,7 @@ pub struct SmartComponent {
 }
 
 /// A news data provider.
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct NewsProvider {
     pub code: String,
     pub name: String,
@@ -2026,7 +2026,7 @@ pub struct SoftDollarTier {
 }
 
 /// A family code linking related accounts.
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct FamilyCode {
     pub account_id: String,
     pub family_code_str: String,

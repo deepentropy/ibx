@@ -11,6 +11,7 @@
   <a href="#benchmarks">Benchmarks</a> &bull;
   <a href="#rust-usage">Rust</a> &bull;
   <a href="#python-usage">Python</a> &bull;
+  <a href="#c-usage">C++</a> &bull;
   <a href="#notebooks">Notebooks</a> &bull;
   <a href="#architecture">Architecture</a> &bull;
   <a href="https://deepentropy.github.io/ibx/api/rust.html">Rust API</a> &bull;
@@ -24,7 +25,7 @@
 
 ---
 
-IBX connects directly to the broker's servers — without requiring the official Java Gateway. Built in Rust for ultra-low-latency, available as both a Rust library and a Python library via PyO3. Both expose an ibapi-compatible `EClient`/`Wrapper` API.
+IBX connects directly to the broker's servers — without requiring the official Java Gateway. Built in Rust for ultra-low-latency, available as a Rust library, a Python library via PyO3 and a C++ library. All three expose an ibapi-compatible `EClient`/`Wrapper` API.
 
 ## Benchmarks
 
@@ -202,6 +203,58 @@ client.disconnect()
 
 MKT, LMT, STP, STP LMT, TRAIL, TRAIL LIMIT, MOC, LOC, MTL, MIT, LIT, MKT PRT, STP PRT, REL, PEG MKT, PEG MID, MIDPRICE, SNAP MKT, SNAP MID, SNAP PRI, PEG BENCH, BOX TOP, TRAIL MIT, TRAIL LIT, PEG BEST, RPI, PASSV REL. Algo orders: VWAP, TWAP, Arrival Price, Close Price, Dark Ice, PctVol.
 
+## C++ Usage
+
+The C++ library has the classes of the official C++ client (`EClientSocket`, `EWrapper`, `EReader`, `Contract`, `Order`, ...), with the same names and signatures: a program written for it compiles against IBX and logs in to the servers itself.
+
+### Build
+
+```bash
+cmake -S cpp -B build/cpp -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cpp
+```
+
+Needs CMake, a C++14 compiler (MSVC, GCC, Clang) and a Rust toolchain. In a CMake project: `add_subdirectory(ibx/cpp)` then `target_link_libraries(my_program PRIVATE ibx)`.
+
+### Connect and trade
+
+```cpp
+#include "DefaultEWrapper.h"
+#include "EClientSocket.h"
+#include "EReader.h"
+#include "EReaderOSSignal.h"
+
+struct App : DefaultEWrapper {
+  int nextId = -1;
+  void nextValidId(int orderId) override { nextId = orderId; }
+  void tickPrice(int reqId, TickType field, double price, const TickAttrib&) override {
+    printf("tick %d type=%d price=%.2f\n", reqId, (int)field, price);
+  }
+};
+
+int main() {
+  App app;
+  EReaderOSSignal signal(100);
+  EClientSocket client(&app, &signal);
+  // The login takes IB_USERNAME and IB_PASSWORD; host and port name a
+  // local gateway for the official client and are not used here.
+  if (!client.eConnect("127.0.0.1", 4002, 0)) return 1;
+  EReader reader(&client, &signal);
+  reader.start();
+
+  Contract spy;
+  spy.conId = 756733; spy.symbol = "SPY"; spy.secType = "STK"; spy.exchange = "SMART"; spy.currency = "USD";
+  client.reqMktData(1, spy, "", false, false, TagValueListSPtr());
+
+  while (client.isConnected()) {
+    signal.waitForSignal();
+    reader.processMsgs();     // the callbacks, on this thread
+  }
+}
+```
+
+See the [C++ API](https://deepentropy.github.io/ibx/api/cpp.html) and the examples in `cpp/examples`.
+
 ## Notebooks
 
 Jupyter notebooks adapted from [ib_async's examples](https://ib-api-reloaded.github.io/ib_async/notebooks.html), using the ibapi-compatible `EClient`/`EWrapper` pattern. All connect through the Rust engine — no official desktop application or gateway needed.
@@ -222,7 +275,7 @@ Jupyter notebooks adapted from [ib_async's examples](https://ib-api-reloaded.git
 
 ```
     ┌──────────────────────────────────────────────┐
-    │           Your Code (Rust / Python)          │
+    │        Your Code (Rust / Python / C++)       │
     │  process_msgs() → Wrapper callbacks          │
     │  client.quote(id) → SeqLock read             │
     │  client.place_order(id,c,o) → control chan   │
@@ -251,10 +304,13 @@ Jupyter notebooks adapted from [ib_async's examples](https://ib-api-reloaded.git
 
 **Python bridge**: Same engine, ibapi-compatible `EClient`/`EWrapper` API. SeqLock quote reads, crossbeam order channel. No GIL contention on the hot path.
 
+**C++ library**: Same engine, the classes of the official C++ client on a C entry layer. Market data callbacks cross as plain numbers: nothing is encoded or copied on that path.
+
 ## Requirements
 
 - Rust 2024 edition (1.85+)
 - Python 3.11+ (for PyO3 bindings)
+- CMake 3.16+ and a C++14 compiler (for the C++ library)
 - A brokerage account with API access (paper or live)
 
 ## License

@@ -18,6 +18,10 @@ pub mod engine;
 #[cfg(feature = "python")]
 mod python;
 
+/// C entry layer (ibx#235); the C++ library of `cpp/` sits on it.
+#[cfg(feature = "capi")]
+pub mod capi;
+
 /// Test helpers (in-memory peer, normaliser); built only for the tests.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

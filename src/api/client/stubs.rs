@@ -81,6 +81,20 @@ impl EClient {
 
     // ── Requests a session of the reference does not have (ibx#516) ──
 
+    /// Exercise or lapse an option. Matches `exerciseOptions` in C++.
+    /// Nothing is sent yet: the request counts for the pacing and is
+    /// logged, as in the Python client.
+    pub fn exercise_options(
+        &self, req_id: i64, contract: &crate::api::types::Contract, exercise_action: i32,
+        exercise_quantity: i32, account: &str, override_: i32,
+    ) {
+        // One API request for the pacing, whatever it sends (ibx#565).
+        let _request = crate::engine::park::one_request();
+        if self.core.requests_ignored() { return; }
+        let _ = (req_id, contract, exercise_action, exercise_quantity, account, override_);
+        log::warn!("exercise_options: not yet implemented in engine");
+    }
+
     /// Matches `cancelContractData` in C++. Below session level 215, error
     /// 503 for the request; from 215 nothing (ibx#557). A running contract
     /// details request goes on in both cases, as on the reference.

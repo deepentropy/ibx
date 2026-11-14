@@ -7826,6 +7826,17 @@ fn req_current_time_in_millis_adds_the_logon_clock_offset() {
     assert!((w.0[0] - local - 60_000).abs() <= 1_000, "{} vs local {}", w.0[0], local);
 }
 
+// ibx#235: exerciseOptions counts as a request and sends nothing, as in
+// the Python client.
+#[test]
+fn exercise_options_sends_nothing() {
+    let (client, rx, shared) = test_client();
+    let option = Contract { con_id: 1, symbol: "SPY".into(), sec_type: "OPT".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };
+    client.exercise_options(5003, &option, 1, 1, "", 1);
+    assert!(rx.try_recv().is_err(), "nothing goes to the engine");
+    assert!(shared.orders.drain_order_errors().is_empty());
+}
+
 // ibx#516: the requests a session of the reference does not have give the
 // answers of the reference run of 10/10/2026, and send nothing.
 #[test]
