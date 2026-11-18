@@ -187,6 +187,7 @@ fn ccp_reconnect_with_cached_credentials() {
         ns_secure_refused: gw.ns_secure_refused,
         use_ssl: gw.use_ssl,
         ssl_farms: gw.ssl_farms.clone(),
+        second_factor: Default::default(),
     };
 
     println!("Full auth: {}ms | session_id={}", full_auth_ms, auth.server_session_id);
@@ -248,6 +249,7 @@ fn auth_login_and_reconnect_without_key_exchange_live() {
         ns_secure_refused: gw.ns_secure_refused,
         use_ssl: gw.use_ssl,
         ssl_farms: gw.ssl_farms.clone(),
+        second_factor: Default::default(),
     };
     drop(ccp_conn);
     let reconnect = reconnect_ccp_session(&auth).expect("auth reconnect without key exchange");
@@ -298,9 +300,57 @@ fn auth_login_without_tls_live() {
         ns_secure_refused: gw.ns_secure_refused,
         use_ssl: gw.use_ssl,
         ssl_farms: gw.ssl_farms.clone(),
+        second_factor: Default::default(),
     };
     drop(ccp_conn);
     let reconnect = reconnect_ccp_session(&auth).expect("auth reconnect without TLS");
     println!("reconnect without TLS: encryption refused {}, epoch {:?}", reconnect.ns_secure_refused, reconnect.session_epoch);
     unsafe { std::env::remove_var("IBX_USE_SSL") };
+}
+
+/// ibx#761: about a day after the login the server no longer takes the
+/// session token and asks a reconnect for a full login. A token it does not
+/// know brings the same answer: the reconnect logs in again in full (on
+/// paper: the password step, no second factor), gives the new key, and the
+/// next reconnect passes on that key with the session-token step.
+/// Run with: cargo test --test farm_reconnect_poc ccp_reconnect_with_a_lapsed_token_logs_in_again -- --ignored --nocapture
+#[test]
+#[ignore = "live: logs in to the paper account (IB_USERNAME / IB_PASSWORD)"]
+fn ccp_reconnect_with_a_lapsed_token_logs_in_again() {
+    let _ = env_logger::try_init();
+    let _one = one_login();
+    let cfg = config();
+    let (gw, _farm_conn, ccp_conn, _hmds) = Gateway::connect(&cfg).expect("Initial connect failed");
+    assert!(gw.account_id.starts_with("DU"), "refusing to run: the logged-in account is not a paper account (its id does not start with DU)");
+    let lapsed = num_bigint::BigUint::from(123_456_789u64);
+    let mut auth = ReconnectAuth {
+        host: cfg.host.clone(),
+        username: cfg.username.clone(),
+        password: cfg.password.clone(),
+        paper: cfg.paper,
+        session_key: lapsed.clone(),
+        session_token: lapsed,
+        server_session_id: gw.server_session_id.clone(),
+        hw_info: gw.hw_info.clone(),
+        encoded: gw.encoded.clone(),
+        hmds_host: gw.hmds_host.clone(),
+        hmds_farm: gw.hmds_farm.clone(),
+        farm_host: gw.farm_host.clone(),
+        farm_name: gw.farm_name.clone(),
+        session_epoch: gw.session_epoch.clone(),
+        ns_secure_refused: gw.ns_secure_refused,
+        use_ssl: gw.use_ssl,
+        ssl_farms: gw.ssl_farms.clone(),
+        second_factor: ibx::gateway::SecondFactorSettings::of(&cfg),
+    };
+    drop(ccp_conn);
+    let first = reconnect_ccp_session(&auth).expect("the reconnect logs in again in full");
+    let key = first.session_key.expect("a full login gives the new key");
+    drop(first.conn);
+    auth.session_key = key.clone();
+    auth.session_token = key;
+    std::thread::sleep(Duration::from_secs(5));
+    let second = reconnect_ccp_session(&auth).expect("the next reconnect passes on the new key");
+    assert!(second.session_key.is_none(), "the session-token step was taken, not a full login");
+    println!("PASS: a lapsed token is replaced by a full login, and the next reconnect passes on its key");
 }

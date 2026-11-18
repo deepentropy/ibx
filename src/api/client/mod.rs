@@ -127,6 +127,10 @@ pub struct EClientConfig {
     /// code card, an authenticator app, a passcode or a temporary code needs
     /// one: [`IbKeyChallenge::kind`](crate::auth::session::IbKeyChallenge)
     /// names the factor, with the card's image or the passcode's delivery.
+    /// A reconnect the server asks to log in again in full (its session
+    /// token lapses about a day after the login) runs the second factor
+    /// again with this provider, or the push approval; when the factor is
+    /// not given the session ends (ibx#761).
     pub code_provider: Option<crate::auth::session::CodeProvider>,
 }
 

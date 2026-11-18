@@ -3914,7 +3914,7 @@ impl HotLoop {
             None => return,
         };
         match rx.try_recv() {
-            Ok(Ok(CcpReconnect { conn, session_epoch, ns_secure_refused, logon })) => {
+            Ok(Ok(CcpReconnect { conn, session_epoch, ns_secure_refused, logon, session_key })) => {
                 log::info!("CCP auto-reconnect succeeded (attempt {})", self.ccp_reconnect_attempt);
                 // Every logon reply sets the clock offset, the feature
                 // tokens and the pending accounts; a changed data
@@ -3931,6 +3931,13 @@ impl HotLoop {
                 // the server refused its encryption (ibx#423).
                 if let Some(auth) = self.reconnect_auth.as_mut() {
                     auth.ns_secure_refused = ns_secure_refused;
+                    // A reconnect that logged in again in full gives the
+                    // session its new key: the next reconnects of every link
+                    // take it, as after a first login (ibx#761).
+                    if let Some(key) = session_key {
+                        auth.session_token = key.clone();
+                        auth.session_key = key;
+                    }
                 }
                 self.reconnect_ccp(conn);
                 self.ccp_reconnect_attempt = 0;
@@ -5363,6 +5370,7 @@ mod tests {
             ns_secure_refused: false,
             use_ssl: true,
             ssl_farms: String::new(),
+            second_factor: Default::default(),
         }
     }
 
@@ -6060,6 +6068,8 @@ mod tests {
             refused(LoginErrorKind::BadCredentials, 1, "bad"),
             refused(LoginErrorKind::IpNotAuthorized, 1, "IP address 1.2.3.4"),
             refused(LoginErrorKind::Other, 99, "other"),
+            // ibx#761: the second factor a full login asked for not given.
+            LoginError { kind: LoginErrorKind::SecondFactorNotGiven, code: None, text: "no approval".into() }.into(),
         ] {
             let text = error.to_string();
             assert_eq!(outcome(error), (false, false, true, true), "{text}");
@@ -6072,6 +6082,38 @@ mod tests {
             let text = error.to_string();
             assert_eq!(outcome(error), (true, true, false, false), "{text}");
         }
+    }
+
+    // ibx#761: a reconnect the server asked to log in again in full gives
+    // the session its new key, which the next reconnects of every link
+    // take; a reconnect on the session token keeps the cached one.
+    #[test]
+    fn a_full_login_on_reconnect_replaces_the_cached_key() {
+        use num_bigint::BigUint;
+        let reconnected = |session_key: Option<BigUint>| {
+            let shared = Arc::new(SharedState::new());
+            let mut engine = HotLoop::new(shared, None, None);
+            engine.running = true;
+            engine.ccp.disconnected = true;
+            engine.ccp_reconnect_attempt = 1;
+            let mut auth = reconnect_auth_with_host("cdc1.example");
+            auth.session_key = BigUint::from(7u32);
+            auth.session_token = BigUint::from(7u32);
+            engine.set_reconnect_auth(auth);
+            let (client, _server) = crate::protocol::connection::mem_pair();
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            tx.send(Ok(CcpReconnect {
+                conn: Connection::new_mem(client), session_epoch: None, ns_secure_refused: false,
+                logon: Default::default(), session_key,
+            })).unwrap();
+            engine.pending_ccp_reconnect = Some(rx);
+            engine.poll_ccp_reconnect();
+            assert_eq!(engine.ccp_reconnect_attempt, 0, "the reconnect succeeded");
+            let auth = engine.reconnect_auth.as_ref().unwrap();
+            (auth.session_key.clone(), auth.session_token.clone())
+        };
+        assert_eq!(reconnected(Some(BigUint::from(42u32))), (BigUint::from(42u32), BigUint::from(42u32)));
+        assert_eq!(reconnected(None), (BigUint::from(7u32), BigUint::from(7u32)));
     }
 
     // ibx#552: a parameters request that waits counts among the scanner

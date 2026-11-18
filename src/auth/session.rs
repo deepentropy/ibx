@@ -347,6 +347,11 @@ pub enum LoginErrorKind {
     PasswordRejected,
     /// Secure-error answer: the server refused the encrypted session.
     SecureConnectionRefused,
+    /// A reconnect the server asked to log in again with the second factor
+    /// of the account, which was not given: a code the program has no
+    /// provider for, a factor ibx does not drive, or an approval refused or
+    /// not given in time (ibx#761). Not a server answer: no code.
+    SecondFactorNotGiven,
     /// Any other code, or a code that is not a number.
     Other,
 }
@@ -394,6 +399,7 @@ impl LoginErrorKind {
             Self::PreviewNeedsPaper => "the preview needs the paper mode",
             Self::PasswordRejected => "password rejected",
             Self::SecureConnectionRefused => "secure connection refused",
+            Self::SecondFactorNotGiven => "the second factor of the login was not given",
             Self::Other => "server error",
         }
     }

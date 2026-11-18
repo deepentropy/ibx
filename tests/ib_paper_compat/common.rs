@@ -208,6 +208,7 @@ pub(super) fn as_client_session(hot_loop: &mut HotLoop, gw: &gateway::Gateway, c
         ns_secure_refused: gw.ns_secure_refused,
         use_ssl: gw.use_ssl,
         ssl_farms: gw.ssl_farms.clone(),
+        second_factor: Default::default(),
     });
 }
 

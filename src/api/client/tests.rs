@@ -35,6 +35,7 @@ fn connect_caches_reconnect_credentials() {
         ns_secure_refused: false,
         use_ssl: true,
         ssl_farms: String::new(),
+        second_factor: Default::default(),
     });
     assert!(!hot_loop.has_reconnect_host(), "gateway leaves the host empty");
 

@@ -173,6 +173,13 @@ impl EClient {
     /// a passcode ("4", "4.1", "4.2", ``delivery`` how it was sent) or a
     /// temporary code ("6") needs one (ibx#350).
     ///
+    /// About a day after the login the server no longer takes the session's
+    /// token: a reconnect after that logs in again in full, password then
+    /// second factor, with the same settings (``ib_key_timeout_secs``,
+    /// ``code_provider``). It asks the approval again (or calls
+    /// ``code_provider`` again) in the background; when the factor is not
+    /// given the session ends and ``connectionClosed`` is called (ibx#761).
+    ///
     /// Multiple ``EClient`` instances can run concurrently in one process; each
     /// owns its own state, sockets, and engine thread, and ``connect()`` does
     /// not serialize across instances. If you pin engines via ``core_id``, give

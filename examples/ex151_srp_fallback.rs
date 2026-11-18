@@ -59,6 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ns_secure_refused: gw.ns_secure_refused,
         use_ssl: gw.use_ssl,
         ssl_farms: gw.ssl_farms.clone(),
+        second_factor: Default::default(),
     };
 
     drop(ccp);
