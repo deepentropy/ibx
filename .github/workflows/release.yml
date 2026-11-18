@@ -1,0 +1,129 @@
+name: Nightly release
+
+# Every night at 03:00 UTC: when main has commits since the last release,
+# the offline tests run (tests.yml), then the next patch version is built
+# and published as an ordinary release, with the Python wheel attached and
+# the commit subjects as its notes. A night without new commits publishes
+# nothing. Can also be started by hand (`gh workflow run "Nightly release"`).
+#
+# The rule on main lets only administrators push, so the version bump is a
+# release commit on top of the released main commit, reached by its tag
+# only: main keeps the version of its last bump by hand.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: commits since the last release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      version: ${{ steps.plan.outputs.version }}
+      previous: ${{ steps.plan.outputs.previous }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - id: plan
+        run: |
+          git fetch --tags --force origin
+          previous=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          if [ -z "$previous" ]; then echo "no release tag"; exit 1; fi
+          count=$(git rev-list --count "$previous..HEAD")
+          IFS=. read -r major minor patch <<< "${previous#v}"
+          patch=${patch%%[!0-9]*}
+          version="$major.$minor.$((patch + 1))"
+          echo "previous=$previous version=$version new commits=$count"
+          release=false
+          if [ "$count" -gt 0 ] && ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            release=true
+          fi
+          {
+            echo "release=$release"
+            echo "version=$version"
+            echo "previous=$previous"
+          } >> "$GITHUB_OUTPUT"
+
+  tests:
+    name: offline tests
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    uses: ./.github/workflows/tests.yml
+
+  release:
+    name: build and publish v${{ needs.plan.outputs.version }}
+    needs: [plan, tests]
+    if: needs.plan.outputs.release == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      PREVIOUS: ${{ needs.plan.outputs.previous }}
+    steps:
+      - name: Keep the line endings of the repository
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set the version
+        run: |
+          sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml pyproject.toml fuzz/ibx-rlib/Cargo.toml
+          sed -i "s/^project(ibx_cpp VERSION [0-9.]*/project(ibx_cpp VERSION $VERSION/" cpp/CMakeLists.txt
+          sed -i "/^name = \"ibx\"$/{n;s/^version = \".*\"/version = \"$VERSION\"/}" Cargo.lock uv.lock
+          git diff --stat
+          for f in Cargo.toml pyproject.toml fuzz/ibx-rlib/Cargo.toml cpp/CMakeLists.txt Cargo.lock uv.lock; do
+            grep -q "$VERSION" "$f" || { echo "version not set in $f"; exit 1; }
+          done
+
+      - name: Build the wheel
+        run: |
+          python -m pip install --quiet "maturin>=1.0,<2.0"
+          maturin build --release --locked --interpreter python
+          ls target/wheels
+
+      - name: Tag the release commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -am "release: v$VERSION"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Changes since $PREVIOUS:"
+            echo
+            git log --no-merges --format='- %s (%h)' "$PREVIOUS..${{ github.sha }}" | grep -v '^- release:' || true
+          } > notes.md
+          gh release create "v$VERSION" target/wheels/*.whl \
+            --verify-tag --latest --title "v$VERSION" --notes-file notes.md
