@@ -81,7 +81,7 @@ fn get_config() -> Option<EClientConfig> {
     let username = env::var("IB_USERNAME").ok()?;
     let password = env::var("IB_PASSWORD").ok()?;
     let host = env::var("IB_HOST").unwrap_or_else(|_| "cdc1.ibllc.com".to_string());
-    Some(EClientConfig { username, password, host, paper: true, core_id: None, client_id: 0, copied_waits: false, code_provider: None })
+    Some(EClientConfig { username, password, host, paper: true, core_id: None, client_id: 0, copied_waits: false, code_provider: None, restart_token_file: None })
 }
 
 /// Connect, and refuse to go on unless this is a paper account (id starts with DU).

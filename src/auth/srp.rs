@@ -95,6 +95,27 @@ pub fn paper_token_convert(token_k: &BigUint, hw_info: &str) -> BigUint {
     BigUint::from_bytes_be(&h.finalize())
 }
 
+/// A token of another kind derived from `token`, as the reference converts
+/// its session tokens: SHA1 of `{hw_info}{label}` then of the stripped
+/// token. The label names the kind of token wanted ([`restart_token`], the
+/// session token of a restart token, or none for the read-only token,
+/// [`paper_token_convert`]). The machine string ties the token to the
+/// machine that announced it (ibx#762).
+pub fn derive_token(token: &BigUint, hw_info: &str, label: &str) -> BigUint {
+    let mut h = Sha1::new();
+    h.update(hw_info.as_bytes());
+    h.update(label.as_bytes());
+    h.update(strip_leading_zeros(&token.to_bytes_be()));
+    BigUint::from_bytes_be(&h.finalize())
+}
+
+/// The restart token of the session token `token`: the token a later login
+/// of the same machine presents instead of the password and the second
+/// factor, once announced to the server (ibx#762).
+pub fn restart_token(token: &BigUint, hw_info: &str) -> BigUint {
+    derive_token(token, hw_info, "TST")
+}
+
 /// Short token hash: SHA1(strip(token)).low32.hex
 pub fn token_short_hash(session_token: &BigUint) -> String {
     let digest = Sha1::digest(strip_leading_zeros(&session_token.to_bytes_be()));
@@ -155,6 +176,23 @@ mod tests {
         let k1 = srp_compute_k(&s);
         let k2 = srp_compute_k(&s);
         assert_eq!(k1, k2);
+    }
+
+    // ibx#762: the restart token is SHA1 of the machine string, the label
+    // and the stripped token; the read-only conversion is the same with no
+    // label; the token is tied to the machine.
+    #[test]
+    fn restart_token_derivation() {
+        use sha1::{Digest, Sha1};
+        let k = BigUint::from_bytes_be(&[0x00, 0x81, 0x02, 0x03]);
+        let hw = "0a1b2c3d|00:11:22:33:44:55";
+        let mut h = Sha1::new();
+        h.update(b"0a1b2c3d|00:11:22:33:44:55TST");
+        h.update([0x81, 0x02, 0x03]);
+        assert_eq!(restart_token(&k, hw), BigUint::from_bytes_be(&h.finalize()));
+        assert_eq!(derive_token(&k, hw, ""), paper_token_convert(&k, hw));
+        assert_ne!(restart_token(&k, hw), restart_token(&k, "0a1b2c3d|00:11:22:33:44:56"));
+        assert_ne!(restart_token(&k, hw), derive_token(&k, hw, "ST"));
     }
 
     #[test]

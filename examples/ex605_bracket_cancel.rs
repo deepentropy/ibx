@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_id: 0,
         copied_waits: env::var("IBX_COPIED_WAITS").is_ok_and(|v| v == "1"),
         code_provider: None,
+        restart_token_file: None,
     })?;
     if !client.account_id.starts_with("DU") {
         client.disconnect();

@@ -44,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_id: 198,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     })?;
     if !client.account_id.starts_with("DU") {
         client.disconnect();

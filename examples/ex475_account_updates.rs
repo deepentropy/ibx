@@ -54,6 +54,7 @@ fn main() {
         client_id: 0,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     }).unwrap();
     if !client.account_id.starts_with("DU") { client.disconnect(); panic!("not a paper account"); }
     let mut w = W { start: Instant::now(), values: 0, ends: 0 };

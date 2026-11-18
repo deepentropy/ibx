@@ -65,6 +65,7 @@ fn main() {
         client_id: 0,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     }).unwrap();
 
     let spy = Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };

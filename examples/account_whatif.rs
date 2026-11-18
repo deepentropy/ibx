@@ -89,6 +89,7 @@ fn connect() -> Result<EClient, Box<dyn std::error::Error>> {
         client_id: 0,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     })?)
 }
 

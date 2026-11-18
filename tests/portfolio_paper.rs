@@ -100,6 +100,7 @@ fn every_portfolio_row_is_applied() {
         ib_key_timeout_secs: ibx::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
         ib_key_token_sub_type: ibx::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
         code_provider: None,
+        restart_token_file: None,
     };
     println!("=== Portfolio rows (paper account) ===");
     let (gw, farm_conn, ccp_conn, hmds) = Gateway::connect(&cfg).expect("connect to paper failed");
@@ -231,6 +232,7 @@ fn eclient_delivers_update_portfolio() {
         client_id: 0,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     }).expect("connect to paper failed");
     if !client.account_id.starts_with("DU") {
         client.disconnect();

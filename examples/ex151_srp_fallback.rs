@@ -29,6 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ib_key_timeout_secs: ibx::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
         ib_key_token_sub_type: ibx::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
         code_provider: None,
+        restart_token_file: None,
     };
 
     println!("== Connecting to paper {} ...", host);
@@ -60,6 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use_ssl: gw.use_ssl,
         ssl_farms: gw.ssl_farms.clone(),
         second_factor: Default::default(),
+        restart_token: None,
     };
 
     drop(ccp);

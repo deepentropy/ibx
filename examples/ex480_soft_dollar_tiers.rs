@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_id: 0,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     })?;
     println!("logged in {} (account {})", if live { "LIVE" } else { "paper" }, client.account_id);
     client.req_soft_dollar_tiers(1, &mut W);

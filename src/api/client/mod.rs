@@ -23,6 +23,7 @@
 //!     client_id: 0,
 //!     copied_waits: false,
 //!     code_provider: None,
+//!     restart_token_file: None,
 //! }).unwrap();
 //!
 //! client.req_mkt_data(1, &Contract { con_id: 756733, symbol: "SPY".into(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() },
@@ -130,8 +131,18 @@ pub struct EClientConfig {
     /// A reconnect the server asks to log in again in full (its session
     /// token lapses about a day after the login) runs the second factor
     /// again with this provider, or the push approval; when the factor is
-    /// not given the session ends (ibx#761).
+    /// not given the session ends (ibx#761). Before that, when the server
+    /// offers restart tokens, the reconnect presents the restart token the
+    /// login announced, which the server takes for days with no password and
+    /// no second factor (ibx#762).
     pub code_provider: Option<crate::auth::session::CodeProvider>,
+    /// File of the restart token (ibx#762): a login with the password saves
+    /// there the restart token it announced, and a later connect of the same
+    /// user on the same machine presents it instead of the password and the
+    /// second factor, as the reference does when it restarts itself each
+    /// day. `None` (default): nothing is kept on disk. See
+    /// [`GatewayConfig::restart_token_file`].
+    pub restart_token_file: Option<std::path::PathBuf>,
 }
 
 /// Give the engine the caller's host and credentials for auto-reconnect. The
@@ -157,6 +168,7 @@ fn gateway_config(config: &EClientConfig) -> GatewayConfig {
         ib_key_timeout_secs: crate::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
         ib_key_token_sub_type: crate::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
         code_provider: config.code_provider.clone(),
+        restart_token_file: config.restart_token_file.clone(),
     }
 }
 

@@ -88,6 +88,7 @@ PARAM_DOCS: dict[str, str] = {
     "config": "Connection configuration (username, password, host, paper, core_id).",
     "ib_key_timeout_secs": "Live second-factor approval timeout in seconds. Default: no client timeout, the wait ends when the server answers or closes the login (about 18 min). Set it to fail fast on unattended live logins; ignored for paper.",
     "code_provider": "Callable for the typed-code second factor: called once during `connect()` with a dict `{\"display_id\", \"avth_url\"}`, returns the code as `str`. Default: wait for the mobile push approval. Ignored for paper.",
+    "restart_token_file": "Path of the file where a login with the password saves its restart token; a later `connect()` of the same user on the same machine presents it instead of the password and the second factor. Default: nothing kept on disk.",
     "ib_key_token_sub_type": "Override of the second-factor token sub-type. Default: the value the server lists for the session. Ignored for paper.",
     "host": "Server hostname.",
     "port": "Port number (unused — ibx connects directly).",

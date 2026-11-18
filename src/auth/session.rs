@@ -76,6 +76,8 @@ pub const FLAG_VERSION_PRESENT: u32 = 8;
 pub const FLAG_SOFT_TOKEN: u32 = 16;
 pub const FLAG_DEVICE_INFO: u32 = 32;
 pub const FLAG_PERMANENT_TOKEN: u32 = 64;
+/// The connect request presents a restart token (ibx#762).
+pub const FLAG_RESTART_TOKEN: u32 = 4194304;
 pub const FLAG_UNKNOWN_U: u32 = 4096;
 pub const FLAG_PAPER_CONNECT: u32 = 8192;
 pub const FLAG_FARM_NAME: u32 = 131072;

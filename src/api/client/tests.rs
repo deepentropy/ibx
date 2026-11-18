@@ -36,6 +36,7 @@ fn connect_caches_reconnect_credentials() {
         use_ssl: true,
         ssl_farms: String::new(),
         second_factor: Default::default(),
+        restart_token: None,
     });
     assert!(!hot_loop.has_reconnect_host(), "gateway leaves the host empty");
 
@@ -48,6 +49,7 @@ fn connect_caches_reconnect_credentials() {
         client_id: 0,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     };
     cache_reconnect_credentials(&mut hot_loop, &config);
     assert!(hot_loop.has_reconnect_host());
@@ -68,6 +70,7 @@ fn code_provider_of_the_config_reaches_the_login() {
         client_id: 0,
         copied_waits: false,
         code_provider: Some(provider),
+        restart_token_file: None,
     };
     let gw = gateway_config(&config);
     let given = gw.code_provider.expect("provider forwarded");

@@ -73,6 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_id: 0,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     })?;
 
     let contract = Contract { con_id, symbol: symbol.clone(), sec_type: "STK".into(), exchange: "SMART".into(), currency: "USD".into(), ..Default::default() };

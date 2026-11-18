@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_id: 0,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     }, 4096)?;
     println!("logged in paper (account {})", client.account_id);
 

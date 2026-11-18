@@ -174,11 +174,24 @@ impl EClient {
     /// temporary code ("6") needs one (ibx#350).
     ///
     /// About a day after the login the server no longer takes the session's
-    /// token: a reconnect after that logs in again in full, password then
-    /// second factor, with the same settings (``ib_key_timeout_secs``,
-    /// ``code_provider``). It asks the approval again (or calls
-    /// ``code_provider`` again) in the background; when the factor is not
-    /// given the session ends and ``connectionClosed`` is called (ibx#761).
+    /// token. A reconnect after that presents the restart token the login
+    /// announced (when the server offers them), which the server takes for
+    /// days after the login with the password: no password, no second
+    /// factor (ibx#762). When it is refused too, the reconnect logs in again
+    /// in full, password then second factor, with the same settings
+    /// (``ib_key_timeout_secs``, ``code_provider``). It asks the approval
+    /// again (or calls ``code_provider`` again) in the background; when the
+    /// factor is not given the session ends and ``connectionClosed`` is
+    /// called (ibx#761).
+    ///
+    /// ``restart_token_file``: a file path where a login with the password
+    /// saves its restart token. A later ``connect()`` of the same user on the
+    /// same machine presents it instead of the password and the second
+    /// factor, as the reference does when it restarts itself each day; when
+    /// the server no longer takes it, that ``connect()`` asks the password
+    /// and the second factor and saves the new token. ``None`` (default):
+    /// nothing is kept on disk. The file is a login credential: keep it where
+    /// only you can read it (ibx#762).
     ///
     /// Multiple ``EClient`` instances can run concurrently in one process; each
     /// owns its own state, sockets, and engine thread, and ``connect()`` does
@@ -197,7 +210,7 @@ impl EClient {
     /// order waits for). ``False`` (default): left out, for the lowest
     /// latency; ``True``: a session's timing comparable with the
     /// reference's. The pacing of requests stays on either way (ibx#564).
-    #[pyo3(signature = (host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None, code_provider=None, copied_waits=false))]
+    #[pyo3(signature = (host="cdc1.ibllc.com".to_string(), port=0, client_id=0, username="".to_string(), password="".to_string(), paper=true, core_id=None, ib_key_timeout_secs=None, ib_key_token_sub_type=None, code_provider=None, copied_waits=false, restart_token_file=None))]
     fn connect(
         &self,
         py: Python<'_>,
@@ -212,6 +225,7 @@ impl EClient {
         ib_key_token_sub_type: Option<String>,
         code_provider: Option<Py<PyAny>>,
         copied_waits: bool,
+        restart_token_file: Option<std::path::PathBuf>,
     ) -> PyResult<()> {
         if self.connected.load(Ordering::Relaxed) {
             return Err(PyRuntimeError::new_err("Already connected"));
@@ -228,6 +242,7 @@ impl EClient {
             ib_key_token_sub_type: ib_key_token_sub_type
                 .unwrap_or_else(|| crate::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into()),
             code_provider: code_provider.map(python_code_provider),
+            restart_token_file,
         };
 
         let result = py.detach(|| Gateway::connect(&config));

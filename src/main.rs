@@ -55,6 +55,7 @@ fn main() {
         client_id: 0,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     }).unwrap_or_else(|e| {
         eprintln!("Connection failed: {}", e);
         std::process::exit(1);

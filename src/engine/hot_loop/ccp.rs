@@ -663,6 +663,9 @@ pub(crate) struct CcpState {
     /// A logon update or a relogin changed the data permission stamp: the
     /// hot loop runs the reference's permission change (ibx#421).
     pub(crate) permissions_changed: bool,
+    /// The server answered the announce of the restart token with an error
+    /// text: the session forgets the token (ibx#762).
+    pub(crate) restart_token_refused: bool,
     /// The SSL farm list (8449) of the last logon update, for the hot
     /// loop (ibx#276); None when no update came since it was taken.
     pub(crate) ssl_farms_update: Option<String>,
@@ -1255,6 +1258,7 @@ impl CcpState {
             data_permissions: None,
             deny_api: false,
             permissions_changed: false,
+            restart_token_refused: false,
             ssl_farms_update: None,
             ccp_sign_key: Vec::new(),
             ccp_sign_iv: std::sync::Mutex::new(Vec::new()),
@@ -1712,6 +1716,18 @@ impl CcpState {
                             self.handle_schedule_reply(msg, shared, event_tx);
                             let waits = &self.order_zone_waits;
                             super::order_builder::zones_known(context, |con_id| waits.iter().any(|(_, c)| *c == con_id));
+                        }
+                        "115" => {
+                            // The answer to the announce of the restart token:
+                            // an error text when the server did not take it
+                            // (ibx#762).
+                            match parsed.get(&58).copied().filter(|t| !t.is_empty()) {
+                                Some(text) => {
+                                    log::warn!("Restart token refused by the server: {}", text);
+                                    self.restart_token_refused = true;
+                                }
+                                None => log::info!("Restart token taken by the server"),
+                            }
                         }
                         _ => {}
                     }
@@ -8152,6 +8168,25 @@ as a \"Professional\" client and are exempt from this restriction, see https://e
         assert_eq!(shared.reference.drain_contract_details().len(), 5);
         assert_eq!(shared.reference.drain_contract_details_end(), vec![22]);
         assert!(ccp.pending_schedule_pair.is_empty());
+    }
+
+    // ibx#762: the answer to the announce of the restart token. Taken (no
+    // error text, observed on paper 18/11/2026): the token is kept; an
+    // error text: the session forgets it.
+    #[test]
+    fn a_refused_restart_token_announce_is_flagged() {
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let mut ccp = CcpState::new();
+        let (client, _server) = socket_pair();
+        let mut conn = Some(Connection::new_mem(client));
+        let mut hb = HeartbeatState::new();
+        let taken = pipe_msg("35=U|52=20261118-10:24:33|6040=115");
+        ccp.process_ccp_message(&taken, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(!ccp.restart_token_refused);
+        let refused = pipe_msg("35=U|52=20261118-10:24:33|6040=115|58=not allowed");
+        ccp.process_ccp_message(&refused, &mut conn, &mut context, &shared, &None, &mut hb, "DU1");
+        assert!(ccp.restart_token_refused);
     }
 
     /// The class named by a permission question, or None for another

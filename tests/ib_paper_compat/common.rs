@@ -139,6 +139,7 @@ pub(super) fn get_config() -> Option<GatewayConfig> {
         ib_key_timeout_secs: ibx::auth::session::IB_KEY_DEFAULT_TIMEOUT_SECS,
         ib_key_token_sub_type: ibx::auth::session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
         code_provider: None,
+        restart_token_file: None,
     })
 }
 
@@ -209,6 +210,7 @@ pub(super) fn as_client_session(hot_loop: &mut HotLoop, gw: &gateway::Gateway, c
         use_ssl: gw.use_ssl,
         ssl_farms: gw.ssl_farms.clone(),
         second_factor: Default::default(),
+        restart_token: gw.restart_token.clone(),
     });
 }
 

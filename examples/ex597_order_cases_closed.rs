@@ -954,6 +954,7 @@ fn session(case: &str, base: Option<i64>, out_dir: &str) -> Result<(), Box<dyn s
         client_id: 198,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     };
     let client = match EClient::connect(&config) {
         Ok(c) => c,

@@ -442,6 +442,7 @@ pub unsafe extern "C" fn ibx_connect(config: *const IbxConnectConfig, error: *mu
         client_id: config.client_id,
         copied_waits: config.copied_waits,
         code_provider: config.code_provider.map(|call| code_provider(CodeSource { call, user: config.code_user })),
+        restart_token_file: None,
     };
     // On a thread of its own, with the engine's stack: the caller's thread
     // may have a small one, and the login builds the engine on its stack.

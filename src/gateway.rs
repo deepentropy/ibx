@@ -260,21 +260,69 @@ pub(crate) fn misc_urls_answer(payload: &[u8]) -> io::Result<MiscUrls> {
         .collect())
 }
 
+/// Token mask bit of the session token in the port type change.
+pub const TOKEN_MASK_SESSION: u64 = 2;
+/// Token mask bit of the restart token in the port type change (ibx#762).
+pub const TOKEN_MASK_RESTART: u64 = 256;
+
 /// The port type change, as the reference builds it: the
 /// connection's version (the auth start's), mode 0, then by version an
-/// empty field (27), the token mask (31; 2, the session token), the read-only flag 0
-/// (35) and the short hashes of the tokens (49; the session token's, left
+/// empty field (27), the token mask (31), the read-only flag 0
+/// (35) and the short hashes of the tokens, comma separated (49; left
 /// out when there is none). Captured `50;526;0;;2;0;{hash};` (ibx#423).
-pub fn new_comm_port(version: u32, token_hash: &str) -> String {
+/// [`announced_tokens`] gives the mask and the hashes.
+pub fn new_comm_port(version: u32, token_mask: u64, token_hashes: &str) -> String {
     let mut text = format!("{};{};0;", version, ns::NS_NEWCOMMPORTTYPE);
     if version >= 27 { text.push(';'); }
-    if version >= 31 { text.push_str("2;"); }
+    if version >= 31 { text.push_str(&token_mask.to_string()); text.push(';'); }
     if version >= 35 { text.push_str("0;"); }
-    if version >= 49 && !token_hash.is_empty() {
-        text.push_str(token_hash);
+    if version >= 49 && !token_hashes.is_empty() {
+        text.push_str(token_hashes);
         text.push(';');
     }
     text
+}
+
+/// The token mask and the short hashes a login announces in its port type
+/// change. A login with the password announces its session token, and the
+/// restart token derived from it when the server offers restart tokens: both
+/// bits of the mask and the hashes of the restart token then of the session
+/// token, as the reference does when its daily restart is on. A login made with a
+/// restart token announces only the session token of that login
+/// ([`restart_session_token`]) (ibx#762).
+pub fn announced_tokens(session_token: &BigUint, restart_token: Option<&BigUint>) -> (u64, String) {
+    match restart_token {
+        Some(restart) => (
+            TOKEN_MASK_RESTART | TOKEN_MASK_SESSION,
+            format!("{},{}", token_short_hash(restart), token_short_hash(session_token)),
+        ),
+        None => (TOKEN_MASK_SESSION, token_short_hash(session_token)),
+    }
+}
+
+/// The session token of a login made with `restart_token`: the farms log
+/// on with it and the port type change announces it (ibx#762).
+pub fn restart_session_token(restart_token: &BigUint, hw_info: &str) -> BigUint {
+    crate::auth::srp::derive_token(restart_token, hw_info, "ST")
+}
+
+/// The announce of the restart token to the server, sent on the auth link
+/// after a login with the password: both bits of the token mask, the short
+/// hashes of the session token then of the restart token. The server answers with no
+/// error text when it takes them; without this announce a later login that
+/// presents the restart token is asked the password (observed on paper,
+/// 18/11/2026) (ibx#762).
+pub fn build_restart_token_announce(session_token: &BigUint, restart_token: &BigUint, seq: u32) -> Vec<u8> {
+    let now = chrono_free_timestamp();
+    let mask = (TOKEN_MASK_RESTART | TOKEN_MASK_SESSION).to_string();
+    let hashes = format!("{},{}", token_short_hash(session_token), token_short_hash(restart_token));
+    fix_build(&[(35, "U"), (52, &now), (6040, "114"), (8030, "1"), (8207, &mask), (8483, &hashes)], seq)
+}
+
+/// The connect response offers restart tokens: its feature list (the
+/// fourth field) names them (ibx#762).
+pub fn offers_restart_tokens(connect_response_fields: &[&str]) -> bool {
+    connect_response_fields.get(4).is_some_and(|f| f.split(',').any(|x| x.trim() == "TST"))
 }
 
 /// Build auth server logon message.
@@ -296,17 +344,24 @@ pub fn new_comm_port(version: u32, token_hash: &str) -> String {
 /// `Europe/Paris`), as the reference client does; `IBX_TZ` overrides it and
 /// `UTC` is the fallback when the system zone has no IANA name.
 pub fn build_ccp_logon(hw_info: &str, encoded: &str, heartbeat: u64, seq: u32) -> Vec<u8> {
-    ccp_logon(hw_info, encoded, heartbeat, seq, "")
+    ccp_logon(hw_info, encoded, heartbeat, seq, "", false)
+}
+
+/// The auth server logon of a login with the restart token: it names the
+/// restart, as the reference's first logon after its daily restart
+/// (ibx#762).
+pub fn build_ccp_restart_logon(hw_info: &str, encoded: &str, heartbeat: u64, seq: u32) -> Vec<u8> {
+    ccp_logon(hw_info, encoded, heartbeat, seq, "", true)
 }
 
 /// Logon for a reconnect of the same server session: the fresh logon plus
 /// the session epoch of the previous logon reply, in the reference order.
 /// An empty epoch gives the fresh logon (ibx#422).
 pub fn build_ccp_reconnect_logon(hw_info: &str, encoded: &str, heartbeat: u64, seq: u32, session_epoch: &str) -> Vec<u8> {
-    ccp_logon(hw_info, encoded, heartbeat, seq, session_epoch)
+    ccp_logon(hw_info, encoded, heartbeat, seq, session_epoch, false)
 }
 
-fn ccp_logon(hw_info: &str, encoded: &str, heartbeat: u64, seq: u32, session_epoch: &str) -> Vec<u8> {
+fn ccp_logon(hw_info: &str, encoded: &str, heartbeat: u64, seq: u32, session_epoch: &str, restart: bool) -> Vec<u8> {
     let now = chrono_free_timestamp();
     let tz = machine_time_zone();
     let hb_str = heartbeat.to_string();
@@ -330,6 +385,11 @@ fn ccp_logon(hw_info: &str, encoded: &str, heartbeat: u64, seq: u32, session_epo
         (6351, &hw_field),
         (6397, "1"),
         (6947, &tz),
+    ]);
+    if restart {
+        fields.push((8322, "AutoRestart"));
+    }
+    fields.extend_from_slice(&[
         (8361, "(rolling)"),
         (8098, "0"),
     ]);
@@ -898,6 +958,10 @@ pub struct ReconnectAuth {
     /// The second-factor settings of the first login, for a reconnect the
     /// server asks to log in again in full (ibx#761).
     pub second_factor: SecondFactorSettings,
+    /// The restart token the session announced: a reconnect the server no
+    /// longer takes with the session token presents it before asking the
+    /// password and the second factor again (ibx#762).
+    pub restart_token: Option<BigUint>,
 }
 
 /// The second-factor settings of a login ([`GatewayConfig`]), kept for the
@@ -910,6 +974,9 @@ pub struct SecondFactorSettings {
     pub ib_key_token_sub_type: String,
     /// [`GatewayConfig::code_provider`].
     pub code_provider: Option<session::CodeProvider>,
+    /// [`GatewayConfig::restart_token_file`]: a reconnect that logged in
+    /// again with the password saves its new restart token there (ibx#762).
+    pub restart_token_file: Option<std::path::PathBuf>,
 }
 
 impl SecondFactorSettings {
@@ -919,6 +986,7 @@ impl SecondFactorSettings {
             ib_key_timeout_secs: config.ib_key_timeout_secs,
             ib_key_token_sub_type: config.ib_key_token_sub_type.clone(),
             code_provider: config.code_provider.clone(),
+            restart_token_file: config.restart_token_file.clone(),
         }
     }
 }
@@ -942,8 +1010,11 @@ pub struct CcpReconnect {
     pub logon: LogonValues,
     /// The key of the password step, when the server asked this reconnect
     /// to log in again in full: it replaces the cached session key, as a
-    /// first login sets it (ibx#761).
+    /// first login sets it (ibx#761). After a login with the restart token,
+    /// the session token of that login (ibx#762).
     pub session_key: Option<BigUint>,
+    /// The new restart token a full login announced (ibx#762).
+    pub restart_token: Option<BigUint>,
 }
 
 /// Full gateway connection.
@@ -957,6 +1028,12 @@ pub struct Gateway {
     /// aliases (ibx#507).
     pub account_aliases: Vec<(String, String)>,
     pub session_token: BigUint,
+    /// The restart token this login announced, when the server offers
+    /// restart tokens, or the one it presented (ibx#762).
+    pub restart_token: Option<BigUint>,
+    /// The login presented the saved restart token, with no password and no
+    /// second factor (ibx#762).
+    pub restart_login: bool,
     /// Session ID surfaced to webapp REST clients as `x-ccp-session-id`.
     /// Sourced from the post-auth logon ACK, falling back to the locally generated
     /// session ID when the gateway does not echo one back.
@@ -1398,10 +1475,44 @@ pub fn reconnect_ccp_session(auth: &ReconnectAuth) -> io::Result<CcpReconnect> {
 }
 
 /// [`reconnect_ccp_session`] to `host`, one of [`ccp_reconnect_hosts`].
+///
+/// The reconnect presents the session token. When the server no longer
+/// takes it (it lapses about a day after the login) and the session
+/// announced a restart token, a second connection presents the restart
+/// token, which the server takes for days after the login with the password,
+/// with no password and no second factor. Only when that one is refused
+/// too does the reconnect log in again in full (ibx#761, ibx#762).
 pub fn reconnect_ccp_via(auth: &ReconnectAuth, host: &str) -> io::Result<CcpReconnect> {
-    let token_hash = token_short_hash(&auth.session_token);
-    reconnect_ccp_attempt(auth, &token_hash, host, 0)
+    match reconnect_ccp_attempt(auth, ReconnectToken::Session, host, 0) {
+        Err(e) if e.get_ref().is_some_and(|i| i.is::<SessionTokenRefused>()) => {
+            log::info!("CCP reconnect: the session token is no longer taken, presenting the restart token");
+            reconnect_ccp_attempt(auth, ReconnectToken::Restart, host, 0)
+        }
+        r => r,
+    }
 }
+
+/// The token a reconnect presents (ibx#762).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ReconnectToken {
+    /// The session token of the last login.
+    Session,
+    /// The restart token the session announced.
+    Restart,
+}
+
+/// The server asked a reconnect that presented the session token to log in
+/// in full, and the session has a restart token to present instead.
+#[derive(Debug)]
+struct SessionTokenRefused;
+
+impl std::fmt::Display for SessionTokenRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the server no longer takes the session token")
+    }
+}
+
+impl std::error::Error for SessionTokenRefused {}
 
 /// Hosts a CCP reconnect cycles through, as the reference does (ibx#399):
 /// the primary, then its backups `{first label}-hb1` and `{first label}-hb2`
@@ -1427,7 +1538,7 @@ pub fn ccp_reconnect_host(host: &str, attempt: u32) -> String {
     hosts.swap_remove(i)
 }
 
-fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, depth: u32) -> io::Result<CcpReconnect> {
+fn reconnect_ccp_attempt(auth: &ReconnectAuth, kind: ReconnectToken, host: &str, depth: u32) -> io::Result<CcpReconnect> {
     if depth > 5 {
         return Err(io::Error::new(io::ErrorKind::Other, "CCP reconnect: too many redirects"));
     }
@@ -1441,12 +1552,17 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     let mut tls = LinkStream::connect(host, auth_port, auth.use_ssl, Duration::from_secs(TIMEOUT_SSL_AUTH), false)?;
     let mut channel = SecureChannel::new();
 
-    // CONNECT_REQUEST with SOFT_TOKEN flag + token hash (field 9)
+    // The token presented, its flag and its short hash (field 9).
+    let (token, token_flag) = match (kind, auth.restart_token.as_ref()) {
+        (ReconnectToken::Restart, Some(restart)) => (restart, session::FLAG_RESTART_TOKEN),
+        _ => (&auth.session_key, session::FLAG_SOFT_TOKEN),
+    };
+    let token_hash = &token_short_hash(if token_flag == session::FLAG_SOFT_TOKEN { &auth.session_token } else { token });
     let flags = session::FLAG_OK_TO_REDIRECT
         | session::FLAG_VERSION
         | session::FLAG_VERSION_PRESENT
         | session::FLAG_DEVICE_INFO
-        | session::FLAG_SOFT_TOKEN
+        | token_flag
         | session::FLAG_UNKNOWN_U
         | session::FLAG_UNKNOWN_19
         | session::FLAG_UNKNOWN_20
@@ -1483,7 +1599,7 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
             // reconnect thread, and an instant re-dial chain risks the same
             // rate limiting the backoff ladder exists for.
             std::thread::sleep(Duration::from_secs(2));
-            return reconnect_ccp_attempt(auth, token_hash, &redirect_host, depth + 1);
+            return reconnect_ccp_attempt(auth, kind, &redirect_host, depth + 1);
         }
         Err(e) => return Err(e),
     };
@@ -1491,24 +1607,27 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     // The soft flag of the auth start selects the session-token step, as in
     // the reference; it is read only from a real auth start (ibx#353).
     let mut new_session_key = None;
-    let mut new_token_hash: Option<String> = None;
+    let mut new_restart_token = None;
+    let mut announced_session: Option<BigUint> = None;
+    // What the port type change announces: the session token, and the
+    // restart token when the session has one and was not itself opened with
+    // it, as the reference announces them (ibx#762).
+    let restart_login = auth.restart_token.as_ref()
+        .is_some_and(|r| restart_session_token(r, &auth.hw_info) == auth.session_token);
+    let (mut token_mask, mut token_hashes) = announced_tokens(
+        &auth.session_token, auth.restart_token.as_ref().filter(|_| !restart_login));
     if auth_start.soft_flag != 0 {
         // SOFT_TOKEN challenge-response (4 states)
-        do_ccp_soft_token(&mut tls, &auth.session_key)?;
-
-        // Consume AUTH_FINISH (msg_id=771) after SOFT_TOKEN PASSED
-        match session::recv_msg(&mut tls) {
-            Ok(session::RecvMsg::Xyz { state, fields, .. }) => {
-                let result = fields.iter().rev().find(|s| !s.is_empty()).map(|s| s.as_str()).unwrap_or("");
-                log::info!("CCP reconnect AUTH_FINISH: state={} result={}", state, result);
-            }
-            Ok(session::RecvMsg::Ns { msg_type, .. }) => {
-                log::info!("CCP reconnect post-auth NS type={}", msg_type);
-            }
-            Err(e) => {
-                log::warn!("CCP reconnect AUTH_FINISH recv: {}", e);
-            }
+        do_ccp_soft_token(&mut tls, token)?;
+        if token_flag == session::FLAG_RESTART_TOKEN {
+            // A login with the restart token: its session token is derived
+            // from the restart token, and the farms log on with it.
+            let key = restart_session_token(token, &auth.hw_info);
+            (token_mask, token_hashes) = announced_tokens(&key, None);
+            new_session_key = Some(key);
         }
+
+        consume_auth_finish(&mut tls, "CCP reconnect");
     } else {
         // The server no longer takes the session token (it lapses about a
         // day after the login) and asks for a full login: the password step
@@ -1516,14 +1635,23 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
         // as the first login does. Without the second factor the server of a
         // live account never starts the session, and every attempt failed
         // the same way (ibx#761).
+        if kind == ReconnectToken::Session && auth.restart_token.is_some() {
+            return Err(io::Error::other(SessionTokenRefused));
+        }
         log::info!("CCP reconnect: server requires SRP, running handshake with cached credentials");
         let key = do_srp(&mut tls, &auth.username, &auth.password)?;
         tls.tcp().set_read_timeout(Some(Duration::from_millis(FARM_LOGON_POLL_MS)))?;
         let token = second_factor_after_password(&mut tls, &auth_start, auth.paper, &auth.username, &auth.second_factor)
             .map_err(reconnect_second_factor_error)?;
         // The port type change carries the new session's token, as on the
-        // first login.
-        new_token_hash = Some(token_short_hash(token.as_ref().unwrap_or(&key)));
+        // first login, and the new restart token when the server offers
+        // them (ibx#762).
+        let session = token.clone().unwrap_or_else(|| key.clone());
+        if auth.restart_token.is_some() {
+            new_restart_token = Some(crate::auth::srp::restart_token(&session, &auth.hw_info));
+        }
+        (token_mask, token_hashes) = announced_tokens(&session, new_restart_token.as_ref());
+        announced_session = Some(session);
         new_session_key = Some(key);
     }
 
@@ -1531,7 +1659,7 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     // up to the reconnect budget: the server answers a reconnect only once
     // it has let the lost session go, often past 10 s (ibx#759).
     tls.tcp().set_read_timeout(Some(Duration::from_secs_f64(TIMEOUT_FIX_LOGON)))?;
-    let newcomm = new_comm_port(auth_start.version, new_token_hash.as_deref().unwrap_or(token_hash));
+    let newcomm = new_comm_port(auth_start.version, token_mask, &token_hashes);
     let deadline = std::time::Instant::now() + Duration::from_secs_f64(TIMEOUT_RECONNECT_DATA_START);
     reconnect_data_start(&mut tls, &mut channel, !auth.use_ssl && !refused, newcomm.as_bytes(), deadline)?;
     tls.tcp().set_read_timeout(None)?;
@@ -1574,10 +1702,29 @@ fn reconnect_ccp_attempt(auth: &ReconnectAuth, token_hash: &str, host: &str, dep
     }
     tls.tcp().set_read_timeout(None)?;
 
+    // After a full login, the announce of its new restart token (ibx#762).
+    let mut seq = 1; // the logon
+    if let (Some(restart), Some(key)) = (&new_restart_token, &new_session_key) {
+        seq += 1;
+        tls.write_all(&build_restart_token_announce(announced_session.as_ref().unwrap_or(key), restart, seq))?;
+        tls.flush()?;
+        log::info!("CCP reconnect: restart token announced");
+        if let Some(path) = &auth.second_factor.restart_token_file {
+            crate::auth::restart_token::SavedRestartToken {
+                username: auth.username.clone(),
+                paper: auth.paper,
+                session_id: auth.server_session_id.clone(),
+                hw_info: auth.hw_info.clone(),
+                token: restart.clone(),
+            }.save(path);
+        }
+    }
+
     let mut conn = tls.into_connection()?;
-    conn.seq = 1; // the logon
+    conn.seq = seq;
     log::info!("CCP reconnect complete (seq={})", conn.seq);
-    Ok(CcpReconnect { conn, session_epoch, ns_secure_refused: refused, logon, session_key: new_session_key })
+    Ok(CcpReconnect { conn, session_epoch, ns_secure_refused: refused, logon, session_key: new_session_key,
+        restart_token: new_restart_token })
 }
 
 
@@ -1783,6 +1930,23 @@ fn reconnect_second_factor_error(e: io::Error) -> io::Error {
 }
 
 /// SOFT_TOKEN challenge-response over the TLS/NS channel (for CCP reconnect).
+/// Read the auth finish (msg_id=771) that follows a passed session-token
+/// step; what comes is logged under `what`.
+fn consume_auth_finish<S: Read + Write>(stream: &mut S, what: &str) {
+    match session::recv_msg(stream) {
+        Ok(session::RecvMsg::Xyz { state, fields, .. }) => {
+            let result = fields.iter().rev().find(|s| !s.is_empty()).map(|s| s.as_str()).unwrap_or("");
+            log::info!("{} AUTH_FINISH: state={} result={}", what, state, result);
+        }
+        Ok(session::RecvMsg::Ns { msg_type, .. }) => {
+            log::info!("{} post-auth NS type={}", what, msg_type);
+        }
+        Err(e) => {
+            log::warn!("{} AUTH_FINISH recv: {}", what, e);
+        }
+    }
+}
+
 fn do_ccp_soft_token<S: Read + Write>(stream: &mut S, session_key: &BigUint) -> io::Result<()> {
     use crate::protocol::xyz;
 
@@ -1867,6 +2031,16 @@ pub struct GatewayConfig {
     /// [`session::CodeProvider`] for the contract; `None` leaves behavior
     /// unchanged (push approval).
     pub code_provider: Option<session::CodeProvider>,
+    /// File of the restart token (ibx#762). `None` (the default): nothing
+    /// is kept on disk. Set: a login with the password saves there the
+    /// restart token it announced, and a later login of the same user on
+    /// the same machine presents it instead of the password and the second
+    /// factor, as the reference does when it restarts itself each day. The
+    /// server takes it for days after the login with the password; when it
+    /// no longer does, the login asks the password and the second factor,
+    /// and saves the new token. The file is a login credential: keep it
+    /// where only its owner can read it.
+    pub restart_token_file: Option<std::path::PathBuf>,
 }
 
 impl Gateway {
@@ -1931,6 +2105,11 @@ impl Gateway {
 
         // CONNECT_REQUEST: in clear inside TLS, or after the key exchange
         // on the plain socket.
+        // A saved restart token of this user and machine is presented, with
+        // the session id it was announced in and its short hash, as the
+        // reference's login after its restart (ibx#762).
+        let saved = config.restart_token_file.as_deref().and_then(|path|
+            crate::auth::restart_token::SavedRestartToken::read(path, &config.username, config.paper, &hw_info));
         let flags = session::FLAG_OK_TO_REDIRECT
             | session::FLAG_VERSION
             | session::FLAG_VERSION_PRESENT
@@ -1938,14 +2117,15 @@ impl Gateway {
             | session::FLAG_UNKNOWN_U
             | session::FLAG_UNKNOWN_19
             | session::FLAG_UNKNOWN_20
+            | if saved.is_some() { session::FLAG_RESTART_TOKEN } else { 0 }
             | if config.paper { session::FLAG_PAPER_CONNECT } else { 0 };
         let display_name = if config.paper {
             format!("S{}", config.username)
         } else {
             config.username.clone()
         };
-        let session_id = session::get_session_id();
-        let connect_req = format!(
+        let session_id = saved.as_ref().map_or_else(session::get_session_id, |s| s.session_id.clone());
+        let mut connect_req = format!(
             "{};{};{};{};{};{};{};{};{};",
             NS_VERSION_MIN,
             ns::NS_CONNECT_REQUEST,
@@ -1957,6 +2137,11 @@ impl Gateway {
             session_id,
             encoded
         );
+        if let Some(s) = &saved {
+            connect_req.push_str(&token_short_hash(&s.token));
+            connect_req.push(';');
+            log::info!("Presenting the saved restart token (session={})", s.session_id);
+        }
 
         // Receive AUTH_START (may get a redirect instead for paper accounts).
         // When the server refuses the encryption with the permission to go
@@ -1979,18 +2164,33 @@ impl Gateway {
         // accepted key exchange (the mode without TLS, ibx#423).
         let secure = !use_ssl && !refused;
 
-        // Authentication
-        log::info!("Starting auth for {}", config.username);
-        let session_key = do_srp(&mut tls, &config.username, &config.password)?;
-        log::info!("Auth complete");
+        // Authentication: the session-token step with the saved restart
+        // token when the server takes it (its auth start asks that step),
+        // else the password and the second factor (ibx#762).
+        let restart_login = saved.filter(|_| auth_start.soft_flag != 0).map(|s| s.token);
+        let (session_key, soft_token) = match &restart_login {
+            Some(token) => {
+                log::info!("Starting auth for {} with the restart token", config.username);
+                do_ccp_soft_token(&mut tls, token)?;
+                consume_auth_finish(&mut tls, "Restart login");
+                // The session token of a login with the restart token.
+                (restart_session_token(token, &hw_info), None)
+            }
+            None => {
+                log::info!("Starting auth for {}", config.username);
+                let session_key = do_srp(&mut tls, &config.username, &config.password)?;
+                log::info!("Auth complete");
 
-        // The second factor of the account, after its password step
-        // (ibx#761: the same step as a reconnect the server asks to log in
-        // again in full). Short read timeout: the wait checks the code
-        // provider and the deadline between reads (ibx#244).
-        tls.tcp().set_read_timeout(Some(Duration::from_millis(FARM_LOGON_POLL_MS)))?;
-        let soft_token = second_factor_after_password(
-            &mut tls, &auth_start, config.paper, &config.username, &SecondFactorSettings::of(config))?;
+                // The second factor of the account, after its password step
+                // (ibx#761: the same step as a reconnect the server asks to log in
+                // again in full). Short read timeout: the wait checks the code
+                // provider and the deadline between reads (ibx#244).
+                tls.tcp().set_read_timeout(Some(Duration::from_millis(FARM_LOGON_POLL_MS)))?;
+                let soft_token = second_factor_after_password(
+                    &mut tls, &auth_start, config.paper, &config.username, &SecondFactorSettings::of(config))?;
+                (session_key, soft_token)
+            }
+        };
 
         // Receive post-auth messages (encrypted via 534) and wait for the
         // data-farm start (NS_FIX_START). A transient stall here must not be
@@ -2003,6 +2203,7 @@ impl Gateway {
         let fix_deadline = std::time::Instant::now()
             + std::time::Duration::from_secs_f64(TIMEOUT_FIX_LOGON * 2.0);
         let mut fix_ready = false;
+        let mut restart_token = None;
         while std::time::Instant::now() < fix_deadline {
             let (payload, _) = match ns::ns_recv(&mut tls) {
                 Ok(r) => r,
@@ -2049,8 +2250,22 @@ impl Gateway {
                 // key, so its text is not logged (ibx#283).
                 log::info!("Post-auth: connect response received");
                 // Send port type change (required before data start)
-                let newcomm = new_comm_port(auth_start.version,
-                    &token_short_hash(soft_token.as_ref().unwrap_or(&session_key)));
+                // The restart token, when the server offers them: a later
+                // login of this machine presents it instead of the password
+                // and the second factor (ibx#762).
+                // A login with the restart token keeps it and announces only
+                // its session token, as the reference after its restart.
+                let token = soft_token.as_ref().unwrap_or(&session_key);
+                let (mask, hashes) = if let Some(restart) = &restart_login {
+                    restart_token = Some(restart.clone());
+                    announced_tokens(token, None)
+                } else {
+                    if offers_restart_tokens(&inner_parts) {
+                        restart_token = Some(crate::auth::srp::restart_token(token, &hw_info));
+                    }
+                    announced_tokens(token, restart_token.as_ref())
+                };
+                let newcomm = new_comm_port(auth_start.version, mask, &hashes);
                 session::send_ns(&mut tls, &mut channel, secure, newcomm.as_bytes())?;
                 log::info!("Port type change sent");
             } else if msg_type == ns::NS_FIX_START {
@@ -2076,7 +2291,11 @@ impl Gateway {
         }
 
         // --- Phase 2: Auth server logon (over TLS) ---
-        let logon_msg = build_ccp_logon(&hw_info, &encoded, CCP_HEARTBEAT, 1);
+        let logon_msg = if restart_login.is_some() {
+            build_ccp_restart_logon(&hw_info, &encoded, CCP_HEARTBEAT, 1)
+        } else {
+            build_ccp_logon(&hw_info, &encoded, CCP_HEARTBEAT, 1)
+        };
         log::info!("Sending auth logon ({} bytes)", logon_msg.len());
         tls.write_all(&logon_msg)?;
         tls.flush()?;
@@ -2573,6 +2792,14 @@ impl Gateway {
             ccp_seq,
         );
         tls.write_all(&core_msg)?;
+        // The announce of the restart token, after a login with the
+        // password (ibx#762).
+        if let Some(restart) = restart_token.as_ref().filter(|_| restart_login.is_none()) {
+            ccp_seq += 1;
+            tls.write_all(&build_restart_token_announce(
+                soft_token.as_ref().unwrap_or(&session_key), restart, ccp_seq))?;
+            log::info!("Restart token announced");
+        }
         tls.flush()?;
         log::info!(
             "CCP post-burst grace messages sent (AR+H+PLR+DR+74), seq now {}",
@@ -2674,6 +2901,8 @@ impl Gateway {
             managed_accounts,
             account_aliases,
             session_token: session_key,
+            restart_token,
+            restart_login: restart_login.is_some(),
             server_session_id,
             settings_object_key,
             heartbeat_interval,
@@ -2726,6 +2955,17 @@ impl Gateway {
             version_cutoff_date,
             max_backfill_years,
         };
+        // The restart token saved for the next program of this machine
+        // (ibx#762).
+        if let (Some(path), Some(token)) = (&config.restart_token_file, &gw.restart_token) {
+            crate::auth::restart_token::SavedRestartToken {
+                username: config.username.clone(),
+                paper: config.paper,
+                session_id: gw.server_session_id.clone(),
+                hw_info: gw.hw_info.clone(),
+                token: token.clone(),
+            }.save(path);
+        }
         Ok((gw, farm_conn, ccp_conn, hmds_conn))
     }
 
@@ -2860,6 +3100,7 @@ impl Gateway {
             use_ssl: self.use_ssl,
             ssl_farms: self.ssl_farms.clone(),
             second_factor: self.second_factor.clone(),
+            restart_token: self.restart_token.clone(),
         };
         if let Some(tx) = event_tx.as_ref() {
             let _ = tx.send(Event::GatewayLogon {
@@ -3844,16 +4085,59 @@ mod tests {
         assert!(!misc_urls_wanted(Some("cdc1.example"), "cdc1.example", true));
     }
 
+    // ibx#762: the tokens a login announces. A login with the password
+    // announces the restart token then the session token, both bits; a
+    // login with the restart token announces its session token alone.
+    #[test]
+    fn announced_tokens_by_kind_of_login() {
+        let k = BigUint::from(123_456_789u64);
+        let hw = "0a1b2c3d|00:11:22:33:44:55";
+        let restart = crate::auth::srp::restart_token(&k, hw);
+        assert_eq!(announced_tokens(&k, None), (2, token_short_hash(&k)));
+        assert_eq!(announced_tokens(&k, Some(&restart)),
+            (258, format!("{},{}", token_short_hash(&restart), token_short_hash(&k))));
+        assert_eq!(new_comm_port(50, 258, "a1,b2"), "50;526;0;;258;0;a1,b2;");
+        let session = restart_session_token(&restart, hw);
+        assert_ne!(session, restart);
+        assert_eq!(session, crate::auth::srp::derive_token(&restart, hw, "ST"));
+    }
+
+    // ibx#762: the announce of the restart token, as the paper server took
+    // it on 18/11/2026 (answer with no error text).
+    #[test]
+    fn restart_token_announce_message() {
+        let k = BigUint::from(123_456_789u64);
+        let restart = BigUint::from(987_654_321u64);
+        let fields = fix_parse(&build_restart_token_announce(&k, &restart, 7));
+        assert_eq!(fields[&35], "U");
+        assert_eq!(fields[&34].parse::<u32>().unwrap(), 7);
+        assert!(fields.contains_key(&52), "the server refuses a message without its time");
+        assert_eq!(fields[&6040], "114");
+        assert_eq!(fields[&8030], "1");
+        assert_eq!(fields[&8207], "258");
+        assert_eq!(fields[&8483], format!("{},{}", token_short_hash(&k), token_short_hash(&restart)));
+    }
+
+    // ibx#762: the connect response's feature list offers restart tokens
+    // (as recorded).
+    #[test]
+    fn restart_tokens_offered_by_the_connect_response() {
+        assert!(offers_restart_tokens(&["50", "523", "h:4000", "0", "TST,ONELOGON", ""]));
+        assert!(offers_restart_tokens(&["50", "523", "h:4000", "0", "TST"]));
+        assert!(!offers_restart_tokens(&["50", "523", "h:4000", "0", "ONELOGON"]));
+        assert!(!offers_restart_tokens(&["50", "523", "h:4000", "0"]));
+    }
+
     // ibx#423: the port type change as the reference sent it on its
     // logins of 30/09 and 02/10/2026; older versions have fewer fields.
     #[test]
     fn port_type_change_carries_the_token_hash() {
-        assert_eq!(new_comm_port(50, "f22e2dc4"), "50;526;0;;2;0;f22e2dc4;");
-        assert_eq!(new_comm_port(50, "287b51"), "50;526;0;;2;0;287b51;");
-        assert_eq!(new_comm_port(50, ""), "50;526;0;;2;0;");
-        assert_eq!(new_comm_port(38, "f22e2dc4"), "38;526;0;;2;0;");
-        assert_eq!(new_comm_port(32, "f22e2dc4"), "32;526;0;;2;");
-        assert_eq!(new_comm_port(26, "f22e2dc4"), "26;526;0;");
+        assert_eq!(new_comm_port(50, 2, "f22e2dc4"), "50;526;0;;2;0;f22e2dc4;");
+        assert_eq!(new_comm_port(50, 2, "287b51"), "50;526;0;;2;0;287b51;");
+        assert_eq!(new_comm_port(50, 2, ""), "50;526;0;;2;0;");
+        assert_eq!(new_comm_port(38, 2, "f22e2dc4"), "38;526;0;;2;0;");
+        assert_eq!(new_comm_port(32, 2, "f22e2dc4"), "32;526;0;;2;");
+        assert_eq!(new_comm_port(26, 2, "f22e2dc4"), "26;526;0;");
     }
 
     #[test]
@@ -4187,6 +4471,7 @@ mod tests {
             ib_key_timeout_secs: session::IB_KEY_DEFAULT_TIMEOUT_SECS,
             ib_key_token_sub_type: session::IB_KEY_DEFAULT_TOKEN_SUB_TYPE.into(),
             code_provider: None,
+            restart_token_file: None,
         };
         assert_eq!(config.username, "user");
         assert!(config.paper);

@@ -160,6 +160,7 @@ fn main() {
         client_id: 0,
         copied_waits: false,
         code_provider: None,
+        restart_token_file: None,
     }).expect("Failed to connect");
     println!("Connected.");
 

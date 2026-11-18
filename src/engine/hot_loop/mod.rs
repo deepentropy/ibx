@@ -1916,6 +1916,12 @@ impl HotLoop {
         if self.permission_change.take_due(now) {
             self.resubscribe_market_data();
         }
+        // A restart token the server refused is not presented (ibx#762).
+        if std::mem::take(&mut self.ccp.restart_token_refused)
+            && let Some(auth) = self.reconnect_auth.as_mut()
+        {
+            auth.restart_token = None;
+        }
         if let Some(list) = self.ccp.ssl_farms_update.take() {
             let old = self.reconnect_auth.as_ref().map(|a| a.ssl_farms.clone()).unwrap_or_default();
             log::info!("Unsolicited logon [oldUseSslFarmList={},useSslFarmList={}].", old, list);
@@ -3914,7 +3920,7 @@ impl HotLoop {
             None => return,
         };
         match rx.try_recv() {
-            Ok(Ok(CcpReconnect { conn, session_epoch, ns_secure_refused, logon, session_key })) => {
+            Ok(Ok(CcpReconnect { conn, session_epoch, ns_secure_refused, logon, session_key, restart_token })) => {
                 log::info!("CCP auto-reconnect succeeded (attempt {})", self.ccp_reconnect_attempt);
                 // Every logon reply sets the clock offset, the feature
                 // tokens and the pending accounts; a changed data
@@ -3937,6 +3943,10 @@ impl HotLoop {
                     if let Some(key) = session_key {
                         auth.session_token = key.clone();
                         auth.session_key = key;
+                    }
+                    // A full login announced a new restart token (ibx#762).
+                    if restart_token.is_some() {
+                        auth.restart_token = restart_token;
                     }
                 }
                 self.reconnect_ccp(conn);
@@ -5371,6 +5381,7 @@ mod tests {
             use_ssl: true,
             ssl_farms: String::new(),
             second_factor: Default::default(),
+            restart_token: None,
         }
     }
 
@@ -6090,7 +6101,7 @@ mod tests {
     #[test]
     fn a_full_login_on_reconnect_replaces_the_cached_key() {
         use num_bigint::BigUint;
-        let reconnected = |session_key: Option<BigUint>| {
+        let reconnected = |session_key: Option<BigUint>, restart_token: Option<BigUint>| {
             let shared = Arc::new(SharedState::new());
             let mut engine = HotLoop::new(shared, None, None);
             engine.running = true;
@@ -6099,21 +6110,27 @@ mod tests {
             let mut auth = reconnect_auth_with_host("cdc1.example");
             auth.session_key = BigUint::from(7u32);
             auth.session_token = BigUint::from(7u32);
+            auth.restart_token = Some(BigUint::from(9u32));
             engine.set_reconnect_auth(auth);
             let (client, _server) = crate::protocol::connection::mem_pair();
             let (tx, rx) = crossbeam_channel::bounded(1);
             tx.send(Ok(CcpReconnect {
                 conn: Connection::new_mem(client), session_epoch: None, ns_secure_refused: false,
-                logon: Default::default(), session_key,
+                logon: Default::default(), session_key, restart_token,
             })).unwrap();
             engine.pending_ccp_reconnect = Some(rx);
             engine.poll_ccp_reconnect();
             assert_eq!(engine.ccp_reconnect_attempt, 0, "the reconnect succeeded");
             let auth = engine.reconnect_auth.as_ref().unwrap();
-            (auth.session_key.clone(), auth.session_token.clone())
+            (auth.session_key.clone(), auth.session_token.clone(), auth.restart_token.clone())
         };
-        assert_eq!(reconnected(Some(BigUint::from(42u32))), (BigUint::from(42u32), BigUint::from(42u32)));
-        assert_eq!(reconnected(None), (BigUint::from(7u32), BigUint::from(7u32)));
+        let n = |v: u32| BigUint::from(v);
+        // A full login: new key and new restart token (ibx#762).
+        assert_eq!(reconnected(Some(n(42)), Some(n(43))), (n(42), n(42), Some(n(43))));
+        // A login with the restart token: its session token, the same restart token.
+        assert_eq!(reconnected(Some(n(42)), None), (n(42), n(42), Some(n(9))));
+        // A reconnect on the session token keeps both.
+        assert_eq!(reconnected(None, None), (n(7), n(7), Some(n(9))));
     }
 
     // ibx#552: a parameters request that waits counts among the scanner
@@ -7251,6 +7268,23 @@ mod tests {
         assert!(!ccp.relogin_data_permissions(None), "no new stamp");
         assert_eq!(ccp.data_permissions, None, "kept even unset");
         assert!(!ccp.relogin_data_permissions(Some("3")));
+    }
+
+    // ibx#762: a restart token the server refused is not presented by the
+    // next reconnects.
+    #[test]
+    fn a_refused_restart_token_is_forgotten() {
+        let shared = Arc::new(SharedState::new());
+        let mut engine = HotLoop::new(shared, None, None);
+        let mut auth = reconnect_auth_with_host("gw.example");
+        auth.restart_token = Some(num_bigint::BigUint::from(9u32));
+        engine.set_reconnect_auth(auth);
+        engine.service_logon_updates(Instant::now());
+        assert!(engine.reconnect_auth.as_ref().unwrap().restart_token.is_some());
+        engine.ccp.restart_token_refused = true;
+        engine.service_logon_updates(Instant::now());
+        assert!(engine.reconnect_auth.as_ref().unwrap().restart_token.is_none());
+        assert!(!engine.ccp.restart_token_refused);
     }
 
     // ibx#276: a logon update whose SSL farm list goes from a list to

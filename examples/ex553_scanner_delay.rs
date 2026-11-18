@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The scanner waits are copied with the setting only (ibx#564).
         copied_waits: env::var("IBX_COPIED_WAITS").is_ok_and(|v| v == "1"),
         code_provider: None,
+        restart_token_file: None,
     }, 4096)?;
     println!("logged in paper (account {})", client.account_id);
 
