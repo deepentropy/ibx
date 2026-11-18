@@ -1,88 +1,56 @@
-name: Nightly release
+name: Release
 
-# Every night at 03:00 UTC: when main has commits since the last release,
-# the offline tests run (tests.yml), then the next patch version is built
-# and published as an ordinary release, with the Python wheel attached and
-# the commit subjects as its notes. A night without new commits publishes
-# nothing. Can also be started by hand (`gh workflow run "Nightly release"`).
+# Builds the Python wheel and publishes the release of a version tag.
+#   - Called by the Prepare release workflow with its new tag, or on a pushed
+#     version tag (git tag v0.9.1 && git push origin v0.9.1): builds the
+#     wheel, then publishes the GitHub Release of the tag with notes from
+#     scripts/release_notes.py and the wheel attached, marked latest.
+#   - Manual run (Actions tab -> "Run workflow"): builds the wheel and keeps
+#     it as a workflow artifact only. No release is created.
 #
-# The rule on main lets only administrators push, so the version bump is a
-# release commit on top of the released main commit, reached by its tag
-# only: main keeps the version of its last bump by hand.
-
+# Output: the wheel for Windows x64 and Python 3.13, as the releases so far.
 on:
-  schedule:
-    - cron: "0 3 * * *"
+  push:
+    tags: ['v*']
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Version tag to release (v<Cargo.toml version>)'
+        type: string
+        required: true
 
-permissions:
-  contents: write
-
-concurrency:
-  group: nightly-release
-  cancel-in-progress: false
+env:
+  # Tag to release: empty on a manual run (build only).
+  TAG: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name || '') }}
 
 jobs:
-  plan:
-    name: commits since the last release
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    outputs:
-      release: ${{ steps.plan.outputs.release }}
-      version: ${{ steps.plan.outputs.version }}
-      previous: ${{ steps.plan.outputs.previous }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-
-      - id: plan
-        run: |
-          git fetch --tags --force origin
-          previous=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
-          if [ -z "$previous" ]; then echo "no release tag"; exit 1; fi
-          count=$(git rev-list --count "$previous..HEAD")
-          IFS=. read -r major minor patch <<< "${previous#v}"
-          patch=${patch%%[!0-9]*}
-          version="$major.$minor.$((patch + 1))"
-          echo "previous=$previous version=$version new commits=$count"
-          release=false
-          if [ "$count" -gt 0 ] && ! git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            release=true
-          fi
-          {
-            echo "release=$release"
-            echo "version=$version"
-            echo "previous=$previous"
-          } >> "$GITHUB_OUTPUT"
-
-  tests:
-    name: offline tests
-    needs: plan
-    if: needs.plan.outputs.release == 'true'
-    uses: ./.github/workflows/tests.yml
-
-  release:
-    name: build and publish v${{ needs.plan.outputs.version }}
-    needs: [plan, tests]
-    if: needs.plan.outputs.release == 'true'
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            python: '3.13'
+    runs-on: ${{ matrix.platform }}
     timeout-minutes: 60
+    permissions:
+      contents: read
     defaults:
       run:
         shell: bash
-    env:
-      VERSION: ${{ needs.plan.outputs.version }}
-      PREVIOUS: ${{ needs.plan.outputs.previous }}
     steps:
-      - name: Keep the line endings of the repository
-        run: git config --global core.autocrlf false
-
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
+          ref: ${{ env.TAG || github.ref }}
+
+      - name: Check the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ -n "$TAG" ] && [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match the Cargo.toml version $version (expected v$version)."
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -90,17 +58,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-
-      - name: Set the version
-        run: |
-          sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml pyproject.toml fuzz/ibx-rlib/Cargo.toml
-          sed -i "s/^project(ibx_cpp VERSION [0-9.]*/project(ibx_cpp VERSION $VERSION/" cpp/CMakeLists.txt
-          sed -i "/^name = \"ibx\"$/{n;s/^version = \".*\"/version = \"$VERSION\"/}" Cargo.lock uv.lock
-          git diff --stat
-          for f in Cargo.toml pyproject.toml fuzz/ibx-rlib/Cargo.toml cpp/CMakeLists.txt Cargo.lock uv.lock; do
-            grep -q "$VERSION" "$f" || { echo "version not set in $f"; exit 1; }
-          done
+          python-version: ${{ matrix.python }}
 
       - name: Build the wheel
         run: |
@@ -108,22 +66,40 @@ jobs:
           maturin build --release --locked --interpreter python
           ls target/wheels
 
-      - name: Tag the release commit
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -q -am "release: v$VERSION"
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform }}-${{ matrix.python }}
+          path: target/wheels/*.whl
+          retention-days: 7
+
+  # The wheels are in: publish the release, marked latest. A re-run for the
+  # same tag replaces the files of its release.
+  publish:
+    needs: build
+    if: inputs.tag != '' || github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0         # tags, for the commits since the previous one
+          fetch-tags: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: wheels
+          merge-multiple: true
 
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          {
-            echo "Changes since $PREVIOUS:"
-            echo
-            git log --no-merges --format='- %s (%h)' "$PREVIOUS..${{ github.sha }}" | grep -v '^- release:' || true
-          } > notes.md
-          gh release create "v$VERSION" target/wheels/*.whl \
-            --verify-tag --latest --title "v$VERSION" --notes-file notes.md
+          python3 scripts/release_notes.py "$TAG" > notes.md
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" wheels/*.whl --clobber
+            gh release edit "$TAG" --draft=false --latest --notes-file notes.md
+          else
+            gh release create "$TAG" wheels/*.whl --verify-tag --latest --title "$TAG" --notes-file notes.md
+          fi

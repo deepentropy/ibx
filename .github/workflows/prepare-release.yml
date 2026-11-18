@@ -1,0 +1,99 @@
+name: Prepare release
+
+# Cuts a release without manual steps (scripts/release_bump.py):
+#   1. checks that main has commits since the tag of the current version;
+#   2. runs the offline tests (tests.yml);
+#   3. bumps the version (patch, or minor on a manual run) in every file
+#      that carries it and regenerates the API reference pages;
+#   4. commits "release: v<version>" to main, tags v<version>, pushes both;
+#   5. runs the Release workflow for that tag, which publishes the release
+#      once the wheel is built.
+# Triggers: nightly (patch) and manual (Actions tab -> "Run workflow", patch
+# or minor). Nothing is pushed when a check fails, or when main moved on
+# while the tests ran (the next run takes it).
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      part:
+        description: 'Version part to bump'
+        type: choice
+        options: [patch, minor]
+        default: patch
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: commits since the last release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0         # tags, for the commits since the last one
+          fetch-tags: true
+
+      - id: plan
+        run: python3 scripts/release_bump.py ${{ inputs.part || 'patch' }}
+
+  tests:
+    name: offline tests
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/tests.yml
+
+  prepare:
+    name: version v${{ needs.plan.outputs.version }}
+    needs: [plan, tests]
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write            # push the version commit and tag
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}  # the commit the tests ran on
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Bump the version
+        id: bump
+        run: python3 scripts/release_bump.py ${{ inputs.part || 'patch' }}
+
+      - name: The lock files follow the new version
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      # Pushed with the workflow token: this triggers neither the tests nor
+      # the tag build, the release job below builds the tag.
+      - name: Commit, tag and push
+        run: |
+          version="${{ steps.bump.outputs.version }}"
+          test "$version" = "${{ needs.plan.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock pyproject.toml uv.lock fuzz/ibx-rlib/Cargo.toml cpp/CMakeLists.txt docs/book/src
+          git commit -m "release: v$version"
+          git tag "v$version"
+          git push --atomic origin HEAD:main "v$version"
+
+  release:
+    needs: prepare
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: v${{ needs.prepare.outputs.version }}

@@ -1,7 +1,7 @@
 name: Tests
 
 # Offline tests, started by hand (Actions tab or `gh workflow run Tests`),
-# and before each nightly release (release.yml): no secret, no network to
+# and before each nightly release (prepare-release.yml): no secret, no network to
 # the servers. The tests that log in are #[ignore] (Rust) or skipped
 # without credentials (Python), so they show as ignored / skipped, never as
 # passed.
