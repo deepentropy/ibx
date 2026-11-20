@@ -763,11 +763,31 @@ pub fn as_recorded(header: &serde_json::Value, level: i32, links: &mut Links) {
         links.shared.reference.set_form_10_40(true);
     } else {
         links.engine.set_lot_sizes(false);
+        links.engine.set_volume_in_lots(recorded_with_volumes_in_lots(header));
     }
     if let Some(features) = header.get("logon_features").and_then(|v| v.as_str()) {
         links.shared.reference.set_logon_features(features);
         links.shared.reference.set_api_features(crate::control::logon::ApiFeatures::parse(features));
     }
+}
+
+/// The reference of a 10.51 recording gave the US stock volumes in round
+/// lots (ibx#763): its "volumes in lots" setting was on up to the
+/// recordings of October 2026 and off on 20/11/2026. A header can say it
+/// (`volumes_in_lots`); otherwise a recording made before 20/11/2026 was,
+/// and the logon features can ask for it.
+fn recorded_with_volumes_in_lots(header: &serde_json::Value) -> bool {
+    if let Some(on) = header.get("volumes_in_lots").and_then(|v| v.as_bool()) {
+        return on;
+    }
+    let asked = header.get("logon_features").and_then(|v| v.as_str())
+        .is_some_and(|f| f.split(',').any(|t| t == "VOLINLOTS"));
+    let before = header.get("capture_date").and_then(|v| v.as_str()).and_then(|d| {
+        let mut p = d.split('/').map(|x| x.parse::<u32>().ok());
+        let (day, month, year) = (p.next()??, p.next()??, p.next()??);
+        Some((year, month, day) < (2026, 11, 20))
+    });
+    asked || before.unwrap_or(true)
 }
 
 /// Replay a scenario through the Rust API client.

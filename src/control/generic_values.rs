@@ -290,9 +290,22 @@ pub struct DecodeCtx {
     /// The price tick of the tick's own entry (the third field of its
     /// acknowledgement): the slow mark price is scaled by it.
     pub entry_min_tick: f64,
-    /// The real-time volume comes in shares and is given in round lots
-    /// (the 10.51 form asked as 765, ibx#642); false in the 10.40 lot form.
+    /// The real-time volume comes in shares (the 10.51 form asked as 765,
+    /// ibx#642); false in the 10.40 lot form.
     pub rt_in_shares: bool,
+    /// The volumes that come in shares are given in round lots: the day's,
+    /// the average and the real-time ones (ibx#763). Off unless the session
+    /// asks for volumes in lots.
+    pub volume_lots: bool,
+}
+
+impl DecodeCtx {
+    /// What a volume in shares is divided by: the round lot when the session
+    /// asks for volumes in lots, else 1 (ibx#763).
+    #[inline]
+    fn volume_lot(&self) -> i64 {
+        if self.volume_lots { self.round_lot.max(1) } else { 1 }
+    }
 }
 
 /// sqrt(252): a daily volatility to an annual one, as the reference.
@@ -427,9 +440,11 @@ pub fn decode(code: i32, payload: &[u8], rec: &mut GenericRecord, ctx: DecodeCtx
         // Int pairs, then float pairs; 207 is the
         // average volume, 201 to 206 the 13, 26 and 52 week highs and lows.
         // The 10.51 form gives the average volume in shares as 768, given in
-        // round lots, rounded down (the reference 10.51 at level 225, AAPL,
-        // 19/10/2026 regular hours: 44451884 shares, a lot of 40, gave
-        // 1111297; ibx#604). The 10.40 form gives none from it (05/10/2026).
+        // shares, or in round lots rounded down when the session asks for
+        // volumes in lots (the reference 10.51 at level 225, AAPL,
+        // 19/10/2026 regular hours, volumes in lots: 44451884 shares, a lot
+        // of 40, gave 1111297; ibx#604, ibx#763). The 10.40 form gives none
+        // from it (05/10/2026).
         MISC_STATS => {
             let mut ints: HashMap<i32, i32> = HashMap::new();
             let mut floats: HashMap<i32, f64> = HashMap::new();
@@ -444,7 +459,7 @@ pub fn decode(code: i32, payload: &[u8], rec: &mut GenericRecord, ctx: DecodeCtx
                 floats.insert(k, v);
             }
             let average = ints.get(&207).map(|&v| v as i64)
-                .or_else(|| ints.get(&768).filter(|_| ctx.rt_in_shares).map(|&v| v as i64 / ctx.round_lot.max(1)));
+                .or_else(|| ints.get(&768).filter(|_| ctx.rt_in_shares).map(|&v| v as i64 / ctx.volume_lot()));
             let avg = average.is_some_and(|v| rec.set_int(Field::AvgVolume, v));
             if avg { size(&mut out, 21, rec.int(Field::AvgVolume)); }
             for (key, field, tick) in [
@@ -635,12 +650,13 @@ fn rt_volume(rec: &mut GenericRecord, trade: bool, value: f64, volume: i64, coun
     let d_value = value - pv;
     // The real-time volume is asked in its share form (ibx#642): the
     // price comes from the shares traded, an odd lot included, and the
-    // size and volume are given in round lots, truncated; with a lot
+    // size and volume are given in shares, or in round lots, truncated,
+    // when the session asks for volumes in lots (ibx#763); with a lot
     // above 1 every block gives a string (observed 13/10/2026, MSFT,
-    // round lot 40, on the reference 10.51).
+    // round lot 40, volumes in lots, on the reference 10.51).
     // So is the real-time trade volume, asked as 766 (ibx#641; observed
-    // 14/10/2026 on MSFT: 2451712 shares given as 61292).
-    let lot = if !ctx.rt_in_shares { 1 } else { ctx.round_lot.max(1) };
+    // 14/10/2026 on MSFT, volumes in lots: 2451712 shares given as 61292).
+    let lot = if !ctx.rt_in_shares { 1 } else { ctx.volume_lot() };
     if lot == 1 && d_count == 0 && d_vol == 0 && d_value == 0.0 {
         return None;
     }
@@ -861,7 +877,7 @@ mod tests {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 
-    const CTX: DecodeCtx = DecodeCtx { min_tick: 0.01, now_ms: 1791219886917, round_lot: 40, entry_min_tick: 0.001, rt_in_shares: false };
+    const CTX: DecodeCtx = DecodeCtx { min_tick: 0.01, now_ms: 1791219886917, round_lot: 40, entry_min_tick: 0.001, rt_in_shares: false, volume_lots: false };
 
     // AAPL, 07/10/2026 (b4_generic_rest, frames 37, 333 and 258): the mark
     // price, the slow mark price (a block without a length, price tick
@@ -891,24 +907,26 @@ mod tests {
     // changes, for an index only (the reference 10.51 on SPX, 12/10/2026:
     // tickGeneric 31 0.0004214518350973517).
     // ibx#604: the average volume of the 10.51 form, in shares under 768,
-    // given in round lots rounded down (AAPL, a lot of 40, 19/10/2026:
-    // 44451884 gave 1111297); the 10.40 form gives none from it; 207 is
-    // given as it comes.
+    // given in round lots rounded down with volumes in lots (AAPL, a lot of
+    // 40, 19/10/2026: 44451884 gave 1111297), in shares without (ibx#763);
+    // the 10.40 form gives none from it; 207 is given as it comes.
     #[test]
     fn average_volume_of_the_statistics_block() {
-        let ctx = |shares| DecodeCtx { min_tick: 0.01, now_ms: 0, round_lot: 40, entry_min_tick: 0.01, rt_in_shares: shares };
+        let ctx = |shares, volume_lots| DecodeCtx { min_tick: 0.01, now_ms: 0, round_lot: 40, entry_min_tick: 0.01, rt_in_shares: shares, volume_lots };
         let shares = hex("000000010000030002a6482c00000000");
-        assert_eq!(decode(MISC_STATS, &shares, &mut GenericRecord::default(), ctx(true)), [GenTick::Size(21, 1111297.0)]);
-        assert!(decode(MISC_STATS, &shares, &mut GenericRecord::default(), ctx(false)).is_empty());
+        assert_eq!(decode(MISC_STATS, &shares, &mut GenericRecord::default(), ctx(true, true)), [GenTick::Size(21, 1111297.0)]);
+        assert_eq!(decode(MISC_STATS, &shares, &mut GenericRecord::default(), ctx(true, false)), [GenTick::Size(21, 44451884.0)]);
+        assert!(decode(MISC_STATS, &shares, &mut GenericRecord::default(), ctx(false, true)).is_empty());
         let lots = hex("00000001000000cf00118d2a00000000");
-        assert_eq!(decode(MISC_STATS, &lots, &mut GenericRecord::default(), ctx(true)), [GenTick::Size(21, 1150250.0)]);
+        assert_eq!(decode(MISC_STATS, &lots, &mut GenericRecord::default(), ctx(true, true)), [GenTick::Size(21, 1150250.0)]);
+        assert_eq!(decode(MISC_STATS, &lots, &mut GenericRecord::default(), ctx(true, false)), [GenTick::Size(21, 1150250.0)]);
     }
 
     #[test]
     fn etf_net_asset_values() {
         // ibx#641: the blocks of 13/10/2026 (SPY): 577 then 623.
         let mut rec = GenericRecord::default();
-        let ctx = DecodeCtx { min_tick: 0.01, now_ms: 0, round_lot: 1, entry_min_tick: 0.01, rt_in_shares: true };
+        let ctx = DecodeCtx { min_tick: 0.01, now_ms: 0, round_lot: 1, entry_min_tick: 0.01, rt_in_shares: true, volume_lots: false };
         assert_eq!(decode(ETF_NAV_LAST, &hex("40884ef460000000"), &mut rec, ctx), [GenTick::Price(96, 777.86932373)]);
         assert!(decode(ETF_FROZEN_NAV_LAST, &hex("bff0000000000000"), &mut rec, ctx).is_empty(), "-1 is no value");
         assert!(decode(ETF_NAV_LAST, &hex("40884ef460000000"), &mut rec, ctx).is_empty(), "unchanged");
@@ -1001,13 +1019,22 @@ mod tests {
     // ('549.66;0E-16;...;151145...;548.54166701;false').
     #[test]
     fn share_forms_of_14_october() {
-        // ibx#641, the reference 10.51 on 14/10/2026: MSFT 766 blocks (round
-        // lot 40) and AAPL's 773 block, as the reference gave them.
-        let ctx = DecodeCtx { min_tick: 0.01, now_ms: 1791987034821, round_lot: 40, entry_min_tick: 0.01, rt_in_shares: true };
+        // ibx#641, the reference 10.51 on 14/10/2026, volumes in lots: MSFT
+        // 766 blocks (round lot 40) and AAPL's 773 block, as the reference
+        // gave them.
+        let ctx = DecodeCtx { min_tick: 0.01, now_ms: 1791987034821, round_lot: 40, entry_min_tick: 0.01, rt_in_shares: true, volume_lots: true };
+        let first = hex("41d3d6f13077d3ed00000000002565d200005d5100000000");
+        let second = hex("41d3d89e9508c9b0000000000025690000005d5f00000000");
         let mut rec = GenericRecord::default();
-        assert!(decode(RT_TRADE_VOLUME, &hex("41d3d6f13077d3ed00000000002565d200005d5100000000"), &mut rec, ctx).is_empty());
-        assert_eq!(decode(RT_TRADE_VOLUME, &hex("41d3d89e9508c9b0000000000025690000005d5f00000000"), &mut rec, ctx),
+        assert!(decode(RT_TRADE_VOLUME, &first, &mut rec, ctx).is_empty());
+        assert_eq!(decode(RT_TRADE_VOLUME, &second, &mut rec, ctx),
             [GenTick::Text(77, "540.17;20.0000000000000000;1791987034821;61292.0000000000000000;543.23424127;false".into())]);
+        // Without volumes in lots, the size and volume in shares (ibx#763).
+        let shares = DecodeCtx { volume_lots: false, ..ctx };
+        let mut rec = GenericRecord::default();
+        assert!(decode(RT_TRADE_VOLUME, &first, &mut rec, shares).is_empty());
+        assert_eq!(decode(RT_TRADE_VOLUME, &second, &mut rec, shares),
+            [GenTick::Text(77, "540.17;814.0000000000000000;1791987034821;2451712.0000000000000000;543.23424127;false".into())]);
         let ctx = DecodeCtx { round_lot: 100, ..ctx };
         assert_eq!(decode(SHORT_TERM_VOLUME, &hex("00000004000000006acf8d380000000300056130000000050008a2000000000a000f2dc800000000"), &mut GenericRecord::default(), ctx),
             [GenTick::Size(63, 352560.0), GenTick::Size(64, 565760.0), GenTick::Size(65, 994760.0)]);
@@ -1016,12 +1043,22 @@ mod tests {
     #[test]
     fn rt_volume_in_shares() {
         let mut rec = GenericRecord::default();
-        let ctx = DecodeCtx { min_tick: 0.01, now_ms: 1791900393444, round_lot: 40, entry_min_tick: 0.01, rt_in_shares: true };
-        assert!(decode(RT_VOLUME, &hex("41e8b57e9b1c8ac300000000005c407600024a1600000000"), &mut rec, ctx).is_empty());
-        assert_eq!(decode(RT_VOLUME, &hex("41e8b57edfd1930500000000005c407700024a1a00000000"), &mut rec, ctx),
+        let ctx = DecodeCtx { min_tick: 0.01, now_ms: 1791900393444, round_lot: 40, entry_min_tick: 0.01, rt_in_shares: true, volume_lots: true };
+        let first = hex("41e8b57e9b1c8ac300000000005c407600024a1600000000");
+        let second = hex("41e8b57edfd1930500000000005c407700024a1a00000000");
+        assert!(decode(RT_VOLUME, &first, &mut rec, ctx).is_empty());
+        assert_eq!(decode(RT_VOLUME, &second, &mut rec, ctx),
             vec![GenTick::Text(48, "549.66;0E-16;1791900393444;151145.0000000000000000;548.54166701;false".into())]);
         // With a lot above 1, a block with no change gives a string too.
-        assert_eq!(decode(RT_VOLUME, &hex("41e8b57edfd1930500000000005c407700024a1a00000000"), &mut rec, ctx).len(), 1);
+        assert_eq!(decode(RT_VOLUME, &second, &mut rec, ctx).len(), 1);
+        // Without volumes in lots: in shares, and a block with no change
+        // gives nothing (ibx#763).
+        let shares = DecodeCtx { volume_lots: false, ..ctx };
+        let mut rec = GenericRecord::default();
+        assert!(decode(RT_VOLUME, &first, &mut rec, shares).is_empty());
+        assert_eq!(decode(RT_VOLUME, &second, &mut rec, shares),
+            vec![GenTick::Text(48, "549.66;1.0000000000000000;1791900393444;6045815.0000000000000000;548.54166701;false".into())]);
+        assert!(decode(RT_VOLUME, &second, &mut rec, shares).is_empty());
         assert_eq!((wire_code(RT_VOLUME), wire_code(RT_TRADE_VOLUME), wire_code(SHORT_TERM_VOLUME)), (765, 766, 773));
     }
 

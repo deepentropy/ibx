@@ -2010,6 +2010,7 @@ impl FarmState {
             min_tick: context.market.min_tick(instrument), now_ms,
             round_lot: context.market.round_lot(instrument), entry_min_tick,
             rt_in_shares: !context.market.lot_sizes(),
+            volume_lots: context.market.volume_lots(),
         };
         let rec = self.generic_records.entry(instrument).or_default();
         let mut ticks = crate::control::generic_values::decode(code, payload, rec, ctx);
@@ -4622,12 +4623,21 @@ mod tests {
     // byte also gives the decimals), the last entry's prices in millionths.
     // The reference's callbacks of that moment: bid 541.70 x 40, ask
     // 542.00 x 160, last 542.0 x 46, close 541.150024, volume 1624 (shares
-    // over the round lot of 40, rounded down).
+    // over the round lot of 40, rounded down: its volumes in lots were on).
+    // Without volumes in lots the volume is in whole shares, as the
+    // reference gave AAPL's day volume on 20/11/2026 (ibx#763).
     #[test]
     fn the_10_51_form_gives_shares_and_a_volume_in_round_lots() {
+        for (volume_lots, volume) in [(true, 1624), (false, 64962)] {
+            ten_51_message(volume_lots, volume);
+        }
+    }
+
+    fn ten_51_message(volume_lots: bool, volume: i64) {
         let shared = SharedState::new();
         let mut farm = FarmState::new();
         let mut context = Context::new();
+        context.market.set_volume_lots(volume_lots);
         let id = context.market.register(272093);
         context.market.set_round_lot(id, 40);
         farm.md_req_to_instrument.push((1, id));
@@ -4644,7 +4654,7 @@ mod tests {
         assert_eq!((q.bid, q.bid_size, q.ask, q.ask_size), (px(54170), 40 * QTY_SCALE, px(54200), 160 * QTY_SCALE));
         assert_eq!((q.last, q.last_size), (px(54200), 46 * QTY_SCALE));
         assert_eq!(q.close, 541_150_024 * PRICE_SCALE / 1_000_000);
-        assert_eq!(q.volume, 1624 * QTY_SCALE);
+        assert_eq!(q.volume, volume * QTY_SCALE);
     }
 
     #[test]

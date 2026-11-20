@@ -1076,6 +1076,9 @@ pub struct Gateway {
     /// The logon feature list asks for US stock sizes in round lots
     /// (ibx#287).
     pub scale_us_lots: bool,
+    /// The logon feature list asks for US stock volumes in round lots
+    /// (ibx#763).
+    pub volume_in_lots: bool,
     /// Most contracts with tick-by-tick data at once, from the logon's
     /// limits (ibx#455).
     pub tick_by_tick_limit: usize,
@@ -2327,6 +2330,7 @@ impl Gateway {
         let mut raw_smart_combo_con_ids = String::new();
         let mut raw_algo_providers = String::new();
         let mut scale_us_lots = false;
+        let mut volume_in_lots = false;
         let mut user_book = false;
         // Tick-by-tick limit fields, first value seen (ibx#455).
         let mut tbt_limit_fields: [Option<String>; 4] = Default::default();
@@ -2504,6 +2508,7 @@ impl Gateway {
             }
             if let Some(v) = fields.get(&6542) {
                 scale_us_lots |= features_scale_us_lots(v);
+                volume_in_lots |= features_have(v, "VOLINLOTS");
                 tick_by_tick_off |= features_have(v, "NOTICKBYTICK");
                 price_mgmt |= features_have(v, "PRICEMGMT");
                 mifid2 |= features_have(v, "MIFID2");
@@ -2923,6 +2928,7 @@ impl Gateway {
             account_config,
             algo_definitions,
             scale_us_lots,
+            volume_in_lots,
             tick_by_tick_limit: tick_by_tick_limit(&tbt_limit_fields),
             depth_limit: depth_limit(&depth_limit_fields),
             user_book,
@@ -3116,6 +3122,7 @@ impl Gateway {
         let tx = hot_loop.control_channel();
         hot_loop.set_account_id(self.account_id.clone());
         hot_loop.set_scale_us_lots(self.scale_us_lots);
+        hot_loop.set_volume_in_lots(self.volume_in_lots);
         hot_loop.set_algo_providers(crate::bridge::algo_provider_names(&self.raw_algo_providers));
         hot_loop.set_price_mgmt(self.price_mgmt, self.price_mgmt_exclusions.as_deref());
         // MiFID on the session (ibx#500): MIFID2 on a session that is not a

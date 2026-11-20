@@ -226,6 +226,9 @@ pub struct MarketState {
     /// its recordings); false: in shares, as with the entry mark ibx writes
     /// since #648 (ibx#663).
     lot_sizes: bool,
+    /// The day volume of a US stock, which comes in shares, is given in
+    /// round lots: only when the logon's features ask for it (ibx#763).
+    volume_lots: bool,
 }
 
 /// The terms of an option contract its orders carry, as the reference
@@ -266,7 +269,21 @@ impl MarketState {
             ended_tags: [EndedTag::default(); ENDED_TAGS],
             ended_next: 0,
             lot_sizes: false,
+            volume_lots: false,
         }
+    }
+
+    /// The volumes that come in shares are given in round lots (ibx#763):
+    /// the reference does so only when its "volumes in lots for US stocks"
+    /// switch is on, or when the logon's features ask for it. Off by
+    /// default, as the reference observed on 20/11/2026.
+    pub fn set_volume_lots(&mut self, on: bool) {
+        self.volume_lots = on;
+    }
+
+    /// The volumes that come in shares are given in round lots (ibx#763).
+    pub fn volume_lots(&self) -> bool {
+        self.volume_lots
     }
 
     /// The sizes come in round lots (the 10.40 form) or in shares (ibx#663).
@@ -798,11 +815,14 @@ impl MarketState {
                 self.marks[i].set_seen(SizeKind::Last);
             }
             // The 10.51 form gives the volume in shares with decimals; the
-            // client gets it in round lots, rounded down (the reference
-            // 10.51, paper, 13/10/2026: 64962.113269 shares of a lot of 40
-            // give 1624, eight of eight values floored).
+            // client gets whole shares, or round lots when the session asks
+            // for volumes in lots, rounded down either way (the reference
+            // 10.51, paper: 13/10/2026 with volumes in lots, 64962.113269
+            // shares of a lot of 40 gave 1624, eight of eight values floored;
+            // 20/11/2026 without, AAPL's day volume in shares; ibx#763).
             td::O_VOLUME if tick.scale > 0 => {
-                let unit = 10i64.pow(tick.scale.min(18) as u32).saturating_mul(lot.max(1));
+                let lots = if self.volume_lots { lot.max(1) } else { 1 };
+                let unit = 10i64.pow(tick.scale.min(18) as u32).saturating_mul(lots);
                 set(&mut q.volume, (m / unit).checked_mul(size_tick));
                 self.marks[i].set_seen(SizeKind::Volume);
             }

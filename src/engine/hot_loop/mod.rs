@@ -294,6 +294,14 @@ impl HotLoop {
         self.context.scale_us_lots = on;
     }
 
+    /// The session gives US stock volumes in round lots (ibx#763): the
+    /// day, average and real-time volumes, which come in shares, are
+    /// divided by the contract's lot. Off by default: in shares, as the
+    /// reference gave them on 20/11/2026.
+    pub fn set_volume_in_lots(&mut self, on: bool) {
+        self.context.market.set_volume_lots(on);
+    }
+
     /// The logon's algo providers: an order for one of them goes through
     /// SMART with the provider as its second destination (ibx#505).
     pub fn set_algo_providers(&mut self, names: Vec<String>) {
