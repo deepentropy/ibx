@@ -129,6 +129,9 @@ pub(crate) struct HmdsState {
     /// How the bars of each bar request are written (ibx#431), until its
     /// answer ended (keepUpToDate: until its cancel).
     pub(crate) bar_requests: Vec<BarRequestInfo>,
+    /// When each bar request reached the engine, kept with this module's
+    /// debug log on only, for the line that splits its time (ibx#764).
+    asked_at: Vec<(ReqId, Instant)>,
     /// keepUpToDate requests and their bar series (ibx#429).
     pub(crate) live_bars: Vec<LiveBars>,
     /// Last place given to a keepUpToDate request on its stream (ibx#512).
@@ -430,6 +433,73 @@ pub(crate) struct BarRequestInfo {
     /// The bars of the answer's earlier parts, given with its last part in
     /// time order (ibx#615).
     pub(crate) held: Vec<crate::control::historical::HistoricalBar>,
+    /// Where the request's time went, with this module's debug log on
+    /// (ibx#764).
+    pub(crate) timing: Option<Box<BarTiming>>,
+}
+
+/// The times of a bar request, for one debug line once it ends (ibx#764):
+/// in the client (pacing, contract lookup), on the server (to its first
+/// part, then to the first bars: a server that holds a request answers its
+/// first part at once and the bars later), the transfer of the parts, and
+/// the client's reading of them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BarTiming {
+    pub(crate) asked: Option<Instant>,
+    pub(crate) sent: Option<Instant>,
+    pub(crate) first_part: Option<Instant>,
+    pub(crate) first_bars: Option<Instant>,
+    pub(crate) reading: std::time::Duration,
+    pub(crate) parts: u32,
+    pub(crate) bars: usize,
+}
+
+impl BarTiming {
+    /// A part of the answer came at `at` and was read by `done`.
+    fn part(&mut self, at: Instant, done: Instant, bars: usize) {
+        self.first_part.get_or_insert(at);
+        if bars > 0 {
+            self.first_bars.get_or_insert(at);
+        }
+        self.parts += 1;
+        self.bars += bars;
+        self.reading += done.saturating_duration_since(at);
+    }
+
+    /// The debug line, at `end`.
+    fn line(&self, req_id: ReqId, end: Instant, how: &str) -> String {
+        let ms = |a: Option<Instant>, b: Option<Instant>| match (a, b) {
+            (Some(a), Some(b)) => format!("{:.1}", b.saturating_duration_since(a).as_secs_f64() * 1e3),
+            _ => "-".to_string(),
+        };
+        format!(
+            "historical req_id={} {}: client {} ms (pacing, contract lookup), server {} ms to its first part \
+             and {} ms to the first bars, transfer {} ms, reading {:.1} ms of {} parts, {} bars, total {} ms",
+            req_id, how,
+            ms(self.asked, self.sent),
+            ms(self.sent, self.first_part),
+            ms(self.sent, self.first_bars),
+            ms(self.first_bars.or(self.first_part), Some(end)),
+            self.reading.as_secs_f64() * 1e3, self.parts, self.bars,
+            ms(self.asked.or(self.sent), Some(end)),
+        )
+    }
+}
+
+/// The id of a bar request, also one that is looked up first (ibx#764).
+pub(crate) fn bar_request_id(cmd: &crate::types::ControlCommand) -> Option<ReqId> {
+    use crate::types::ControlCommand as C;
+    match cmd {
+        C::FetchHistorical { req_id, .. } => Some(*req_id),
+        C::ResolveContract { request, .. } | C::Unpaced(request) => bar_request_id(request),
+        _ => None,
+    }
+}
+
+/// Whether the times of the bar requests are kept: this module's debug log
+/// is on (ibx#764). Off, nothing is timed.
+fn timing_on() -> bool {
+    log::log_enabled!(log::Level::Debug)
 }
 
 /// A keepUpToDate bar request (ibx#429): its query, the 5-second router
@@ -654,6 +724,7 @@ impl HmdsState {
             head_ts_keys: std::collections::HashMap::new(),
             head_ts_cache: std::collections::HashMap::new(),
             bar_requests: Vec::new(),
+            asked_at: Vec::new(),
             live_bars: Vec::new(),
             live_joins: 0,
             router_bars: Vec::new(),
@@ -671,6 +742,38 @@ impl HmdsState {
     /// A live streaming listener on a historical farm (5-second bars,
     /// tick-by-tick, scanner): no historical farm is closed as dormant
     /// while one exists, as in the reference (#445).
+    /// A bar request reached the engine (ibx#764): its time is kept for
+    /// the debug line, with that log on only.
+    pub(crate) fn note_asked(&mut self, req_id: ReqId) {
+        if !timing_on() {
+            return;
+        }
+        self.asked_at.retain(|(r, _)| *r != req_id);
+        if self.asked_at.len() >= 256 {
+            self.asked_at.remove(0);
+        }
+        self.asked_at.push((req_id, Instant::now()));
+    }
+
+    /// The part of a bar request's answer that came at `at` was read
+    /// (ibx#764); the debug line once it was the last.
+    fn note_part(&mut self, req_id: ReqId, at: Option<Instant>, bars: usize, last: bool) {
+        let Some(at) = at else { return };
+        let Some(t) = self.bar_requests.iter_mut().find(|r| r.req_id == req_id).and_then(|r| r.timing.as_mut()) else { return };
+        let done = Instant::now();
+        t.part(at, done, bars);
+        if last {
+            log::debug!("{}", t.line(req_id, done, "answered"));
+        }
+    }
+
+    /// The debug line of a bar request that ended another way (ibx#764).
+    fn note_end(&self, req_id: ReqId, how: &str) {
+        if let Some(t) = self.bar_requests.iter().find(|r| r.req_id == req_id).and_then(|r| r.timing.as_ref()) {
+            log::debug!("{}", t.line(req_id, Instant::now(), how));
+        }
+    }
+
     pub(crate) fn has_live_listener(&self) -> bool {
         !self.rtbar_subs.is_empty() || !self.live_bars.is_empty() || !self.tbt_subscriptions.is_empty() || !self.pending_scanner.is_empty()
     }
@@ -818,6 +921,8 @@ impl HmdsState {
                 }
             }
             "W" => {
+                // When the part came, for the time of its request (ibx#764).
+                let part_at = timing_on().then(Instant::now);
                 if let Some(xml_tag) = parsed.get(&6118) {
                     // Per-frame XML root tracer (kept at debug: fires on every
                     // W/6118 payload). Unmatched payloads still warn below.
@@ -833,6 +938,8 @@ impl HmdsState {
                         if let Some(pos) = self.pending_historical.iter().position(|(qid, _)| qid == wid) {
                             let (_, req_id) = self.pending_historical[pos];
                             let is_complete = resp.is_complete;
+                            // The bars of this part, for its time (ibx#764).
+                            let part_bars = resp.bars.len();
                             if self.multi_leg.iter().any(|m| m.req_id == req_id) {
                                 let leg_qid = self.pending_historical[pos].0.clone();
                                 if is_complete {
@@ -880,6 +987,7 @@ impl HmdsState {
                                         info.reply_zone = resp.timezone.clone();
                                     }
                                     info.held.append(&mut resp.bars);
+                                    self.note_part(req_id, part_at, part_bars, false);
                                     return;
                                 }
                                 if !info.held.is_empty() {
@@ -898,6 +1006,7 @@ impl HmdsState {
                             if let Some(data) = for_event {
                                 emit(event_tx, Event::HistoricalData { req_id, data });
                             }
+                            self.note_part(req_id, part_at, part_bars, is_complete);
                             if is_complete && !self.keep_up_to_date_reqs.contains(&req_id) {
                                 self.pending_historical.remove(pos);
                                 self.bar_requests.retain(|b| b.req_id != req_id);
@@ -1057,6 +1166,7 @@ impl HmdsState {
                             let wid = crate::control::historical::window_id(qid);
                             if let Some(pos) = self.pending_historical.iter().position(|(q, _)| q == wid) {
                                 let (leg_qid, req_id) = self.pending_historical.remove(pos);
+                                self.note_end(req_id, "refused");
                                 self.keep_up_to_date_reqs.remove(&req_id);
                                 self.live_bars.retain(|l| l.req_id != req_id);
                                 self.bar_requests.retain(|b| b.req_id != req_id);
@@ -1719,6 +1829,10 @@ impl HmdsState {
             delayed: false,
             con_id,
             reply_zone: String::new(), held: Vec::new(),
+            timing: timing_on().then(|| {
+                let asked = self.asked_at.iter().position(|(r, _)| *r == req_id).map(|i| self.asked_at.remove(i).1);
+                Box::new(BarTiming { asked, sent: Some(Instant::now()), ..Default::default() })
+            }),
         });
         let end_date_time = crate::control::historical::server_time(end);
         // The query's name in the session series; the legs of one request
@@ -1893,6 +2007,7 @@ impl HmdsState {
         };
         self.write_bar_times(m.req_id, &mut resp, true);
         self.round_bar_prices(m.req_id, &mut resp.bars, shared);
+        self.note_end(m.req_id, "answered");
         self.bar_requests.retain(|b| b.req_id != m.req_id);
         let for_event = clone_for_event(event_tx, &resp);
         shared.reference.push_historical_data(m.req_id, resp);
@@ -3808,7 +3923,7 @@ pub(crate) mod tests {
         hmds.keep_up_to_date_reqs.insert(req_id);
         hmds.bar_requests.push(BarRequestInfo {
             req_id, format_date: 1, intraday: bar_size.is_intraday(), zone: Some("US/Eastern".into()), start: 0, end: 0,
-            delayed: false, con_id: 0, reply_zone: String::new(), held: Vec::new(),
+            delayed: false, con_id: 0, reply_zone: String::new(), held: Vec::new(), timing: None,
         });
         hmds.live_bars.push(LiveBars {
             req_id, window_id: window_id.to_string(), query_id: format!("{window_id};;AAPL@SMART {label};;1;;true;;0;;I"),
@@ -3839,7 +3954,7 @@ pub(crate) mod tests {
         }]);
         shared.reference.note_contract_rule(12087792, 239);
         let mut hmds = HmdsState::new();
-        hmds.bar_requests.push(BarRequestInfo { req_id: 7, format_date: 1, intraday: true, zone: None, start: 0, end: 0, delayed: false, con_id: 12087792, reply_zone: String::new(), held: Vec::new() });
+        hmds.bar_requests.push(BarRequestInfo { req_id: 7, format_date: 1, intraday: true, zone: None, start: 0, end: 0, delayed: false, con_id: 12087792, reply_zone: String::new(), held: Vec::new(), timing: None });
         let mut bars = vec![crate::control::historical::HistoricalBar { time: String::new(), open: 1.125465, high: 1.125675, low: 1.125435, close: 1.12562, volume: -1, wap: -1.0, count: -1 }];
         hmds.round_bar_prices(7, &mut bars, &shared);
         assert_eq!((bars[0].open, bars[0].high, bars[0].low, bars[0].close), (1.12545, 1.1257, 1.12545, 1.1256));
@@ -3983,7 +4098,7 @@ pub(crate) mod tests {
             let duration = if intraday { "1 d" } else { "1 m" };
             hmds.bar_requests.push(BarRequestInfo { req_id: req, format_date, intraday, zone: Some("US/Eastern".into()),
                 start: crate::control::historical::duration_start(end, duration, "Europe/Paris"), end,
-            delayed: false, con_id: 0, reply_zone: String::new(), held: Vec::new(),
+            delayed: false, con_id: 0, reply_zone: String::new(), held: Vec::new(), timing: None,
         });
         }
         hmds.pending_head_ts.push(("TickHeadClient1".to_string(), 9544, Instant::now() + HEAD_TIMESTAMP_TIMEOUT));
@@ -4031,7 +4146,7 @@ pub(crate) mod tests {
         };
         for (w, req) in [("cf16", 7303), ("cf20", 7304)] {
             hmds.pending_historical.push((w.to_string(), req));
-            hmds.bar_requests.push(BarRequestInfo { req_id: req, format_date: 1, intraday: false, zone: None, start: 0, end: 0, delayed: false, con_id: 0, reply_zone: String::new(), held: Vec::new() });
+            hmds.bar_requests.push(BarRequestInfo { req_id: req, format_date: 1, intraday: false, zone: None, start: 0, end: 0, delayed: false, con_id: 0, reply_zone: String::new(), held: Vec::new(), timing: None });
         }
         for msg in [part("cf16", false, "<tz>Japan</tz><delay>1200</delay>", false), part("cf16", true, "", true),
             part("cf20", false, "<tz>MET</tz>", false), part("cf20", true, "", true)]
@@ -4061,7 +4176,7 @@ pub(crate) mod tests {
         };
         hmds.pending_historical.push(("cf16".to_string(), 7305));
         hmds.bar_requests.push(BarRequestInfo { req_id: 7305, format_date: 1, intraday: true, zone: None, start: 0, end: 0,
-            delayed: false, con_id: 0, reply_zone: String::new(), held: Vec::new() });
+            delayed: false, con_id: 0, reply_zone: String::new(), held: Vec::new(), timing: None });
         for msg in [part(false, "<tz>US/Eastern</tz>", "20261016-10:56:05"), part(true, "", "20261016-10:56:00")] {
             hmds.process_hmds_message(&msg, &mut conn, &shared, &None, &mut hb);
         }
@@ -4107,4 +4222,34 @@ pub(crate) mod tests {
         assert_eq!(hmds.pending_ticks[0].2, "AllLast");
     }
 
+    // The debug line of a held request splits its time (ibx#764): the
+    // server answered its first part at once and the bars 4.6 s later.
+    #[test]
+    fn a_bar_request_time_is_split() {
+        use std::time::Duration;
+        let asked = Instant::now();
+        let at = |ms: u64| asked + Duration::from_millis(ms);
+        let mut t = BarTiming { asked: Some(asked), sent: Some(at(113)), ..Default::default() };
+        t.part(at(222), at(222), 0);
+        t.part(at(4845), at(4847), 180);
+        t.part(at(4952), at(4955), 180);
+        let line = t.line(1037, at(4955), "answered");
+        assert_eq!(line, "historical req_id=1037 answered: client 113.0 ms (pacing, contract lookup), server 109.0 ms \
+            to its first part and 4732.0 ms to the first bars, transfer 110.0 ms, reading 5.0 ms of 3 parts, 360 bars, total 4955.0 ms");
+    }
+
+    // A bar request is timed from its arrival, also one looked up first.
+    #[test]
+    fn a_bar_request_is_known_through_its_lookup() {
+        use crate::types::ControlCommand as C;
+        let bars = C::FetchHistorical {
+            req_id: 7, con_id: 0, symbol: "AAPL".into(), sec_type: "STK".into(), exchange: "SMART".into(),
+            end_date_time: String::new(), duration: "1 D".into(), bar_size: "5 secs".into(), what_to_show: "TRADES".into(),
+            use_rth: false, keep_up_to_date: false, include_expired: false, format_date: 1,
+        };
+        let looked_up = C::ResolveContract { req_id: 7, lookup: Default::default(), request: Box::new(bars) };
+        assert_eq!(bar_request_id(&looked_up), Some(7));
+        assert_eq!(bar_request_id(&C::Unpaced(Box::new(looked_up))), Some(7));
+        assert_eq!(bar_request_id(&C::Ping), None);
+    }
 }

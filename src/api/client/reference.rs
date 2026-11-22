@@ -12,6 +12,19 @@ impl EClient {
     /// A request the reference refuses locally gets its error (321 or
     /// 10314) and no query; SCHEDULE asks for the trading schedule
     /// (ibx#430).
+    ///
+    /// Many requests in a row (ibx#764; paper, 22/11/2026, market
+    /// closed): bars under 30 seconds (5 and 15 seconds seen) are answered
+    /// at once for about the first 33 requests of a burst; the server then
+    /// holds the next ones, with no error, and gives their bars on its own
+    /// 6-second clock, about 25 requests a minute. Every such request of the
+    /// session counts, whatever the contract; contract details and bars of
+    /// 30 seconds or more do not, and about 5 minutes without one start the
+    /// count again. A contract given by `con_id` saves the lookup of its
+    /// description, about 0.1 s a request. With the debug log of
+    /// `ibx::engine::hot_loop::hmds` on, each request ends with one line
+    /// that splits its time: in the client, on the server, the transfer and
+    /// the reading.
     pub fn req_historical_data(
         &self, req_id: i64, contract: &Contract,
         end_date_time: &str, duration: &str, bar_size: &str,

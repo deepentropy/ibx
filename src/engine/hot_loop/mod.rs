@@ -2479,6 +2479,10 @@ impl HotLoop {
         use crate::engine::pacer::Queued;
         for cmd in rx.try_iter() {
             self.cmd_received += 1;
+            // When a bar request came, for its debug line (ibx#764).
+            if let Some(req_id) = hmds::bar_request_id(&cmd) {
+                self.hmds.note_asked(req_id);
+            }
             self.cmd_queue.push_back(Queued { ordinal: self.cmd_received, channel: true, cmd });
         }
 
@@ -2488,6 +2492,9 @@ impl HotLoop {
         let sender_dropped = match rx.try_recv() {
             Ok(cmd)  => {
                 self.cmd_received += 1;
+                if let Some(req_id) = hmds::bar_request_id(&cmd) {
+                    self.hmds.note_asked(req_id);
+                }
                 self.cmd_queue.push_back(Queued { ordinal: self.cmd_received, channel: true, cmd });
                 false
             }

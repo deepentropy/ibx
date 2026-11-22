@@ -10,6 +10,15 @@ use crate::client_core::ClientCore;
 #[pymethods]
 impl EClient {
     /// Request historical bar data.
+    ///
+    /// Many requests in a row: bars under 30 seconds are answered at once
+    /// for about the first 33 requests of a burst; the server then holds
+    /// the next ones, with no error, and gives their bars every 6 seconds,
+    /// about 25 requests a minute, for the whole session. Contract details
+    /// and bars of 30 seconds or more do not count; about 5 minutes without
+    /// such a request start the count again. A contract with its conId
+    /// saves a lookup of about 0.1 s. RUST_LOG=ibx::engine::hot_loop::hmds=debug
+    /// logs one line per request that splits its time (ibx#764).
     #[pyo3(signature = (req_id, contract, end_date_time, duration_str, bar_size_setting, what_to_show, use_rth, format_date=1, keep_up_to_date=false, chart_options=Vec::new()))]
     fn req_historical_data(
         &self,
