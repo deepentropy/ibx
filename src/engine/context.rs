@@ -104,6 +104,8 @@ pub(crate) const CANCELLED_ORDER_KEPT: std::time::Duration = std::time::Duration
 
 /// How long the reference keeps a filled order in its book (ibx#551).
 pub(crate) const FILLED_ORDER_KEPT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Filled orders kept for a print that comes after their Filled report (ibx#765).
+const AWAITING_PRINT_MAX: usize = 64;
 
 /// The table size of a `java.util.HashMap` that held `peak` entries: 16,
 /// doubled each time the entries pass three quarters of it; it never
@@ -228,6 +230,11 @@ pub struct Context {
     /// Orders gone for good since the order connection last looked: the
     /// records it keeps for them are dropped there (ibx#700).
     pub(crate) purged_orders: Vec<OrderId>,
+    /// Filled orders whose Filled report came before their last print
+    /// (ibx#765): the order as it was, the quantity not printed yet, and
+    /// whether its reports go to this client. The print that follows is a
+    /// fill of the order, not of an unknown one.
+    awaiting_print: std::collections::VecDeque<(OrderId, Order, Qty, bool)>,
     /// The server's order id (the id part of the ClOrdID) of each order
     /// held under another key, to that key: the orders of this session,
     /// kept under their API order id (ibx#466), and the orders of an
@@ -622,6 +629,7 @@ impl Context {
             modify_versions: HashMap::new(),
             last_clord: HashMap::new(),
             purged_orders: Vec::new(),
+            awaiting_print: std::collections::VecDeque::new(),
             recovered_keys: HashMap::new(),
             server_ids: HashMap::new(),
             recovered: std::collections::HashSet::new(),
@@ -1928,6 +1936,36 @@ impl Context {
         if self.finished_orders.insert(order_id, status).is_none() {
             self.finished_order_ids.push_back(order_id);
             self.trim_finished();
+        }
+    }
+
+    /// An order ended Filled with `unprinted` of its quantity still to be
+    /// printed: kept for the prints that follow (ibx#765). Bounded: the
+    /// oldest goes past `AWAITING_PRINT_MAX`.
+    pub(crate) fn keep_for_print(&mut self, order: Order, unprinted: Qty, delivered: bool) {
+        if unprinted <= 0 {
+            return;
+        }
+        self.awaiting_print.retain(|(id, ..)| *id != order.order_id);
+        self.awaiting_print.push_back((order.order_id, order, unprinted, delivered));
+        while self.awaiting_print.len() > AWAITING_PRINT_MAX {
+            self.awaiting_print.pop_front();
+        }
+    }
+
+    /// The order and its delivery of a print still awaited (ibx#765).
+    pub(crate) fn awaiting_print(&self, order_id: OrderId) -> Option<(Order, bool)> {
+        self.awaiting_print.iter().find(|(id, ..)| *id == order_id).map(|(_, o, _, d)| (*o, *d))
+    }
+
+    /// `qty` of an awaited print came: the order is no longer kept once
+    /// all of it has (ibx#765).
+    pub(crate) fn printed(&mut self, order_id: OrderId, qty: Qty) {
+        if let Some(i) = self.awaiting_print.iter().position(|(id, ..)| *id == order_id) {
+            self.awaiting_print[i].2 -= qty;
+            if self.awaiting_print[i].2 <= 0 {
+                self.awaiting_print.remove(i);
+            }
         }
     }
 

@@ -2194,7 +2194,11 @@ impl CcpState {
         // its client, else client 0; its errors and notices only its client.
         // Captured 01/10/2026: client 193
         // got nothing of the cancel of 8 orders of client 0.
-        let delivered = context.delivered(clord_id);
+        // A filled order whose last print comes after its Filled report
+        // (ibx#765): that print is a fill of the order, given to the
+        // client the order's reports went to.
+        let awaited = if context.order(clord_id).is_none() { context.awaiting_print(clord_id) } else { None };
+        let delivered = awaited.map_or_else(|| context.delivered(clord_id), |(_, d)| d);
         let owned = context.owned(clord_id);
 
         // Record the ClOrdID exactly as the server reports it so subsequent
@@ -2500,7 +2504,7 @@ impl CcpState {
         let mut had_fill = false;
         let mut untracked_out: Option<(api::Execution, crate::bridge::FillExec)> = None;
         if matches!(exec_type, "F" | "1" | "2") && last_shares > 0 {
-            let tracked = context.order(clord_id).copied();
+            let tracked = context.order(clord_id).copied().or(awaited.map(|(o, _)| o));
             // A duplicate execution is not booked again, but the report still
             // runs the order state below: status, order cache, and the end
             // of a terminal order (ibx#330). The id of an untracked fill is
@@ -2519,6 +2523,9 @@ impl CcpState {
                 log::warn!("Duplicate ExecID={}: fill not booked again", exec_id);
             } else if let Some(order) = tracked {
                 context.update_order_filled_fixed(clord_id, last_shares);
+                if awaited.is_some() {
+                    context.printed(clord_id, last_shares);
+                }
                 // Order totals ride on every fill report next to the print
                 // (ib-agent#192 C3): the callback's filled and average price
                 // are these, not the print (ibx#315).
@@ -3015,6 +3022,13 @@ impl CcpState {
                     filled_qty_fixed: order.filled_fixed,
                     timestamp_ns: context.now_ns(),
                 });
+                // Filled with less printed than the server counts: the
+                // last print follows this report (ibx#765, a scale order's
+                // last level on 23/11/2026).
+                if status == crate::types::OrderStatus::Filled {
+                    let cum_qty: Qty = parsed.get(&14).and_then(|s| parse_qty(s)).unwrap_or(0);
+                    context.keep_for_print(order, cum_qty - order.filled_fixed, delivered);
+                }
             }
             context.finish_order(clord_id, status);
             context.combos.finished(clord_id);
@@ -9384,6 +9398,40 @@ as a \"Professional\" client and are exempt from this restriction, see https://e
         assert!(context.order(90).is_none(), "the order is retired");
         assert_eq!(context.finished_status(90), Some(crate::types::OrderStatus::Filled));
         assert_eq!(shared.orders.drain_completed_orders().len(), 1);
+    }
+
+    // ibx#765: the Filled report of an order can come before its last print
+    // (a scale order's last level, 23/11/2026): the print that follows is a
+    // fill of the order, with its execution, not of an unknown order.
+    #[test]
+    fn a_last_print_after_the_filled_report_is_a_fill_of_the_order() {
+        let mut ccp = CcpState::new();
+        let mut context = Context::new();
+        let shared = SharedState::new();
+        let instrument = context.market.try_register(1005).unwrap();
+        context.insert_order(crate::types::Order::new(90, instrument, Side::Buy, 300, 15 * PRICE_SCALE, b'2', b'0', 0));
+        ccp.handle_exec_report(&fix::field_view(&fill_frame("e1", 200, "10", 200, "10", 100)), &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.drain_fills().len(), 1);
+
+        // The Filled report with no print, then the print.
+        ccp.handle_exec_report(&fix::field_view(&fill_frame("s-filled", 0, "0", 300, "10", 0)), &mut context, &shared, &None, "");
+        assert!(context.order(90).is_none(), "the order ends at its Filled report");
+        ccp.handle_exec_report(&fix::field_view(&fill_frame("e2", 100, "10", 300, "10", 0)), &mut context, &shared, &None, "");
+
+        let fills = shared.orders.drain_fills();
+        assert_eq!(fills.len(), 1, "the late print is a fill of the order");
+        assert_eq!(fills[0].order_id, 90);
+        assert_eq!(fills[0].qty_fixed, 100 * crate::types::QTY_SCALE);
+        assert_eq!(fills[0].remaining_fixed, 0);
+        assert_eq!(context.position_fixed(instrument), 300 * crate::types::QTY_SCALE);
+        assert!(shared.orders.drain_untracked_executions().is_empty(), "not an unknown order's fill");
+        assert_eq!(context.finished_status(90), Some(crate::types::OrderStatus::Filled));
+        assert!(context.awaiting_print(90).is_none(), "nothing kept once printed");
+
+        // A copy of the print is not booked again.
+        ccp.handle_exec_report(&fix::field_view(&fill_frame("e2", 100, "10", 300, "10", 0)), &mut context, &shared, &None, "");
+        assert!(shared.orders.drain_fills().is_empty());
+        assert_eq!(context.position_fixed(instrument), 300 * crate::types::QTY_SCALE);
     }
 
     // ibx#330: a final fill whose execution was already seen while the order
