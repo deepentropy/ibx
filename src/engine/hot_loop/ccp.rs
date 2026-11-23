@@ -2827,10 +2827,19 @@ impl CcpState {
             // (ibx#492); a report that leaves it out (a fill) keeps the
             // order's, as the reference shows the order it holds (ibx#546);
             // before any report, the order as sent (a refusal, ibx#605).
-            let use_price_mgmt_algo: i32 = match parsed.get(&8339) {
-                Some(v) => i32::from(*v == "1"),
-                None => shared.orders.get_order_info(clord_id).map_or(
-                    i32::from(context.price_mgmt_sent.contains(&clord_id)), |i| i.order.use_price_mgmt_algo),
+            // A new order of this session shows whether it went with the
+            // flag, whatever the server echoes: the reference showed 0 for
+            // an Adaptive stop order it sent without the flag, which the
+            // server echoed on (10.51, paper, regular hours, 23/11/2026,
+            // ibx#767).
+            let use_price_mgmt_algo: i32 = if context.price_mgmt_written.contains(&clord_id) {
+                i32::from(context.price_mgmt_sent.contains(&clord_id))
+            } else {
+                match parsed.get(&8339) {
+                    Some(v) => i32::from(*v == "1"),
+                    None => shared.orders.get_order_info(clord_id).map_or(
+                        i32::from(context.price_mgmt_sent.contains(&clord_id)), |i| i.order.use_price_mgmt_algo),
+                }
             };
             let trail_stop_price: f64 = parsed.get(&6117)
                 .and_then(|s| s.parse().ok())
@@ -9244,6 +9253,21 @@ as a \"Professional\" client and are exempt from this restriction, see https://e
         let entry = recovery_frame(900_012, 1_005);
         ccp.handle_exec_report(&fix::field_view(&entry), &mut context, &shared, &None, "");
         assert_eq!(shared.orders.get_order_info(900_012).expect("order info").order.use_price_mgmt_algo, 1);
+
+        // ibx#767: a new order of this session written without the flag
+        // shows 0 even when the server echoes it on (an Adaptive stop order,
+        // the reference 10.51, 23/11/2026); one written with it shows 1
+        // even on a report without it.
+        context.price_mgmt_written.insert(900_013);
+        let mut entry = recovery_frame(900_013, 1_005);
+        entry.insert(8339, "1".into());
+        ccp.handle_exec_report(&fix::field_view(&entry), &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.get_order_info(900_013).expect("order info").order.use_price_mgmt_algo, 0);
+        context.price_mgmt_written.insert(900_014);
+        context.price_mgmt_sent.insert(900_014);
+        let entry = recovery_frame(900_014, 1_005);
+        ccp.handle_exec_report(&fix::field_view(&entry), &mut context, &shared, &None, "");
+        assert_eq!(shared.orders.get_order_info(900_014).expect("order info").order.use_price_mgmt_algo, 1);
     }
 
     // ibx#605 (the reference 10.51, paper, regular hours, 19/10/2026):

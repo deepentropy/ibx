@@ -2741,10 +2741,15 @@ pub fn preview_compete_values(contract: &ApiContract, order: &mut ApiOrder) {
     }
 }
 
+/// The price management flag openOrder shows: the client's value when it
+/// gave one, even where the flag does not go out (the reference 10.51,
+/// paper, regular hours, 23/11/2026: a stock combo placed with it on and
+/// refused shows 1, ibx#767); else the order's reports.
 fn reported_price_mgmt(order: &mut ApiOrder, reported: Option<&ApiOrder>) {
     order.use_price_mgmt_algo = match reported {
+        _ if order.use_price_mgmt_algo != i32::MAX => i32::from(order.use_price_mgmt_algo != 0),
         Some(r) => r.use_price_mgmt_algo,
-        None => i32::from(order.use_price_mgmt_algo != i32::MAX && order.use_price_mgmt_algo != 0),
+        None => 0,
     };
 }
 
@@ -12273,6 +12278,27 @@ mod session_tests {
         view_test_report(&shared, 81, &order, false);
         let o = core.order_view(81, &shared, "Inactive").unwrap().order;
         assert_eq!((o.min_compete_size, o.compete_against_best_offset), (i32::MAX, f64::MAX));
+    }
+
+    // ibx#767 (the reference 10.51, paper, regular hours, 23/11/2026): the
+    // price management flag shown is the client's value when it gave one
+    // (a combo placed with it on and refused shows 1, its report 0), else
+    // the order's reports.
+    #[test]
+    fn the_price_management_flag_shown_is_the_clients_value_when_given() {
+        let reported = ApiOrder { use_price_mgmt_algo: 0, ..Default::default() };
+        let mut on = ApiOrder { use_price_mgmt_algo: 1, ..Default::default() };
+        reported_price_mgmt(&mut on, Some(&reported));
+        assert_eq!(on.use_price_mgmt_algo, 1);
+        let mut off = ApiOrder { use_price_mgmt_algo: 0, ..Default::default() };
+        reported_price_mgmt(&mut off, Some(&ApiOrder { use_price_mgmt_algo: 1, ..Default::default() }));
+        assert_eq!(off.use_price_mgmt_algo, 0);
+        let mut unset = ApiOrder { use_price_mgmt_algo: i32::MAX, ..Default::default() };
+        reported_price_mgmt(&mut unset, Some(&ApiOrder { use_price_mgmt_algo: 1, ..Default::default() }));
+        assert_eq!(unset.use_price_mgmt_algo, 1, "unset: the reports");
+        let mut unset = ApiOrder { use_price_mgmt_algo: i32::MAX, ..Default::default() };
+        reported_price_mgmt(&mut unset, None);
+        assert_eq!(unset.use_price_mgmt_algo, 0);
     }
 
     // ibx#751 (the reference 10.51, paper, 13/11/2026, regular hours): a

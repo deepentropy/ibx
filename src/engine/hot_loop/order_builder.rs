@@ -2615,11 +2615,12 @@ fn send_new_order(
     }
     // The price management flag goes out below on the same condition:
     // remembered for the order's reports that leave it out (ibx#605).
-    if context.price_mgmt_send && !crate::engine::price_mgmt::excluded_frame(fields)
-        && let Some(oid) = field(fields, 11).and_then(|v| v.split('.').next()).and_then(|i| i.parse::<crate::types::OrderId>().ok())
-    {
+    if let Some(oid) = field(fields, 11).and_then(|v| v.split('.').next()).and_then(|i| i.parse::<crate::types::OrderId>().ok()) {
         let key = context.key_of(oid);
-        context.price_mgmt_sent.insert(key);
+        context.price_mgmt_written.insert(key);
+        if context.price_mgmt_send && !crate::engine::price_mgmt::excluded_frame(fields) {
+            context.price_mgmt_sent.insert(key);
+        }
     }
     let context: &Context = context;
     let short_sale: Fields = match &context.short_sale_send {

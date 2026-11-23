@@ -269,6 +269,10 @@ pub struct Context {
     /// it out before any other (a refusal) shows the order as sent
     /// (ibx#605).
     pub(crate) price_mgmt_sent: std::collections::HashSet<OrderId>,
+    /// The new orders of this session whose flag was decided when they
+    /// were written (sent or not): their reports show that decision, not
+    /// the server's echo (ibx#767).
+    pub(crate) price_mgmt_written: std::collections::HashSet<OrderId>,
     /// Orders a report gave as held: their compete values show
     /// unset from then on (ibx#605).
     pub(crate) compete_cleared: std::collections::HashSet<OrderId>,
@@ -640,6 +644,7 @@ impl Context {
             scale_reset_reported: std::collections::HashSet::new(),
             scale_totals: HashMap::new(),
             price_mgmt_sent: std::collections::HashSet::new(),
+            price_mgmt_written: std::collections::HashSet::new(),
             compete_cleared: std::collections::HashSet::new(),
             reported_stop: HashMap::new(),
             rth_types: HashMap::new(),
