@@ -1,4 +1,4 @@
-# Python API Reference (v0.9.4)
+# Python API Reference (v0.9.5)
 
 *Auto-generated from source — do not edit.*
 
